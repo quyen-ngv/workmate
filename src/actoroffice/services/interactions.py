@@ -1,0 +1,194 @@
+"""Human in the loop: approvals and questions.
+
+Two waiting modes:
+- short wait: a live run awaits `wait()` for up to N seconds (the user is around);
+- long wait: the run parks; when the user answers, a one-time grant is stored and the
+  assignee is woken. On resume the CLI re-issues the deferred tool call and the policy
+  hook consumes the grant (allow or deny) instead of asking again.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+from typing import Any
+
+from actoroffice.core.events import EventBus
+from actoroffice.domain.errors import Conflict, NotFound
+from actoroffice.domain.ids import new_id, utcnow
+from actoroffice.domain.run import WakeSource
+from actoroffice.domain.work import Interaction, InteractionKind, InteractionStatus
+from actoroffice.store import Database
+
+from .wakes import WakeService
+
+
+def input_hash(tool: str, args: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps([tool, args], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+class InteractionService:
+    def __init__(self, db: Database, wakes: WakeService, bus: EventBus) -> None:
+        self.db = db
+        self.wakes = wakes
+        self.bus = bus
+        self._waiters: dict[str, asyncio.Event] = {}
+
+    async def create(
+        self,
+        kind: InteractionKind,
+        payload: dict[str, Any],
+        *,
+        actor_id: str | None = None,
+        ticket_id: int | None = None,
+        run_id: str | None = None,
+    ) -> Interaction:
+        item = Interaction(
+            id=new_id("ix"), kind=kind, actor_id=actor_id, ticket_id=ticket_id, run_id=run_id, payload=payload, created_at=utcnow()
+        )
+        await self.db.execute(
+            "INSERT INTO interactions(id, kind, actor_id, ticket_id, run_id, payload_json, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
+            (item.id, kind.value, actor_id, ticket_id, run_id, json.dumps(payload, ensure_ascii=False), item.created_at),
+        )
+        self._waiters[item.id] = asyncio.Event()
+        self.bus.publish("interaction.created", interaction=item.model_dump())
+        return item
+
+    async def get(self, interaction_id: str) -> Interaction:
+        row = await self.db.fetchone("SELECT * FROM interactions WHERE id = ?", (interaction_id,))
+        if not row:
+            raise NotFound(f"Interaction {interaction_id} not found")
+        return _interaction(row)
+
+    async def pending(self, *, ticket_id: int | None = None, run_id: str | None = None) -> list[Interaction]:
+        sql, params = "SELECT * FROM interactions WHERE status = 'pending'", []
+        if ticket_id is not None:
+            sql += " AND ticket_id = ?"
+            params.append(ticket_id)
+        if run_id is not None:
+            sql += " AND run_id = ?"
+            params.append(run_id)
+        rows = await self.db.fetchall(sql + " ORDER BY created_at", params)
+        return [_interaction(r) for r in rows]
+
+    async def colleague_questions(self, conversation_id: str) -> list[Interaction]:
+        rows = await self.db.fetchall(
+            "SELECT * FROM interactions WHERE kind = 'ask_colleague' AND status = 'pending' "
+            "AND json_extract(payload_json, '$.conversation_id') = ? ORDER BY created_at",
+            (conversation_id,),
+        )
+        return [_interaction(r) for r in rows]
+
+    async def for_run(self, run_id: str) -> list[Interaction]:
+        rows = await self.db.fetchall("SELECT * FROM interactions WHERE run_id = ? ORDER BY created_at", (run_id,))
+        return [_interaction(r) for r in rows]
+
+    async def wait(self, interaction_id: str, timeout: float) -> Interaction | None:
+        """Wait for an answer while the run is live. None on timeout."""
+        event = self._waiters.setdefault(interaction_id, asyncio.Event())
+        try:
+            await asyncio.wait_for(event.wait(), timeout)
+        except TimeoutError:
+            return None
+        return await self.get(interaction_id)
+
+    async def resolve(self, interaction_id: str, response: dict[str, Any], *, by: str) -> Interaction:
+        item = await self.get(interaction_id)
+        now = utcnow()
+        async with self.db.tx() as tx:
+            cur = await tx.execute(
+                "UPDATE interactions SET status = 'answered', response_json = ?, resolved_by = ?, resolved_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (json.dumps(response, ensure_ascii=False), by, now, interaction_id),
+            )
+            if cur.rowcount != 1:
+                raise Conflict(f"Interaction {interaction_id} is already {item.status.value}")
+            if item.kind == InteractionKind.APPROVE_TOOL and item.actor_id:
+                decision = "allow" if response.get("approved") else "deny"
+                await tx.execute(
+                    "INSERT INTO approval_grants(actor_id, ticket_id, tool, input_hash, decision, interaction_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (item.actor_id, item.ticket_id, item.payload["tool"], item.payload["input_hash"], decision, item.id, now),
+                )
+            run = await tx.fetchone("SELECT status FROM runs WHERE id = ?", (item.run_id,)) if item.run_id else None
+            # The run that asked is gone (parked or finished): wake the actor to continue.
+            # A confirmed ticket proposal wakes its assignee through the new ticket instead.
+            if item.actor_id and item.kind != InteractionKind.CONFIRM_TICKET and (run is None or run["status"] != "running"):
+                await self.wakes.enqueue(
+                    item.actor_id,
+                    WakeSource.INTERACTION,
+                    ticket_id=item.ticket_id,
+                    payload={"interaction_id": item.id},
+                    tx=tx,
+                )
+        resolved = await self.get(interaction_id)
+        if waiter := self._waiters.pop(interaction_id, None):
+            waiter.set()
+        self.bus.publish("interaction.resolved", interaction=resolved.model_dump())
+        return resolved
+
+    async def set_response(self, interaction_id: str, response: dict[str, Any]) -> Interaction:
+        """Add details to an already resolved interaction (e.g. the key of the ticket it created)."""
+        await self.db.execute(
+            "UPDATE interactions SET response_json = ? WHERE id = ?", (json.dumps(response, ensure_ascii=False), interaction_id)
+        )
+        item = await self.get(interaction_id)
+        self.bus.publish("interaction.resolved", interaction=item.model_dump())
+        return item
+
+    async def consume_grant(self, actor_id: str, ticket_id: int | None, tool: str, args: dict[str, Any]) -> str | None:
+        """Return 'allow' / 'deny' if a one-time human decision exists for exactly this call."""
+        digest = input_hash(tool, args)
+        async with self.db.tx() as tx:
+            row = await tx.fetchone(
+                "SELECT id, decision FROM approval_grants WHERE actor_id = ? AND ticket_id IS ? AND tool = ? "
+                "AND input_hash = ? AND used = 0 ORDER BY id LIMIT 1",
+                (actor_id, ticket_id, tool, digest),
+            )
+            if not row:
+                return None
+            await tx.execute("UPDATE approval_grants SET used = 1 WHERE id = ?", (row["id"],))
+        return str(row["decision"])
+
+    async def mark_parked(self, interaction_id: str) -> None:
+        """The asking run stopped waiting; the answer will arrive through a wake instead."""
+        await self.db.execute(
+            "UPDATE interactions SET payload_json = json_set(payload_json, '$.parked', json('true')) WHERE id = ?",
+            (interaction_id,),
+        )
+
+    async def cancel(self, interaction_id: str) -> Interaction | None:
+        """Withdraw a pending card (e.g. a ticket proposal replaced by a newer one). None when it was not pending."""
+        cur = await self.db.execute(
+            "UPDATE interactions SET status = 'cancelled', resolved_at = ? WHERE id = ? AND status = 'pending'", (utcnow(), interaction_id)
+        )
+        if cur.rowcount != 1:
+            return None
+        item = await self.get(interaction_id)
+        self.bus.publish("interaction.resolved", interaction=item.model_dump())
+        return item
+
+    async def cancel_for_run(self, run_id: str) -> None:
+        await self.db.execute(
+            "UPDATE interactions SET status = 'cancelled', resolved_at = ? WHERE run_id = ? AND status = 'pending' "
+            "AND kind = 'approve_tool' AND json_extract(payload_json, '$.parked') IS NULL",
+            (utcnow(), run_id),
+        )
+
+
+def _interaction(row: dict[str, Any]) -> Interaction:
+    return Interaction(
+        id=row["id"],
+        kind=InteractionKind(row["kind"]),
+        actor_id=row["actor_id"],
+        ticket_id=row["ticket_id"],
+        run_id=row["run_id"],
+        payload=json.loads(row["payload_json"]),
+        status=InteractionStatus(row["status"]),
+        response=json.loads(row["response_json"]) if row["response_json"] else None,
+        resolved_by=row["resolved_by"],
+        created_at=row["created_at"],
+        resolved_at=row["resolved_at"],
+    )

@@ -1,0 +1,38 @@
+[project]
+name = "actoroffice"
+version = "0.1.0"
+description = "A chat-first office of AI actors (BA, DEV, QA, writers, collectors…) that work through tickets and turn repetitive work into code."
+readme = "README.md"
+authors = [
+    { name = "lux", email = "luxofons@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "claude-agent-sdk>=0.2.165",
+    "fastapi>=0.143.0",
+    "httpx>=0.28.1",
+    "psutil>=7.2.2",
+    "pydantic>=2.14.0",
+    "pyyaml>=6.0.3",
+    "uvicorn>=0.54.0",
+    "websockets>=17.2",
+]
+
+[project.scripts]
+actoroffice = "actoroffice.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.8.19,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-timeout>=2.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

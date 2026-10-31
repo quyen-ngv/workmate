@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "actoroffice",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "actoroffice", "serve", "--no-browser"],
+      "port": 8765,
+      "url": "http://localhost:8765"
+    }
+  ]
+}

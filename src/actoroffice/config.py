@@ -24,6 +24,12 @@ class Settings(BaseModel):
     max_unattended_agent_messages: int = 8  # actor↔actor chat messages in a row before pausing for the user
     web_host: str = "127.0.0.1"
     web_port: int = 8765
+    # Team copilot
+    ai_name: str = "Copilot"  # the single AI engineer every team works with
+    ai_model: str | None = None  # None = default_model; "kiro" / "kiro:<id>" runs it on Kiro CLI
+    jira_poll_s: float = 60  # Jira mirror interval in seconds (0 = off)
+    stall_after_s: float = 900  # watchdog: a run with no event for this long is reported as stalled
+    slow_command_s: float = 300  # watchdog: one command running longer than this is reported as slow
 
     @property
     def db_path(self) -> Path:
@@ -32,6 +38,11 @@ class Settings(BaseModel):
     @property
     def workspaces_dir(self) -> Path:
         return self.data_dir / "ws"
+
+    @property
+    def runs_dir(self) -> Path:
+        """Large run outputs (diffs, command output, check logs) referenced from run events."""
+        return self.data_dir / "runs"
 
     @property
     def config_path(self) -> Path:

@@ -10,6 +10,7 @@ from actoroffice.core.schedule import from_iso
 from actoroffice.core.stats import merge
 from actoroffice.domain.ids import utcnow
 from actoroffice.domain.run import Run, RunKind, RunStatus, Usage
+from actoroffice.engine.activity import ActivityTracker
 from actoroffice.security.redact import Redactor
 from actoroffice.store import Database
 
@@ -21,6 +22,7 @@ class RunService:
         self.db = db
         self.bus = bus
         self.redact = redact
+        self.activity = ActivityTracker()
 
     async def start(self, run: Run) -> Run:
         run.status = RunStatus.RUNNING
@@ -61,6 +63,7 @@ class RunService:
                 run_id,
             ),
         )
+        self.activity.forget(run_id)
         run = await self.get(run_id)
         self.bus.publish("run.finished", run_id=run_id, status=status.value, error=error, run=run.model_dump() if run else None)
 
@@ -197,17 +200,60 @@ class RunService:
         return row["started_at"] if row else None
 
     async def event(self, run_id: str, kind: str, payload: dict[str, Any]) -> None:
+        """Store one run event with its per-run sequence number and its normalized activity line (if any)."""
         text = self.redact(json.dumps(payload, ensure_ascii=False, default=str))
         if len(text) > EVENT_TEXT_LIMIT:
             text = json.dumps({"truncated": text[:EVENT_TEXT_LIMIT]}, ensure_ascii=False)
-        await self.db.execute(
-            "INSERT INTO run_events(run_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)", (run_id, kind, text, utcnow())
+        try:
+            activity = self.activity.classify(run_id, kind, payload)
+        except Exception:  # an odd payload must never break the run
+            activity = None
+        act = self.redact(activity.model_dump_json()) if activity else None
+        now = utcnow()
+        async with self.db.tx() as tx:
+            row = await tx.fetchone("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM run_events WHERE run_id = ?", (run_id,))
+            seq = int(row["seq"]) if row else 1
+            await tx.execute(
+                "INSERT INTO run_events(run_id, kind, payload_json, seq, activity_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (run_id, kind, text, seq, act, now),
+            )
+        self.bus.publish(
+            "run.event", run_id=run_id, seq=seq, kind=kind, payload=json.loads(text), activity=json.loads(act) if act else None, at=now
         )
-        self.bus.publish("run.event", run_id=run_id, kind=kind, payload=json.loads(text))
 
-    async def events(self, run_id: str) -> list[dict[str, Any]]:
-        rows = await self.db.fetchall("SELECT kind, payload_json, created_at FROM run_events WHERE run_id = ? ORDER BY id", (run_id,))
-        return [{"kind": r["kind"], "payload": json.loads(r["payload_json"]), "at": r["created_at"]} for r in rows]
+    async def events(self, run_id: str, *, since_seq: int = 0) -> list[dict[str, Any]]:
+        rows = await self.db.fetchall(
+            "SELECT seq, kind, payload_json, activity_json, created_at FROM run_events WHERE run_id = ? AND COALESCE(seq, id) > ? "
+            "ORDER BY COALESCE(seq, id)",
+            (run_id, since_seq),
+        )
+        return [
+            {
+                "seq": r["seq"],
+                "kind": r["kind"],
+                "payload": json.loads(r["payload_json"]),
+                "activity": json.loads(r["activity_json"]) if r["activity_json"] else None,
+                "at": r["created_at"],
+            }
+            for r in rows
+        ]
+
+    async def activities(self, run_id: str, *, since_seq: int = 0, limit: int = 500) -> list[dict[str, Any]]:
+        """Only the normalized activity lines of a run (what people see), oldest first."""
+        rows = await self.db.fetchall(
+            "SELECT seq, activity_json, created_at FROM run_events WHERE run_id = ? AND activity_json IS NOT NULL AND seq > ? "
+            "ORDER BY seq LIMIT ?",
+            (run_id, since_seq, limit),
+        )
+        return [{"seq": r["seq"], "at": r["created_at"], **json.loads(r["activity_json"])} for r in rows]
+
+    async def last_activity(self, run_id: str) -> dict[str, Any] | None:
+        row = await self.db.fetchone(
+            "SELECT seq, activity_json, created_at FROM run_events WHERE run_id = ? AND activity_json IS NOT NULL "
+            "AND json_extract(activity_json, '$.kind') NOT IN ('thinking', 'usage') ORDER BY seq DESC LIMIT 1",
+            (run_id,),
+        )
+        return {"seq": row["seq"], "at": row["created_at"], **json.loads(row["activity_json"])} if row else None
 
     # ---- sessions: one per (actor, ticket) or (actor, conversation) ------------------------
 

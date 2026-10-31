@@ -200,6 +200,18 @@ class TicketService:
         self.bus.publish("ticket.change", source=origin.key, summary=summary, by=by, result=result)
         return result
 
+    async def last_comment_id(self, ticket_id: int, author_kind: str) -> int:
+        row = await self.db.fetchone(
+            "SELECT COALESCE(MAX(id), 0) AS id FROM comments WHERE ticket_id = ? AND author_kind = ?", (ticket_id, author_kind)
+        )
+        return int(row["id"]) if row else 0
+
+    async def comments_after(self, ticket_id: int, author_kind: str, after_id: int) -> list[Comment]:
+        rows = await self.db.fetchall(
+            "SELECT * FROM comments WHERE ticket_id = ? AND author_kind = ? AND id > ? ORDER BY id", (ticket_id, author_kind, after_id)
+        )
+        return [Comment.model_validate(r) for r in rows]
+
     async def changes_after(self, ticket_id: int, after_id: int) -> list[Comment]:
         rows = await self.db.fetchall(
             "SELECT * FROM comments WHERE ticket_id = ? AND author_kind = 'change' AND id > ? ORDER BY id", (ticket_id, after_id)

@@ -35,11 +35,23 @@ class OfficeGate:
     parked_interaction: str | None = None
     asked: list[str] = field(default_factory=list)
     seen_change_id: int = 0  # requirement changes already shown to this run
+    seen_steer_id: int = 0  # directions from people already shown to this run
     stats: RunStats = field(default_factory=RunStats)
 
     async def before_tool(self, tool: str, args: dict[str, Any], tool_use_id: str | None) -> GateResult:
         office = self.office
         if self.ticket_id is not None:
+            steers = await office.tickets.comments_after(self.ticket_id, "steer", self.seen_steer_id)
+            if steers:
+                # A person steered the work while this run was going: stop this one call and pass the direction on.
+                self.seen_steer_id = steers[-1].id
+                notes = "\n".join(f"- {c.body}" for c in steers)
+                await self._audit(tool, tool, Risk.READ, "interrupted", "steer")
+                return GateResult(
+                    GateDecision.DENY,
+                    f"NEW DIRECTION from the team while you were working. This tool call was NOT run.\n{notes}\n"
+                    "Adjust your plan to it, then continue.",
+                )
             # A requirement changed while this run was working: stop the next call and say so, once. The deny
             # reason is how a running agent hears about it without waiting for the next wake.
             changes = await office.tickets.changes_after(self.ticket_id, self.seen_change_id)

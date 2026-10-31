@@ -13,7 +13,8 @@ import yaml
 from actoroffice.config import Settings
 from actoroffice.core.events import EventBus
 from actoroffice.domain.chat import MessageKind
-from actoroffice.domain.errors import PolicyDenied
+from actoroffice.domain.errors import NotFound, PolicyDenied
+from actoroffice.domain.team import LOCAL_OWNER_ID
 from actoroffice.domain.ids import new_id
 from actoroffice.domain.org import Actor, Position
 from actoroffice.domain.work import Interaction, InteractionKind, Priority, ProjectAccess
@@ -38,6 +39,8 @@ from actoroffice.services.notices import ChatNotifier
 from actoroffice.services.projects import ProjectService
 from actoroffice.domain.knowledge import SkillRef, SkillScope
 from actoroffice.services.skills import SkillService, split_front_matter
+from actoroffice.services.stages import StageService
+from actoroffice.services.teams import TeamService
 from actoroffice.services.org import OrgService
 from actoroffice.services.runs import RunService
 from actoroffice.services.tickets import TicketService
@@ -75,6 +78,8 @@ class Office:
         self.automations = AutomationService(self, settings.data_dir / "automations")
         self.merges = MergeService(self)
         self.workspaces = WorkspaceManager(settings.workspaces_dir)
+        self.teams = TeamService(self.db, self.bus)
+        self.stages = StageService(self)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),
             KiroAcpRuntime(cli_path=settings.kiro_cli_path, engine=settings.kiro_engine),
@@ -89,6 +94,7 @@ class Office:
         await self.db.open()
         default = await self.projects.ensure_default()
         self.chat.default_project_id = default.id
+        await self.teams.ensure_local_owner()
 
     async def start(self, *, schedule: bool = True) -> None:
         """Open the store, recover orphaned runs, mirror events into chat and start scheduling."""
@@ -189,6 +195,14 @@ class Office:
             return await self._answer_automation(item, response, by=by)
         if item.kind == InteractionKind.APPROVE_ACCESS:
             return await self._answer_access(item, response, by=by)
+        if item.kind == InteractionKind.APPROVE_STAGE:
+            return await self.stages.answer_gate(item, response, by=by)
+        if item.kind == InteractionKind.QUESTION and item.payload.get("roles") and by != LOCAL_OWNER_ID:
+            ticket = await self.tickets.get(item.ticket_id) if item.ticket_id else None
+            if not await self.teams.can_act(by, ticket, list(item.payload["roles"])):
+                raise PolicyDenied(f"Câu hỏi này dành cho vai {item.payload.get('roles_label') or ', '.join(item.payload['roles'])}")
+            name = (await self.teams.get_user(by)).name if by != LOCAL_OWNER_ID else "Owner"
+            response = {**response, "answered_by": name}
         if item.kind != InteractionKind.CONFIRM_TICKET:
             return await self.interactions.resolve(interaction_id, response, by=by)
         p = item.payload
@@ -219,6 +233,46 @@ class Office:
             )
         return resolved
 
+    async def guidelines_for(self, ticket: Any, project: Any, stage: str) -> list[str]:
+        """Team guidelines in effect for a stage (rules service, P2). Empty until rules exist."""
+        rules = getattr(self, "rules", None)
+        if rules is None:
+            return []
+        compiled = await rules.compile(ticket=ticket, project=project, stage=stage)
+        return compiled.guideline_lines()
+
+    async def ensure_ai(self) -> Actor:
+        """The single AI engineer every team works with (created on first need from the engineer template)."""
+        actor = await self.org.find_actor(self.settings.ai_name)
+        if actor is not None:
+            return actor
+        position = await self.org.find_position("engineer")
+        if position is None:
+            folder = resources.files("actoroffice.templates.positions")
+            data = yaml.safe_load((folder / "engineer.yaml").read_text(encoding="utf-8"))
+            position = await self.org.create_position(Position(id=new_id("pos"), **data))
+        actor = await self.org.hire(position.id, self.settings.ai_name, emoji="🤖", model=self.settings.ai_model)
+        self.bus.publish("team.changed")
+        return actor
+
+    async def post_user_message(self, conversation_id: str, body: str, *, user_id: str = LOCAL_OWNER_ID) -> Any:
+        """A person writes in a chat. In a ticket's own room (a ticket running through stages), the message is also
+        a comment on the ticket: the AI hears it in its stage session (running: at its next wake)."""
+        conv = await self.chat.get(conversation_id)
+        ticket = None
+        if conv.ticket_id:
+            try:
+                ticket = await self.tickets.get(conv.ticket_id)
+            except NotFound:
+                ticket = None
+        if ticket is None or not ticket.stage:
+            return await self.chat.post_user(conversation_id, body, user_id=user_id)
+        message = await self.chat.post_user(conversation_id, body, user_id=user_id, wake=False)
+        name = "Owner" if user_id == LOCAL_OWNER_ID else (await self.teams.get_user(user_id)).name
+        await self.tickets.add_comment(ticket.id, body, author_kind="user", author_id=name)
+        self.scheduler.kick()
+        return message
+
     async def _answer_automation(self, item: Interaction, response: dict[str, Any], *, by: str) -> Interaction:
         approved = bool(response.get("approved"))
         if approved:
@@ -236,6 +290,8 @@ class Office:
             await self.chat.post_system(conv, text)
         if approved and response.get("run_now", True) and automation.id not in self.automations.running_ids:
             self.automations.start(automation, "manual")
+        if approved and automation.ticket_id:
+            await self.stages.external_passed(automation.ticket_id, "script", by=by, note=f"automation {automation.name} đã được duyệt")
         return resolved
 
     async def install_default_positions(self, *, update: bool = False, skills: bool = True) -> list[Position]:

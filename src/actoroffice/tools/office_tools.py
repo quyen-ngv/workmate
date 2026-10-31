@@ -74,6 +74,9 @@ async def ticket_set_status(args: dict[str, Any], ctx: ToolCtx) -> str:
         raise ToolError("status must be one of: done, in_review, blocked, todo")
     if not summary:
         raise ToolError("comment is required: say what was done, or what you are waiting for and from whom.")
+    current = await office.tickets.get(ticket_id)
+    if current.stage and status == S.DONE:
+        raise ToolError("This ticket runs through stages: finish the stage with stage_complete (people pass the gates).")
     if status == S.DONE:
         open_children = [c.key for c in await office.tickets.list(parent_id=ticket_id) if c.status not in (S.DONE, S.CANCELLED)]
         if open_children:

@@ -18,9 +18,10 @@ from actoroffice.tools.chat_tools import CHAT_TOOLS
 from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
 from actoroffice.tools.office_tools import OFFICE_TOOLS
 from actoroffice.tools.registry import BoundTool, ToolCtx
+from actoroffice.tools.stage_tools import STAGE_TOOLS
 from actoroffice.tools.work_tools import CHAT_WORK_TOOLS, WORK_TOOLS
 
-from . import context
+from . import context, prompt_pack
 from .gate import OfficeGate
 
 if TYPE_CHECKING:
@@ -58,7 +59,12 @@ class Executor:
             project = await office.projects.get(ticket.project_id) if ticket.project_id else None
             root = await office.tickets.root_of(ticket.id)
             ws = await office.workspaces.realize(ticket, project, position, root)
+            stage_run = await office.stages.ensure_run(ticket) if ticket.stage else None
             session_key = ticket_session_key(actor.id, ticket.id)
+            if stage_run is not None:
+                # One session per stage attempt: a new stage (or a retry) starts fresh from the dossier.
+                session_key += f":{stage_run.stage}:{stage_run.attempt}"
+                await office.db.execute("UPDATE runs SET stage_run_id = ? WHERE id = ?", (stage_run.id, run_id))
             resume = await office.runs.get_session(session_key, str(ws.path))
             changes = await office.tickets.changes_after(ticket.id, 0)
             gate = OfficeGate(
@@ -71,56 +77,77 @@ class Executor:
                 ticket_key=ticket.key,
                 read_dirs=ws.read_dirs,
                 seen_change_id=changes[-1].id if changes else 0,
+                seen_steer_id=await office.tickets.last_comment_id(ticket.id, "steer"),
             )
-            prompt = context.ticket_prompt(
-                ticket,
-                wake,
-                new_comments=await self._new_comments(actor.id, actor.name, ticket.id, run_id),
-                answered=await self._answered(wake),
-                resumed=resume is not None,
-                project=context.project_line(project, str(ws.path)),
-                changes=changes,
-                root=root if root.id != ticket.id else None,
-                blockers=await office.tickets.open_blockers(ticket.id),
-            )
-            spec = TurnSpec(
-                run_id=run_id,
-                prompt=prompt,
-                cwd=ws.path,
-                system_prompt=context.system_prompt(
+            new_comments = await self._new_comments(actor.id, actor.name, ticket.id, run_id)
+            answered = await self._answered(wake)
+            tools = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS
+            if stage_run is not None:
+                pack = await self._stage_prompt(
+                    ticket, stage_run, actor, project, str(ws.path), wake, resume is not None, answered, new_comments, changes
+                )
+                system, prompt = pack.system, pack.turn
+                tools = tools + STAGE_TOOLS
+                model = office.settings.ai_model or actor.model or position.model or office.settings.default_model
+                if ticket.team_id:
+                    team = await office.teams.get_team(ticket.team_id)
+                    model = team.settings.model or model
+            else:
+                prompt = context.ticket_prompt(
+                    ticket,
+                    wake,
+                    new_comments=new_comments,
+                    answered=answered,
+                    resumed=resume is not None,
+                    project=context.project_line(project, str(ws.path)),
+                    changes=changes,
+                    root=root if root.id != ticket.id else None,
+                    blockers=await office.tickets.open_blockers(ticket.id),
+                )
+                system = context.system_prompt(
                     position,
                     actor,
                     language=office.settings.language,
                     skills=office.skills.for_actor(actor, position),
                     memories=await office.memory.context_for(actor, f"{ticket.title} {ticket.description}"),
-                ),
-                model=actor.model or position.model or office.settings.default_model,
+                )
+                model = actor.model or position.model or office.settings.default_model
+            spec = TurnSpec(
+                run_id=run_id,
+                prompt=prompt,
+                cwd=ws.path,
+                system_prompt=system,
+                model=model,
                 tools=position.tools,
                 coding_preset=position.prompt_preset == "claude_code",
                 resume_session_id=resume,
                 internal_tools=[
-                    BoundTool(t, ToolCtx(office, actor, position, run_id, ticket_id=ticket.id, workspace=ws.path))
-                    for t in OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS
+                    BoundTool(t, ToolCtx(office, actor, position, run_id, ticket_id=ticket.id, workspace=ws.path)) for t in tools
                 ],
                 add_dirs=ws.read_dirs,
                 max_turns=position.policy.max_turns,
                 hook_timeout_s=office.settings.approval_wait_s + 60,
                 env=self._env(actor, position),
             )
-            await office.runs.event(run_id, "prompt", {"text": prompt, "resume": bool(resume), "cwd": str(ws.path)})
+            await office.runs.event(
+                run_id, "prompt", {"text": prompt, "resume": bool(resume), "cwd": str(ws.path), "stage": ticket.stage}
+            )
 
             result = await self._turn(spec, gate)
             for _ in range(office.settings.corrective_turns):
                 if not await self._needs_disposition(result, ticket.id, run_id):
                     break
-                spec.prompt = context.disposition_reminder(ticket.key)
+                reminder = prompt_pack.disposition_reminder if stage_run is not None else context.disposition_reminder
+                spec.prompt = reminder(ticket.key)
                 spec.resume_session_id = result.session_id
                 usage, cost = _add(usage, cost, result)
                 result = await self._turn(spec, gate)
             usage, cost = _add(usage, cost, result)
             session_id = result.session_id
-            if session_id:
+            if session_id and run_id not in office.stages.finished_runs:
                 await office.runs.save_session(session_key, actor.id, session_id, str(ws.path))
+            if stage_run is not None:
+                await office.stages.add_usage(stage_run.id, usage, cost, session_id)
             status, error = await self._settle(result, ticket, run_id, actor.id, gate)
         except OfficeError as exc:
             error = str(exc)
@@ -150,6 +177,50 @@ class Executor:
             if gate is not None and status != RunStatus.PARKED:
                 await self._drop_seen_changes(actor.id, ticket.id, gate.seen_change_id)
         return status
+
+    async def _stage_prompt(
+        self,
+        ticket: Ticket,
+        stage_run: Any,
+        actor: Any,
+        project: Any,
+        cwd: str,
+        wake: WakeRequest,
+        resumed: bool,
+        answered: list,
+        new_comments: list,
+        changes: list,
+    ) -> prompt_pack.StagePrompt:
+        office = self.office
+        template = await office.stages.template_of(ticket)
+        stage = await office.stages.stage_def(ticket)
+        team = await office.teams.get_team(ticket.team_id) if ticket.team_id else None
+        people = await office.teams.participants(ticket.id)
+        if not people and team is not None:
+            people = await office.teams.members(team.id)
+        dossier = await office.tickets.get_document(ticket.id, "dossier")
+        position = await office.org.get_position(actor.position_id)
+        guidelines = await office.guidelines_for(ticket, project, stage.id)
+        return prompt_pack.build(
+            actor=actor,
+            ticket=ticket,
+            template=template,
+            stage=stage,
+            stage_run=stage_run,
+            language=office.settings.language,
+            team_name=team.name if team else None,
+            people=people,
+            project_line=context.project_line(project, cwd),
+            dossier=dossier.body if dossier else "",
+            guidelines=guidelines,
+            memories=await office.memory.context_for(actor, f"{ticket.title} {ticket.description}"),
+            skills=office.skills.for_actor(actor, position),
+            wake=wake,
+            resumed=resumed,
+            answered=answered,
+            new_comments=new_comments,
+            changes=changes,
+        )
 
     async def _drop_seen_changes(self, actor_id: str, ticket_id: int, seen: int) -> None:
         """A change delivered mid-run (gate interrupt) needs no second wake."""
@@ -304,9 +375,11 @@ class Executor:
         return result
 
     async def _needs_disposition(self, result: TurnResult, ticket_id: int, run_id: str) -> bool:
-        if result.status != TurnStatus.COMPLETED:
+        if result.status != TurnStatus.COMPLETED or run_id in self.office.stages.finished_runs:
             return False
         ticket = await self.office.tickets.get(ticket_id)
+        if ticket.stage and any(i.kind == InteractionKind.QUESTION for i in await self.office.interactions.pending(run_id=run_id)):
+            return False  # waiting for an answer: the office parks the ticket
         return ticket.status == S.IN_PROGRESS and ticket.checkout_run_id == run_id
 
     async def _settle(
@@ -359,8 +432,9 @@ class Executor:
             await office.tickets.transition(
                 ticket.id, S.IN_REVIEW, by="office", run_id=run_id, comment="Lượt chạy kết thúc mà chưa chốt trạng thái; bạn xem giúp."
             )
-        elif current.status == S.TODO:
+        elif current.status == S.TODO and run_id not in office.stages.finished_runs:
             await self._continue_later(actor_id, ticket.id, run_id)
+        office.stages.finished_runs.discard(run_id)
         return RunStatus.SUCCEEDED, None
 
     async def _streak(self, run_id: str) -> int:

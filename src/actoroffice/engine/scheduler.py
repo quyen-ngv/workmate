@@ -152,6 +152,8 @@ class Scheduler:
         if ticket.status in CLOSED or ticket.assignee_actor_id != wake.actor_id:
             await office.wakes.drop(wake.id, f"ticket is {ticket.status.value} / reassigned")
             return False
+        if ticket.paused:
+            return False  # stays pending until someone resumes the ticket
         return True
 
     async def _execute(self, wake: WakeRequest, run_id: str, kind: str) -> RunStatus:

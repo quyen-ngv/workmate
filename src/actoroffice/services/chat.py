@@ -178,12 +178,15 @@ class ChatService:
             )
         return [_message(r) for r in rows]
 
-    async def post_user(self, conversation_id: str, body: str) -> Message:
+    async def post_user(self, conversation_id: str, body: str, *, user_id: str = USER_ID, wake: bool = True) -> Message:
+        """A person writes. `user_id` is "user" for the local owner, or a registered person's id (team mode)."""
         conv = await self.get(conversation_id)
         mentioned = await self._mentions(conv, body, author_actor=None)
-        if conv.kind == ConversationKind.GROUP:
+        if conv.kind == ConversationKind.GROUP and wake:
             await self._add_mentioned_outsiders(conv, mentioned, by="Bạn")
-        msg = await self._insert(conv.id, "user", USER_ID, body, mentions=mentioned)
+        msg = await self._insert(conv.id, "user", user_id, body, mentions=mentioned)
+        if not wake:
+            return msg
         targets = conv.actor_ids if conv.kind == ConversationKind.DM else mentioned
         for actor_id in targets:
             if conv.kind == ConversationKind.GROUP and await self._waiting_here(actor_id, conv.id):

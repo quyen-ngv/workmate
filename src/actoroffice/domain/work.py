@@ -25,6 +25,11 @@ class Project(BaseModel):
     main_branch: str = "main"
     test_command: str | None = None
     is_default: bool = False
+    team_id: str | None = None
+    kind: str = "code"  # code | reference | automation
+    repo_url: str | None = None
+    # How to set up, build, test, lint and run the project (argv lists, see doc/plans design §9.2).
+    profile: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def workspace_kind(self) -> WorkspaceKind:
@@ -85,6 +90,17 @@ class Ticket(BaseModel):
     due_at: str | None = None  # YYYY-MM-DD, set by whoever plans the work
     created_at: str = ""
     updated_at: str = ""
+    # Team copilot: stages, people and links (see domain/stage.py)
+    team_id: str | None = None
+    stage: str | None = None
+    stage_template: str | None = None
+    owner_user_id: str | None = None
+    mode: str = "wait"  # wait | assume: when people do not answer, wait or go on with stated assumptions
+    paused: bool = False
+    jira_key: str | None = None
+    jira_url: str | None = None
+    pr_url: str | None = None
+    confluence_url: str | None = None
 
 
 class Comment(BaseModel):
@@ -103,6 +119,7 @@ class Document(BaseModel):
     body: str
     updated_by: str
     updated_at: str = ""
+    approved_revision: int | None = None  # the revision a gate approved; a newer one reopens the gate
 
 
 class InteractionKind(StrEnum):
@@ -112,6 +129,7 @@ class InteractionKind(StrEnum):
     ASK_COLLEAGUE = "ask_colleague"  # a ticket run asked a colleague in the ticket's meeting group
     APPROVE_AUTOMATION = "approve_automation"  # an actor wants a script to run on its own; the user reviews it
     APPROVE_ACCESS = "approve_access"  # an actor needs to change files of a read-only project; the user decides
+    APPROVE_STAGE = "approve_stage"  # a stage gate: people with the right role approve the stage's documents
 
 
 class InteractionStatus(StrEnum):

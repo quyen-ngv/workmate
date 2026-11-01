@@ -201,6 +201,11 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
             + (f"\n<b>Duyệt kèm quyền môi trường:</b> {esc(', '.join(p.get('access') or []))}" if p.get("access") else "")
             + (f"\n<i>Đã duyệt {len(approvals)}/{need}: {esc(', '.join(a.get('name', '') for a in approvals))}</i>" if need > 1 else "")
         )
+        if p.get("gate") == "knowledge":
+            items = "\n".join(esc(line) for line in p.get("kb") or []) or "(không có mục nào)"
+            text += f"\n\n<b>Kiến thức AI ghi lại:</b>\n{items}"
+            hint = "↩️ Reply 'bỏ 2, 5' để bỏ các mục sai, giữ phần còn lại."
+            return text + f"\n\n<i>{hint}</i>", [[btn("👍 Đúng hết", "y"), btn("👎 Bỏ hết", "n")]]
         return text + "\n\n<i>↩️ Reply tin này để trả lại kèm ghi chú.</i>", [[btn("👍 Duyệt", "y"), btn("👎 Trả lại", "n")]]
     if kind == "confirm_ticket":
         desc = str(p.get("description") or "")

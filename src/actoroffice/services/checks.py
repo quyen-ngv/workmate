@@ -551,8 +551,19 @@ async def check_review_clean(ctx: CheckContext) -> CheckResult:
     return await ctx.office.review.review(ctx)
 
 
+async def check_kb_noted(ctx: CheckContext) -> CheckResult:
+    items = await ctx.office.knowledge.list(ticket_id=ctx.ticket.id)
+    if items:
+        kinds = sorted({i.kind for i in items})
+        return CheckResult(id="kb_noted", status="passed", summary=f"{len(items)} mục kiến thức ({', '.join(kinds)})")
+    if re.search(r"(?i)\b(none|không có)\b", ctx.docs.get("kb-draft", "")):
+        return CheckResult(id="kb_noted", status="passed", summary="không có kiến thức dùng lại được (đã ghi rõ)")
+    return CheckResult(id="kb_noted", status="failed", summary="chưa ghi kiến thức nào (kb_note), hoặc ghi 'none' trong kb-draft nếu thật sự không có")
+
+
 BUILTIN.update(
     {
+        "kb_noted": check_kb_noted,
         "ac_coverage": check_ac_coverage,
         "no_secrets": check_no_secrets,
         "log_lint": check_log_lint,

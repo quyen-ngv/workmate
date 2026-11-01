@@ -259,6 +259,7 @@ class Executor:
             guidelines=guidelines,
             memories=known["memories"],
             similar=known["similar"],
+            kb=known["kb"],
             skills=office.skills.for_actor(actor, position),
             wake=wake,
             resumed=resumed,

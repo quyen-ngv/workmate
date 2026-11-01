@@ -124,12 +124,16 @@ Goal: the deliverable the requirements describe.
 - Write the `report` (research) or `document` (doc) the approved requirements ask for. Cite every source.
 - stage_complete: the requester accepts it or sends it back with a note.""",
     "close": """\
-Goal: what the team learned is written down.
+Goal: what the team learned is written down and confirmed by people.
 - Read the dossier, comments, plan and handoff. Complete every dossier section and the links.
-- Write the document `kb-draft`: 3–10 reusable knowledge items, each a line
-  `- [fact|code_note|decision] title — content (source)`, plus at most 3 candidate team rules
-  (`- [rule] …`). Only things useful for future tickets; nothing specific to this ticket alone.
-- Save the items with memory_save (kind fact / decision / lesson, scope shared). Then stage_complete.""",
+- Save 3–10 reusable knowledge items with kb_note, only what helps future tickets:
+  fact (business rules, terms) · code_note (where/how in code; anchor = the file and commit) · decision (what,
+  why, who) · contract (an API/topic/queue: spec location, auth kind — never a secret —, owner, masked samples,
+  quirks) · flow (a multi-step business flow: steps, data written, events, state before each step).
+  Cite sources (message/comment ids, file@commit, page titles). Update an existing item instead of duplicating.
+- Propose at most 3 team guidelines with rule_propose when reviewers or people kept asking for the same thing.
+- If nothing is reusable, write "none" in the document kb-draft. Then stage_complete: a person confirms the
+  items in one go (they can drop some).""",
 }
 
 
@@ -156,6 +160,7 @@ def build(
     memories: list[Memory],
     skills: list[Skill],
     similar: list[dict[str, Any]] | None = None,
+    kb: list[Any] | None = None,
     wake: WakeRequest,
     resumed: bool,
     answered: list[Interaction],
@@ -174,6 +179,11 @@ def build(
     rules = "\n".join(f"- {g}" for g in guidelines)
     parts["rules"] = f"# Team rules in effect for this stage\n{rules[:RULES_LIMIT]}" if rules else ""
     known = []
+    if kb:
+        known.append(
+            "Team knowledge base (verified items are confirmed by people; drafts and possibly-stale items need checking):\n"
+            + "\n".join(f"- {i.line()}" for i in kb)
+        )
     if memories:
         known.append("\n".join(f"- [{m.kind.value}, {(m.updated_at or m.created_at)[:10]}] {m.content}" for m in memories))
     if similar:

@@ -177,14 +177,23 @@ async def test_code_ticket_goes_through_stages_with_role_gates(office: Office, r
     assert (await office.stages.status(t))["status"] == "waiting_external"
 
     async def close(ctx: TurnCtx) -> TurnResult:
-        await ctx.office("doc_put", {"key": "kb-draft", "body": "- [fact] Hoàn tiền trong 30 ngày (Lan)", "base_revision": None})
         out = await ctx.office("stage_complete", {"summary": "Đã ghi kiến thức"})
-        assert "complete" in out
+        assert "kb_noted" in out  # knowledge must be written down (or explicitly "none")
+        await ctx.office("kb_note", {"kind": "fact", "title": "Hạn hoàn tiền", "content": "Đơn thường 30 ngày, VIP 60 ngày", "sources": ["Lan, Q&A AO"]})
+        await ctx.office("kb_note", {"kind": "decision", "title": "Tách RefundPolicy", "content": "Chọn phương án B theo Minh"})
+        out = await ctx.office("stage_complete", {"summary": "Đã ghi 2 mục kiến thức"})
+        assert "gate 'knowledge'" in out
         return done(ctx)
 
     runtime.scripts.append(close)
     await office.stages.external_passed(ticket.id, "merge", by=minh.id, note="PR #7 merged")
     await office.scheduler.wait_idle(timeout=20)
+
+    knowledge_gate = (await pending(office, InteractionKind.APPROVE_STAGE, ticket.id))[0]
+    assert knowledge_gate.payload["gate"] == "knowledge" and len(knowledge_gate.payload["kb"]) == 2
+    await office.answer(knowledge_gate.id, {"approved": False, "note": "bỏ 2"}, by=lan.id)  # keep #1, drop #2
+    statuses = [(i.title, i.status) for i in await office.knowledge.list(ticket_id=ticket.id)]
+    assert sorted(statuses) == [("Hạn hoàn tiền", "verified"), ("Tách RefundPolicy", "rejected")]
 
     t = await office.tickets.get(ticket.id)
     assert t.status == S.DONE and t.stage == "close"

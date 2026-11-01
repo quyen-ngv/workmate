@@ -509,3 +509,81 @@ STAGE_TOOLS += [
         env_access,
     ),
 ]
+
+
+# ---- knowledge base ----------------------------------------------------------------------------------------
+
+
+async def kb_search(args: dict[str, Any], ctx: ToolCtx) -> str:
+    office = ctx.office
+    ticket = await office.tickets.get(ctx.ticket_id) if ctx.ticket_id else None
+    kinds = [str(k) for k in args.get("kinds") or []] or None
+    items = await office.knowledge.search(str(args.get("query") or ""), team_id=ticket.team_id if ticket else None, kinds=kinds, limit=min(int(args.get("limit") or 10), 25))
+    if not items:
+        return "Nothing in the knowledge base."
+    out = []
+    for item in items:
+        extra = f"\n  data: {json.dumps(item.data, ensure_ascii=False)[:1500]}" if item.data else ""
+        anchor = f"\n  anchor: {json.dumps(item.anchor)}" if item.anchor else ""
+        out.append(f"- {item.line()}{anchor}{extra}")
+    return "\n".join(out)
+
+
+async def kb_note(args: dict[str, Any], ctx: ToolCtx) -> str:
+    office = ctx.office
+    ticket = await office.tickets.get(ctx.ticket_id) if ctx.ticket_id else None
+    anchor = args.get("anchor") if isinstance(args.get("anchor"), dict) else None
+    if anchor and anchor.get("path") and not anchor.get("commit") and ctx.workspace is not None:
+        import asyncio as _asyncio
+
+        proc = await _asyncio.create_subprocess_exec(
+            "git", "-C", str(ctx.workspace), "rev-parse", "--short", "HEAD", stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.DEVNULL
+        )
+        out, _ = await proc.communicate()
+        if proc.returncode == 0:
+            anchor = {**anchor, "commit": out.decode().strip()}
+    try:
+        item = await office.knowledge.note(
+            kind=str(args.get("kind") or ""),
+            title=str(args.get("title") or ""),
+            content=str(args.get("content") or ""),
+            by=ctx.actor.name,
+            team_id=ticket.team_id if ticket else None,
+            project_id=ticket.project_id if ticket else None,
+            ticket_id=ticket.id if ticket else None,
+            sources=[str(s) for s in args.get("sources") or []],
+            anchor=anchor,
+            data=args.get("data") if isinstance(args.get("data"), dict) else None,
+        )
+    except OfficeError as exc:
+        raise ToolError(str(exc)) from exc
+    return f"KB #{item.id} saved ({item.kind}, {item.status}). People confirm it at the end of the ticket."
+
+
+STAGE_TOOLS += [
+    ToolDef(
+        "kb_search",
+        "Search the team's knowledge base (business facts, code notes, decisions, service contracts, business flows).",
+        schema({"query": {"type": "string"}, "kinds": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer"}}, required=["query"]),
+        kb_search,
+        read_only=True,
+    ),
+    ToolDef(
+        "kb_note",
+        "Save or update a reusable knowledge item (draft until people confirm). kind: fact | code_note (anchor.path "
+        "required) | decision | contract (data: spec, auth kind, owner, samples, quirks — never secrets) | flow (data: "
+        "steps with service, trigger, writes, emits, consumes, state_before, invariants).",
+        schema(
+            {
+                "kind": {"type": "string", "enum": ["fact", "code_note", "decision", "contract", "flow"]},
+                "title": {"type": "string"},
+                "content": {"type": "string"},
+                "sources": {"type": "array", "items": {"type": "string"}},
+                "anchor": {"type": "object"},
+                "data": {"type": "object"},
+            },
+            required=["kind", "title", "content"],
+        ),
+        kb_note,
+    ),
+]

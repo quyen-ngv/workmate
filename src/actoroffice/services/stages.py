@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -119,6 +120,7 @@ class StageService:
         office = self.office
         query = f"{ticket.title} {ticket.description[:400]}"
         memories = await office.memory.context_for(actor, query)
+        kb = await office.knowledge.for_ticket(ticket)
         similar: list[dict[str, Any]] = []
         seen: set[str] = {ticket.key}
         for hit in await office.memory.history(actor, query, limit=20):
@@ -131,14 +133,15 @@ class StageService:
                 similar.append({"key": other.key, "title": other.title, "status": other.status.value, "snip": hit.get("snip", "")})
             if len(similar) >= 3:
                 break
-        return {"memories": memories, "similar": similar}
+        return {"memories": memories, "similar": similar, "kb": kb}
 
     async def post_known(self, ticket: Ticket, known: dict[str, Any]) -> None:
         """Show people what the AI starts from, so a wrong assumption is corrected before any question is asked."""
-        memories, similar = known["memories"], known["similar"]
-        if not memories and not similar:
+        memories, similar, kb = known["memories"], known["similar"], known.get("kb") or []
+        if not memories and not similar and not kb:
             return
         lines = ["📚 Mình đã biết (sai thì sửa giúp mình ngay ở đây):"]
+        lines += [f"- [{i.kind}{'' if i.status == 'verified' else ', ' + i.status}] {i.title}: {i.content[:200]}" for i in kb[:8]]
         lines += [f"- {m.content}" for m in memories[:8]]
         if similar:
             lines.append("Việc tương tự trước đây:")
@@ -355,6 +358,9 @@ class StageService:
             "approvals": [],
             "rules": [{"id": r.id, "title": r.title, "roles": r.spec.get("roles")} for r in extra or []],
         }
+        if gate == "knowledge":
+            drafts = [i for i in await office.knowledge.list(ticket_id=ticket.id) if i.status == "draft"]
+            payload["kb"] = [f"{n}. [{i.kind}] {i.title}: {i.content[:240]}" for n, i in enumerate(drafts, 1)]
         return await office.interactions.create(InteractionKind.APPROVE_STAGE, payload, ticket_id=ticket.id, run_id=run_id)
 
     async def answer_gate(self, item: Interaction, response: dict[str, Any], *, by: str) -> Interaction:
@@ -372,6 +378,19 @@ class StageService:
         approved = bool(response.get("approved"))
         note = str(response.get("note") or "").strip()
         name = await self._name(by)
+        if item.payload.get("gate") == "knowledge":
+            # Knowledge is confirmed, not redone: "bỏ 2, 5" keeps the rest; a plain rejection drops everything.
+            partial = not approved and bool(re.search(r"\d", note))
+            resolved = await office.interactions.resolve(item.id, {"approved": approved or partial, "note": note, "by_name": name}, by=by)
+            result = await office.knowledge.review_close(ticket.id, approved=approved or partial, note=note if partial or approved else "", by=by)
+            await office.tickets.add_comment(
+                ticket.id, f"📚 {name}: xác nhận {len(result['verified'])} mục kiến thức, bỏ {len(result['rejected'])}", author_kind="system", author_id=None
+            )
+            await self.advance(ticket.id, by=by)
+            from .knowledge import safe_publish
+
+            asyncio.get_running_loop().create_task(safe_publish(office, ticket.id))
+            return resolved
         if approved:
             approvals = [a for a in item.payload.get("approvals", []) if a.get("by") != by] + [{"by": by, "name": name, "at": utcnow()}]
             if len(approvals) < int(item.payload.get("min") or 1):
@@ -430,7 +449,24 @@ class StageService:
         if srun is None or srun.outcome != StageOutcome.COMPLETED.value:
             return ticket  # the AI has not finished the stage yet; it will see the event when it does
         await office.tickets.add_comment(ticket.id, f"🔓 {gate}: {note or 'đã qua'} ({await self._name(by)})", author_kind="system", author_id=None)
+        if gate == "merge":
+            await self._stale_after_merge(ticket)
         return await self.advance(ticket.id, by=by)
+
+    async def _stale_after_merge(self, ticket: Ticket) -> None:
+        """Code notes and flows anchored to files this ticket changed must be re-checked before they are trusted."""
+        from .checks import changed_files
+
+        office = self.office
+        root = await office.tickets.root_of(ticket.id)
+        workspace = office.settings.workspaces_dir / root.key
+        if not (workspace / ".git").exists():
+            return
+        project = await office.projects.get(ticket.project_id) if ticket.project_id else None
+        files = await changed_files(workspace, project.main_branch if project else "main")
+        stale = await office.knowledge.mark_stale(team_id=ticket.team_id, changed_files=files)
+        if stale:
+            await office.tickets.add_comment(ticket.id, f"⚠️ {len(stale)} ghi chú kiến thức có thể đã cũ sau thay đổi này: #{', #'.join(map(str, stale))}", author_kind="system", author_id=None)
 
     async def advance(self, ticket_id: int, *, by: str, run_id: str | None = None) -> Ticket:
         office = self.office

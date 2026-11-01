@@ -141,7 +141,7 @@ def _code() -> StageTemplate:
                 requires_steps=True,
             ),
             StageDef(id="pr", checks=["pr_linked", "flaky_rerun"], gate="merge"),
-            StageDef(id="close", outputs=["kb-draft"], checks=["outputs"]),
+            StageDef(id="close", outputs=["dossier"], checks=["outputs", "kb_noted"], gate="knowledge"),
         ],
     )
 
@@ -153,7 +153,7 @@ def _automation() -> StageTemplate:
             StageDef(id="understand", outputs=["requirements", "dossier"], checks=["outputs"], gate="requirement"),
             StageDef(id="design", outputs=["plan"], checks=["outputs"], gate="plan"),
             StageDef(id="build", checks=["steps_done", "automation_saved"], requires_steps=True, gate="script"),
-            StageDef(id="close", outputs=["kb-draft"], checks=["outputs"]),
+            StageDef(id="close", outputs=["dossier"], checks=["outputs", "kb_noted"], gate="knowledge"),
         ],
     )
 
@@ -164,7 +164,7 @@ def _produce(name: str, output: str) -> StageTemplate:
         stages=[
             StageDef(id="understand", outputs=["requirements", "dossier"], checks=["outputs"], gate="requirement"),
             StageDef(id="produce", outputs=[output], checks=["outputs"], gate="accept"),
-            StageDef(id="close", outputs=["kb-draft"], checks=["outputs"]),
+            StageDef(id="close", outputs=["dossier"], checks=["outputs", "kb_noted"], gate="knowledge"),
         ],
     )
 
@@ -185,4 +185,5 @@ def default_gates() -> dict[str, GatePolicy]:
         "accept": GatePolicy(roles=["owner"], fallback="owner"),
         "script": GatePolicy(roles=["dev", "lead"], fallback="owner", external=True),
         "merge": GatePolicy(roles=["dev", "lead"], fallback="owner", external=True),
+        "knowledge": GatePolicy(roles=["ba", "dev", "lead", "owner"], fallback="owner"),
     }

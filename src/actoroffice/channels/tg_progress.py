@@ -72,6 +72,13 @@ class LiveProgress:
         self.runs: dict[str, Progress] = {}
         self.enabled = True
 
+    def reset(self) -> None:
+        """Forget every live message (the bot left their group): pending edits are cancelled."""
+        for p in self.runs.values():
+            if p.flush and not p.flush.done():
+                p.flush.cancel()
+        self.runs.clear()
+
     async def started(self, run: dict[str, Any]) -> None:
         if not self.enabled or run.get("kind") not in ("chat", "ticket"):
             return

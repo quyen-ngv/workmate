@@ -449,6 +449,10 @@ class TelegramBridge:
             await self._on_telegram_message(update["message"])
 
     async def _on_button(self, cq: dict[str, Any]) -> None:
+        if self.chat_id is None:  # waiting for /start: silent, only stop the button's spinner
+            with contextlib.suppress(TelegramError):
+                await self.api.call("answerCallbackQuery", callback_query_id=cq["id"])
+            return
         note, alert = "Đã ghi nhận", False
         try:
             message = cq.get("message") or {}
@@ -600,6 +604,26 @@ class TelegramBridge:
         await self.send(None, "✅ Đã kết nối văn phòng với group này.\n\n" + HELP)
         await self._set_commands()
         await self.sync_all()
+
+    async def unbind(self) -> None:
+        """Forget the bound group (the bot stays in it, its topics are kept): until /start in a group, the bot is
+        silent everywhere. Live messages of the old group are dropped: message ids are per chat, so editing them
+        later would hit another message in the new group."""
+        old, self.chat_id = self.chat_id, None
+        if old is None:
+            return
+        with contextlib.suppress(TelegramError):  # e.g. the bot was kicked: the switch still goes on
+            await self.api.call(
+                "sendMessage",
+                chat_id=old,
+                text="🔀 Văn phòng đã chuyển sang một group Telegram khác. Tin nhắn ở đây không còn được chuyển tới văn phòng.",
+            )
+        await self.office.db.execute("DELETE FROM telegram_state WHERE key = 'chat_id'")
+        self._runs.clear()
+        self.progress.reset()
+        self.menus.wizards.clear()
+        self._warned = False
+        log.info("telegram: unbound from group %s; send /start in the new group to bind", old)
 
     async def _set_commands(self) -> None:
         """The "/" menu in Telegram lists every command with a short description."""

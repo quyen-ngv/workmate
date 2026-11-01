@@ -452,6 +452,7 @@ async function pageSetup() {
 Đổi sang bot khác: dán token mới rồi bấm Kết nối, bot cũ dừng ngay. Nếu bot mới được thêm vào group cũ thì các topic cũ dùng tiếp.</div>
       ${c.telegram.env_override ? `<div class="b">⚠ Biến môi trường ${esc(c.telegram.env_override)} đang chứa token và được ưu tiên khi khởi động. Hãy xoá biến này nếu muốn dùng token nhập ở đây.</div>` : ""}
       <div class="form"><label>Bot token${c.telegram.running ? " mới" : ""}<input data-c="tg_token" type="password" placeholder="123456789:AA…"></label><button class="btn primary" data-save-telegram>${c.telegram.running ? "Đổi bot" : "Kết nối"}</button>
+        ${c.telegram.running && c.telegram.bound ? `<button class="btn" data-telegram-unbind>Chuyển sang group mới</button>` : ""}
         ${c.telegram.configured ? `<button class="btn bad" data-telegram-off>Tắt Telegram</button>` : ""}</div></div>
     <div class="rule"><div class="h"><b>Jira + Confluence (Cloud)</b>${status(c.jira.configured, c.jira.configured ? `${c.jira.email} · ${c.jira.base_url}` : "chưa kết nối")}</div>
       <div class="b">Tạo API token tại id.atlassian.com → Security → API tokens.</div>
@@ -534,6 +535,10 @@ document.addEventListener("click", (e) => {
   });
   const conn = (n) => ($(`[data-c="${n}"]`)?.value || "").trim();
   if (ds.saveTelegram !== undefined) return act(async () => { const r = await api("/api/setup/telegram", { method: "POST", body: { token: conn("tg_token") } }); toast(`Đã nối bot @${r.bot}. ${r.next}`); if (r.warning) toast(r.warning, true); await pageSetup(); });
+  if (ds.telegramUnbind !== undefined) {
+    if (!confirm("Chuyển bot sang group mới? Group hiện tại sẽ nhận tin báo và bot ngừng làm việc ở đó cho tới khi có /start.")) return;
+    return act(async () => { const r = await api("/api/setup/telegram/unbind", { method: "POST" }); toast(r.next); await pageSetup(); });
+  }
   if (ds.telegramOff !== undefined) return act(async () => { const r = await api("/api/setup/telegram/off", { method: "POST" }); toast("Đã tắt Telegram"); if (r.warning) toast(r.warning, true); await pageSetup(); });
   if (ds.saveJira !== undefined) return act(async () => { const r = await api("/api/setup/jira", { method: "POST", body: { base_url: conn("jira_url"), email: conn("jira_email"), token: conn("jira_token") } }); toast(`Jira OK: ${r.user || ""}`); await pageSetup(); });
   if (ds.saveBitbucket !== undefined) return act(async () => { await api("/api/setup/bitbucket", { method: "POST", body: { email: conn("bb_email"), token: conn("bb_token"), workspace: conn("bb_workspace") } }); toast("Bitbucket OK"); await pageSetup(); });

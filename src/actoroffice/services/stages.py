@@ -22,8 +22,11 @@ from actoroffice.domain.errors import Conflict, InvalidTransition, NotFound, Off
 from actoroffice.domain.ids import utcnow
 from actoroffice.domain.run import Usage, WakeSource
 from actoroffice.domain.stage import (
+    BYPASS_ROLES,
     STAGE_STATUS_VI,
     STAGE_TITLES,
+    UNWAIVABLE,
+    GatePolicy,
     StageDef,
     StageOutcome,
     StageRun,
@@ -49,6 +52,7 @@ WAITING_KINDS = (
     InteractionKind.APPROVE_AUTOMATION.value,
     InteractionKind.ASK_COLLEAGUE.value,
     InteractionKind.ENV_ACCESS.value,
+    InteractionKind.WAIVE_CHECK.value,
 )
 
 
@@ -254,8 +258,13 @@ class StageService:
             raise StageError(f"{ticket.key}: giai đoạn '{ticket.stage}' không có trong mẫu {tpl.name}")
         return stage
 
-    async def complete(self, ticket_id: int, *, run_id: str, summary: str, workspace: Path | None) -> dict[str, Any]:
-        """Called by the AI (stage_complete). Returns what happened: failed checks, a gate opened, or the next stage."""
+    async def complete(
+        self, ticket_id: int, *, run_id: str, summary: str, workspace: Path | None, waive: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
+        """Called by the AI (stage_complete). Returns what happened: failed checks, a gate opened, or the next stage.
+
+        `waive` = checks the AI asks to skip, each with a reason: a card goes to the people who may bypass; the AI
+        never waives by itself."""
         office = self.office
         ticket = await office.tickets.get(ticket_id)
         stage = await self.stage_def(ticket)
@@ -264,12 +273,19 @@ class StageService:
         compiled = await office.rules.compile(ticket=ticket, project=project, stage=stage.id)
         check_ids = list(stage.checks) + [f"rule:{r.id}" for r in compiled.checks]
         results = await self.checks.run(ticket, stage, srun, workspace=workspace, run_id=run_id, only=check_ids)
+        results = _apply_waivers(results, srun.waivers)
         await office.db.execute(
             "UPDATE stage_runs SET checks_json = ? WHERE id = ?", (json.dumps([r.model_dump() for r in results], ensure_ascii=False), srun.id)
         )
         failed = [r for r in results if r.failed]
         if failed:
-            return {"ok": False, "failed": [r.model_dump() for r in failed], "checks": [r.model_dump() for r in results]}
+            out: dict[str, Any] = {"ok": False, "failed": [r.model_dump() for r in failed], "checks": [r.model_dump() for r in results]}
+            asked, refused = await self._request_waivers(ticket, stage, waive or [], failed, run_id=run_id)
+            if asked:
+                out["waive_requested"] = asked
+            if refused:
+                out["waive_refused"] = refused
+            return out
         await office.db.execute(
             "UPDATE stage_runs SET finished_at = ?, outcome = ?, summary = ? WHERE id = ?",
             (utcnow(), StageOutcome.COMPLETED.value, summary.strip()[:4000], srun.id),
@@ -324,8 +340,6 @@ class StageService:
         extra: list[Any] | None = None,
     ) -> Interaction:
         office = self.office
-        from actoroffice.domain.stage import GatePolicy
-
         policy = await office.teams.gate_policy(ticket, gate) if gate != "rules" else GatePolicy(roles=[], fallback="owner")
         for rule in extra or []:  # e.g. migrations changed → a lead must approve too
             roles = [r for r in rule.spec.get("roles") or [] if r not in policy.roles]
@@ -535,6 +549,162 @@ class StageService:
         office.scheduler.kick()
         return await self._publish(ticket.id)
 
+    # ---- bypass: waive a check, force a status -----------------------------------------------------------
+
+    async def may_bypass(self, by: str, ticket: Ticket) -> bool:
+        """Admin / lead / dev of the team and the ticket's owner (the local owner is admin). Never the AI, BA or QE."""
+        if by == LOCAL_OWNER_ID:
+            return True
+        return await self.office.teams.can_act(by, ticket, list(BYPASS_ROLES))
+
+    async def waive(self, ref: int | str, check_id: str, reason: str, *, by: str, via: str = "direct") -> StageRun:
+        """Skip one failing check in the ticket's current stage run. Ends with that run; always has a reason."""
+        office = self.office
+        ticket = await office.tickets.get(ref)
+        if not await self.may_bypass(by, ticket):
+            raise PolicyDenied("Chỉ admin, lead, dev của team hoặc người yêu cầu mới được bỏ qua check")
+        check_id, reason = check_id.strip(), reason.strip()
+        if check_id in UNWAIVABLE:
+            raise StageError(f"Check {check_id} không được bỏ qua")
+        if not reason:
+            raise StageError("Cần nêu lý do bỏ qua check")
+        if not ticket.stage:
+            raise StageError(f"{ticket.key} không chạy theo quy trình giai đoạn")
+        stage = await self.stage_def(ticket)
+        if check_id not in stage.checks and not check_id.startswith("rule:"):
+            raise StageError(f"Giai đoạn {stage.id} không có check '{check_id}' (có: {', '.join(stage.checks)})")
+        srun = await self.ensure_run(ticket)
+        name = await self._name(by)
+        entry = {"check": check_id, "by": by, "by_name": name, "reason": reason, "at": utcnow(), "via": via}
+        waivers = [w for w in srun.waivers if w.get("check") != check_id] + [entry]
+        await office.db.execute("UPDATE stage_runs SET waivers_json = ? WHERE id = ?", (json.dumps(waivers, ensure_ascii=False), srun.id))
+        await office.audit.record(
+            "stage:waive", "waived", ticket_id=ticket.id, target=f"{ticket.key}:{check_id}", detail={"by": by, "reason": reason, "via": via, "stage": stage.id}
+        )
+        await office.tickets.add_comment(
+            ticket.id, f"⚠️ {name} bỏ qua check {check_id} ở giai đoạn {stage_title(stage.id)}: {reason}", author_kind="system", author_id=None
+        )
+        await self._publish(ticket.id)
+        return await self.get_run(srun.id)
+
+    async def _request_waivers(
+        self, ticket: Ticket, stage: StageDef, asks: list[dict[str, Any]], failed: list[CheckResult], *, run_id: str | None
+    ) -> tuple[list[str], list[str]]:
+        """Cards for the checks the AI asked to skip. Returns (asked check ids, refusals with the reason)."""
+        office = self.office
+        asked: list[str] = []
+        refused: list[str] = []
+        failed_by_id = {r.id: r for r in failed}
+        pending = [i for i in await office.interactions.pending(ticket_id=ticket.id) if i.kind == InteractionKind.WAIVE_CHECK]
+        for ask in asks:
+            check_id = str(ask.get("check") or "").strip()
+            reason = str(ask.get("reason") or "").strip()
+            if check_id in UNWAIVABLE:
+                refused.append(f"{check_id}: không được bỏ qua")
+            elif check_id not in failed_by_id:
+                refused.append(f"{check_id}: không phải check đang fail")
+            elif not reason:
+                refused.append(f"{check_id}: thiếu lý do")
+            elif any(i.payload.get("check") == check_id for i in pending):
+                asked.append(check_id)
+            else:
+                policy = GatePolicy(roles=list(BYPASS_ROLES), fallback="owner")
+                approvers = await office.teams.approvers(ticket, policy)
+                payload = {
+                    "ticket": ticket.key,
+                    "title": ticket.title,
+                    "stage": stage.id,
+                    "stage_title": stage_title(stage.id),
+                    "check": check_id,
+                    "reason": reason,
+                    "failed": [{"id": r.id, "summary": r.summary} for r in failed],
+                    "roles": policy.roles,
+                    "roles_label": " / ".join(ROLE_VI.get(r, r) for r in policy.roles),  # type: ignore[call-overload]
+                    "approver_ids": [u.id for u in approvers],
+                    "approver_names": [u.name for u in approvers],
+                }
+                await office.interactions.create(InteractionKind.WAIVE_CHECK, payload, ticket_id=ticket.id, run_id=run_id)
+                asked.append(check_id)
+        return asked, refused
+
+    async def answer_waive(self, item: Interaction, response: dict[str, Any], *, by: str) -> Interaction:
+        """A person allowed to bypass approves or rejects the AI's request to skip a check; the AI is woken either way."""
+        office = self.office
+        if item.kind != InteractionKind.WAIVE_CHECK or item.ticket_id is None:
+            raise StageError("Không phải thẻ xin bỏ qua check")
+        ticket = await office.tickets.get(item.ticket_id)
+        if ticket.stage != item.payload.get("stage"):
+            await office.interactions.cancel(item.id)
+            raise Conflict(f"{ticket.key} đã sang giai đoạn khác")
+        if not await self.may_bypass(by, ticket):
+            raise PolicyDenied("Cần admin, lead, dev của team hoặc người yêu cầu để duyệt bỏ qua check")
+        approved = bool(response.get("approved"))
+        note = str(response.get("note") or "").strip()
+        check_id = str(item.payload["check"])
+        name = await self._name(by)
+        resolved = await office.interactions.resolve(item.id, {"approved": approved, "note": note, "by_name": name}, by=by)
+        if approved:
+            reason = str(item.payload["reason"]) + (f" (ghi chú duyệt: {note})" if note else "")
+            await self.waive(ticket.id, check_id, reason, by=by, via="card")
+            wake: dict[str, Any] = {"stage": ticket.stage, "waived": check_id}
+        else:
+            await office.audit.record("stage:waive", "rejected", ticket_id=ticket.id, target=f"{ticket.key}:{check_id}", detail={"by": by, "note": note})
+            await office.tickets.add_comment(
+                ticket.id, f"👎 {name} không đồng ý bỏ qua check {check_id}" + (f": {note}" if note else ""), author_kind="system", author_id=None
+            )
+            wake = {"stage": ticket.stage, "waive_rejected": check_id, "note": note}
+        if ticket.assignee_actor_id:
+            await office.wakes.enqueue(ticket.assignee_actor_id, WakeSource.MANUAL, ticket_id=ticket.id, payload=wake)
+            office.scheduler.kick()
+        return resolved
+
+    async def force_status(self, ref: int | str, to: TicketStatus, reason: str, *, by: str) -> Ticket:
+        """Set any status regardless of TRANSITIONS. `done` before the last stage skips the stages that are left."""
+        office = self.office
+        ticket = await office.tickets.get(ref)
+        if not await self.may_bypass(by, ticket):
+            raise PolicyDenied("Chỉ admin, lead, dev của team hoặc người yêu cầu mới được ép đổi status")
+        reason = reason.strip()
+        if not reason:
+            raise StageError("Cần nêu lý do ép đổi status")
+        name = await self._name(by)
+        if to == S.DONE and ticket.stage and ticket.status != S.DONE:
+            await self._skip_rest(ticket, reason=reason)
+        updated = await office.tickets.force_status(ticket.id, to, by=name, reason=reason)
+        await office.audit.record(
+            "stage:force_status", to.value, ticket_id=ticket.id, target=ticket.key, detail={"by": by, "from": ticket.status.value, "reason": reason}
+        )
+        if to == S.DONE and ticket.stage:
+            from actoroffice.engine.workspace import cleanup_ticket
+
+            root = await office.tickets.root_of(ticket.id)
+            asyncio.get_running_loop().create_task(cleanup_ticket(ticket, office.settings.workspaces_dir / root.key))
+        return await self._publish(updated.id)
+
+    async def _skip_rest(self, ticket: Ticket, *, reason: str) -> None:
+        """Stop the work, close the open run and mark every stage that never ran as skipped, drop waiting cards."""
+        office = self.office
+        for run in await office.runs.for_ticket(ticket.id, limit=5):
+            if run.status.value == "running":
+                await office.scheduler.stop_run(run.id)
+        current = await self.current_run(ticket)
+        if current is not None and current.finished_at is None:
+            await office.db.execute(
+                "UPDATE stage_runs SET finished_at = ?, outcome = ?, summary = ? WHERE id = ?",
+                (utcnow(), StageOutcome.SKIPPED.value, reason[:2000], current.id),
+            )
+        tpl = await self.template_of(ticket)
+        ids = [s.id for s in tpl.stages]
+        rest = ids[ids.index(ticket.stage) + 1 :] if ticket.stage in ids else []
+        for stage_id in rest:
+            run = await self._open_run(ticket.id, stage_id)
+            await office.db.execute(
+                "UPDATE stage_runs SET finished_at = ?, outcome = ?, summary = ? WHERE id = ?",
+                (utcnow(), StageOutcome.SKIPPED.value, reason[:2000], run.id),
+            )
+        for item in await office.interactions.pending(ticket_id=ticket.id):
+            await office.interactions.cancel(item.id)
+
     # ---- controls -------------------------------------------------------------------------------------
 
     async def pause(self, ref: int | str, *, by: str) -> Ticket:
@@ -663,6 +833,7 @@ class StageService:
             "model": await office.models.info(ticket),
             "jira_key": ticket.jira_key,
             "pr_url": ticket.pr_url,
+            "waivers": srun.waivers if srun else [],
         }
 
     async def _askees(self, item: Interaction, ticket: Ticket) -> tuple[list[str], list[str]]:
@@ -672,8 +843,6 @@ class StageService:
             return list(p["approver_names"]), list(p.get("approver_ids") or [])
         roles = list(p.get("roles") or [])
         if roles:
-            from actoroffice.domain.stage import GatePolicy
-
             people = await self.office.teams.approvers(ticket, GatePolicy(roles=roles))
             if people:
                 return [u.name for u in people], [u.id for u in people]
@@ -712,6 +881,19 @@ class StageService:
         return ticket
 
 
+def _apply_waivers(results: list[CheckResult], waivers: list[dict[str, Any]]) -> list[CheckResult]:
+    """A failed check the run has a waiver for counts as passed, marked so nobody mistakes it for a real pass."""
+    by_check = {w["check"]: w for w in waivers}
+    out: list[CheckResult] = []
+    for r in results:
+        w = by_check.get(r.id)
+        if r.failed and w is not None and r.id not in UNWAIVABLE:
+            mark = {k: w.get(k) for k in ("by", "by_name", "reason", "at", "via")}
+            r = r.model_copy(update={"status": "passed", "summary": f"⚠️ đã bỏ qua ({r.summary})", "data": {**r.data, "waived": mark}})
+        out.append(r)
+    return out
+
+
 def _stage_run(row: dict[str, Any]) -> StageRun:
     return StageRun(
         id=row["id"],
@@ -728,4 +910,5 @@ def _stage_run(row: dict[str, Any]) -> StageRun:
         rules=json.loads(row["rules_json"] or "[]"),
         checks=json.loads(row["checks_json"] or "[]"),
         steps=[Step.model_validate(s) for s in json.loads(row["steps_json"] or "[]")],
+        waivers=json.loads(row["waivers_json"] or "[]"),
     )

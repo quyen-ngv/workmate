@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from actoroffice.domain.errors import OfficeError
 from actoroffice.domain.stage import default_templates
 from actoroffice.domain.team import LOCAL_OWNER_ID, ROLE_VI
+from actoroffice.domain.work import TicketStatus
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -120,8 +121,19 @@ async def cmd_stage(office: Office, args: argparse.Namespace) -> None:
     elif action == "reopen":
         target = args.text[0] if args.text else ""
         await stages.reopen(args.key, target, reason=" ".join(args.text[1:]) or "quay lại", by=LOCAL_OWNER_ID)
+    elif action == "waive":
+        check = args.text[0] if args.text else ""
+        run = await stages.waive(args.key, check, " ".join(args.text[1:]), by=LOCAL_OWNER_ID)
+        out(f"đã bỏ qua check {check} (giai đoạn {run.stage} lần {run.attempt})")
+    elif action == "force":
+        to = TicketStatus(args.text[0]) if args.text and args.text[0] in TicketStatus._value2member_map_ else None
+        if to is None:
+            raise SystemExit(f"cần status hợp lệ: {', '.join(s.value for s in TicketStatus)}")
+        await stages.force_status(args.key, to, " ".join(args.text[1:]), by=LOCAL_OWNER_ID)
     st = await stages.status(args.key, viewer=LOCAL_OWNER_ID)
     out(f"{st['ticket']} · {st['title']}")
+    for w in st["waivers"]:
+        out(f"  ⚠️ waived {w['check']} bởi {w['by_name']} lúc {w['at']}: {w['reason']}")
     out(f"  giai đoạn: {st['stage']} (lần {st['attempt']}) · {st['status_label']}" + (f" · chờ {', '.join(st['who'])}" if st["who"] else ""))
     for s in st["steps"]:
         out(f"   [{'x' if s['done'] else ' '}] {s['text']}")
@@ -379,9 +391,12 @@ def register(sub: Any) -> None:
     p.add_argument("--cancel", action="store_true", help="cancel the switch that is waiting")
     p.set_defaults(fn=cmd_model)
 
-    p = sub.add_parser("stage", help="stage status / control: stage <key> [pause|resume|retry|merged|steer|reopen] [text]")
+    p = sub.add_parser(
+        "stage",
+        help="stage status / control: stage <key> [pause|resume|retry|merged|steer|reopen|waive <check> <reason>|force <status> <reason>]",
+    )
     p.add_argument("key")
-    p.add_argument("action", nargs="?", choices=["status", "pause", "resume", "retry", "merged", "steer", "reopen"])
+    p.add_argument("action", nargs="?", choices=["status", "pause", "resume", "retry", "merged", "steer", "reopen", "waive", "force"])
     p.add_argument("text", nargs="*")
     p.set_defaults(fn=cmd_stage)
 

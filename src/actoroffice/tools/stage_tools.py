@@ -124,13 +124,25 @@ async def stage_complete(args: dict[str, Any], ctx: ToolCtx) -> str:
     summary = str(args.get("summary") or "").strip()
     if not summary:
         raise ToolError("summary is required: what this stage produced and how it was verified.")
+    waive = [
+        {"check": str(w.get("check") or ""), "reason": str(w.get("reason") or "")} for w in args.get("waive") or [] if isinstance(w, dict)
+    ]
     try:
-        result = await office.stages.complete(ticket.id, run_id=ctx.run_id, summary=summary, workspace=ctx.workspace)
+        result = await office.stages.complete(ticket.id, run_id=ctx.run_id, summary=summary, workspace=ctx.workspace, waive=waive)
     except OfficeError as exc:
         raise ToolError(str(exc)) from exc
     if not result["ok"]:
         lines = [f"- {c['id']}: {c['summary']}" for c in result["failed"]]
-        return "The stage cannot finish yet. Failed checks:\n" + "\n".join(lines) + "\nFix them, then call stage_complete again."
+        text = "The stage cannot finish yet. Failed checks:\n" + "\n".join(lines)
+        if result.get("waive_requested"):
+            return (
+                text
+                + f"\nYour request to skip {', '.join(result['waive_requested'])} was sent to the people allowed to bypass. "
+                "The check stays failed until one approves. End your turn now; you are woken with the answer."
+            )
+        if result.get("waive_refused"):
+            text += "\nWaive request refused: " + "; ".join(result["waive_refused"])
+        return text + "\nFix them, then call stage_complete again."
     if result.get("interaction_id"):
         who = ", ".join(result.get("approvers") or []) or "the approvers"
         return f"Checks passed. The stage now waits for {who} at gate '{result['gate']}'. End your turn now."
@@ -305,8 +317,19 @@ STAGE_TOOLS: list[ToolDef] = [
     ToolDef(
         "stage_complete",
         "Finish the current stage: the office runs the stage's checks; when they pass it opens the gate for the "
-        "right people or moves to the next stage. If checks fail you get the list to fix.",
-        schema({"summary": {"type": "string"}}, required=["summary"]),
+        "right people or moves to the next stage. If checks fail you get the list to fix. If a failing check truly "
+        "does not apply (e.g. no PR exists), pass waive=[{check, reason}]: people allowed to bypass decide; you "
+        "cannot skip a check yourself, and no_secrets can never be skipped.",
+        schema(
+            {
+                "summary": {"type": "string"},
+                "waive": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"check": {"type": "string"}, "reason": {"type": "string"}}},
+                },
+            },
+            required=["summary"],
+        ),
         stage_complete,
     ),
     ToolDef(

@@ -122,6 +122,9 @@ Goal: a pull request people can review and merge.
   pr_create is not available, ask a dev (ask_human, roles [dev]) to push and open it, then link it with pr_link.
 - PR description: summary, AC → test map, check results, how to test, assumptions and known limits.
 - stage_complete: the stage waits for a person to merge.
+- If no PR can exist (e.g. the code is already on main), do not fake a link: call
+  stage_complete(summary, waive=[{check: "pr_linked", reason}]) and end your turn. People allowed to bypass decide;
+  you can never skip a check yourself.
 - When woken with review comments ("Review mới trên PR"), read them with pr_comments, fix them on the same
   branch, commit, reply to each comment with pr_reply, and keep the dossier current. Then end your turn.""",
     "produce": """\
@@ -247,6 +250,11 @@ def build(
             delta += ["", f"The gate sent this stage back. Reviewer's note: {reason['redo']}"]
         if reason.get("reopened"):
             delta += ["", f"The ticket came back to this stage: {reason['reopened']}"]
+        if reason.get("waived"):
+            delta += ["", f"A person approved skipping check {reason['waived']}. Call stage_complete again (no waive needed)."]
+        if reason.get("waive_rejected"):
+            note = f" Note: {reason['note']}" if reason.get("note") else ""
+            delta += ["", f"A person refused to skip check {reason['waive_rejected']}; it stays required.{note} Fix it."]
         if reason.get("steer"):
             delta += ["", f"Direction from {reason.get('by') or 'a person'}: {reason['steer']}"]
     if changes:

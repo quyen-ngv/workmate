@@ -254,7 +254,9 @@ async def cmd_serve(office: Office, args: argparse.Namespace) -> None:
     if added:
         out("Vị trí mới: " + ", ".join(p.title for p in added))
     token = load_or_create_token(settings)
-    await office.start()
+    await office.start(schedule=not args.view_only)  # --view-only: look around without the AI running
+    if args.view_only:
+        out("Chế độ chỉ xem: AI không chạy việc nào.")
     from actoroffice.channels.telegram import load_token
 
     bot_token = load_token(settings)
@@ -263,7 +265,7 @@ async def cmd_serve(office: Office, args: argparse.Namespace) -> None:
         out("Telegram: đang chạy" + ("" if office.telegram.chat_id else " — thêm bot vào group có bật Topics rồi nhắn /start"))
     host, port = args.host or settings.web_host, args.port or settings.web_port
     server = uvicorn.Server(uvicorn.Config(create_app(office, token), host=host, port=port, log_level="warning", ws_ping_interval=20))
-    url = f"http://{'localhost' if host in ('127.0.0.1', '0.0.0.0') else host}:{port}/login?t={token}"
+    url = f"http://{'localhost' if host in ('127.0.0.1', '0.0.0.0') else host}:{port}/login?t={token}&next=/team"
     out(f"Văn phòng AI đang chạy: {url}")
     out("(link chứa mã đăng nhập — đừng chia sẻ; Ctrl+C để dừng)")
     if not args.no_browser:
@@ -378,6 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host")
     p.add_argument("--port", type=int)
     p.add_argument("--no-browser", action="store_true")
+    p.add_argument("--view-only", action="store_true", help="web UI only: the scheduler does not start, the AI runs nothing")
     p.set_defaults(fn=cmd_serve)
     return parser
 

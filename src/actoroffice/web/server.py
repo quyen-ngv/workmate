@@ -240,10 +240,11 @@ def create_app(office: Office, token: str) -> FastAPI:
     # ---- pages -------------------------------------------------------------------------------
 
     @app.get("/login")
-    async def login(t: str = "") -> Any:
+    async def login(t: str = "", next: str = "/") -> Any:
         if not secrets.compare_digest(t, token):
             return HTMLResponse(_SIGNED_OUT, status_code=401)
-        response = RedirectResponse("/", status_code=303)
+        target = next if next in ("/", "/team") else "/"  # never an open redirect
+        response = RedirectResponse(target, status_code=303)
         response.set_cookie(COOKIE, token, httponly=True, samesite="strict", max_age=60 * 60 * 24 * 30)
         return response
 

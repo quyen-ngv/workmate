@@ -223,7 +223,7 @@ function card(item) {
     return `<div class="card" data-card="${esc(item.id)}"><div class="who">${esc(p.asked_by || "AI")} hỏi ${esc(who)}</div>
       <div class="q">${esc(p.question)}</div>${p.context ? `<div class="who">${esc(p.context)}</div>` : ""}
       <div class="opts">${(p.options || []).map((o) => `<button class="btn ${o === p.recommended ? "rec" : ""}" data-answer="${esc(o)}">${o === p.recommended ? "⭐ " : ""}${esc(o)}</button>`).join("")}</div>
-      <div class="composer inline"><textarea placeholder="Hoặc trả lời bằng chữ…" data-text></textarea><button class="btn" data-answer-text>Trả lời</button></div></div>`;
+      <div class="composer inline"><textarea placeholder="Hoặc trả lời bằng chữ… (Enter để gửi)" data-text></textarea><button class="btn" data-answer-text>Trả lời</button></div></div>`;
   }
   if (item.kind === "approve_stage") {
     const checks = (p.checks || []).map((c) => `<li>${c.status === "passed" ? "✅" : c.status === "failed" ? "❌" : "⏭"} ${esc(c.id)}: ${esc(c.summary)}</li>`).join("");
@@ -278,7 +278,7 @@ function renderPane(key) {
     ${steps.length ? `<div class="steps">${steps.map((s, i) => `<div class="s ${s.done ? "done" : i === cur ? "cur" : ""}">${s.done ? "☑" : i === cur ? "▶" : "☐"} ${esc(s.text)}</div>`).join("")}</div>` : ""}
     <div class="timeline">${renderTimeline(timeline(key)) || `<div class="empty">Chưa có hoạt động.</div>`}</div>
     ${pending.length ? `<div class="cards">${pending.map(card).join("")}</div>` : ""}
-    <div class="composer"><textarea placeholder="Chỉ dẫn cho AI (AI đang chạy sẽ nghe ngay ở bước kế tiếp)…" data-steer></textarea><button class="btn primary" data-send>Gửi</button></div>`;
+    <div class="composer"><textarea placeholder="Chỉ dẫn cho AI… Enter để gửi, Shift+Enter xuống dòng" data-steer></textarea><button class="btn primary" data-send>Gửi</button></div>`;
   const tl = $(".timeline", el);
   tl.scrollTop = tl.scrollHeight;
 }
@@ -566,7 +566,11 @@ document.addEventListener("click", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && e.target.matches("[data-steer]")) $("[data-send]", e.target.closest("[data-pane]"))?.click();
+  // chat boxes: Enter sends, Shift+Enter is a new line (never while an input method is composing a word)
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.target.matches("[data-steer], [data-text]")) {
+    const send = e.target.matches("[data-steer]") ? $("[data-send]", e.target.closest("[data-pane]")) : $("[data-answer-text]", e.target.closest("[data-card]"));
+    if (send) { e.preventDefault(); send.click(); }
+  }
   if (e.key === "Escape" && !$("#overlay").hidden) closeSheet();
 });
 

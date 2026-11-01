@@ -137,7 +137,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 /* ---- composer ---- */
 .composer { border-top: 1px solid var(--border); padding: 12px 20px 16px; position: relative; }
 .composer textarea { width: 100%; resize: none; min-height: 44px; max-height: 200px; border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 10px 12px; background: var(--panel); outline: none; line-height: 1.4; }
-.composer textarea:focus { border-color: var(--accent); }
+.composer textarea:focus { border-color: var(--faint); }
 .composer .hint { color: var(--faint); font-size: 11px; margin-top: 4px; }
 .popup { position: absolute; bottom: calc(100% - 6px); left: 20px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); min-width: 220px; padding: 4px; z-index: 10; }
 .popup .item { padding: 6px 8px; border-radius: 6px; display: flex; gap: 8px; align-items: center; cursor: pointer; }
@@ -282,3 +282,8 @@ input[type=date] { font: inherit; padding: 6px 8px; border: 1px solid var(--bord
 .timeline .tl.think .tx { color: var(--muted); font-style: italic; }
 .timeline .tl.err .tx { color: var(--warn); }
 .run-live .row-inline { align-items: center; gap: 8px; }
+
+/* focus: a quiet border instead of the browser's strong ring; keyboard focus on buttons stays visible */
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--faint); }
+button:focus { outline: none; }
+button:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 1px; }

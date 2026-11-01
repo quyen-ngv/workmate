@@ -233,3 +233,9 @@ table.list th { color: var(--faint); font-weight: 500; }
 .checklist .step .tick { width: 1.2em; color: var(--muted); }
 .checklist .step.ok .tick { color: var(--ok); }
 .checklist .hint { margin-top: var(--gap-3); }
+
+/* focus: a quiet border instead of the browser's strong ring; keyboard focus on buttons stays visible */
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--line-strong); }
+button:focus { outline: none; }
+button:focus-visible { outline: 1px solid var(--line-strong); outline-offset: 1px; }
+.composer textarea { resize: none; }

@@ -15,7 +15,28 @@ holds.
 | SI-2 Auto-approve pending cards when permissions widen | code | Requirements with 12 AC and real safety rules (only re-check calls whose exact arguments are known), plan A/B, a new service and 15 tests, 5 accurate KB items. Merged; 293 tests pass. |
 | SI-3 Do not run the whole test suite twice in build | code → quick (by the AI) | Filed from SI-1's build. The build prompt now asks for the related tests only when the office runs the suite; tests guard the wording in both workflows. Merged. |
 | SI-5 PR stage: do not rerun the whole suite several times | code | Filed from SI-2: the suite ran 4–5 times per ticket (build, repo:test, the AI again in PR, flaky_rerun twice). |
-| SI-4 Telegram: switch the bot to a new group from Settings | code | Three good multiple-choice questions with code references, then requirements with 9 AC. |
+| SI-4 Telegram: switch the bot to a new group from Settings | code | Three good multiple-choice questions with code references, requirements with 9 AC; the reviewer found a race that the AI fixed. Merged; 308 tests pass. |
+
+## Round 2 (after restarting on rounds 1's merges)
+
+| Ticket | Workflow | What happened |
+|---|---|---|
+| SI-5 PR stage: do not rerun the whole suite | code | flaky_rerun reuses the build stage's `repo:test` result for the same clean commit; the PR prompt says not to rerun. Its plan already followed SI-3 ("only the related tests"). Merged. |
+| SI-6 No background command + sleep-loop waits | code | Four questions, one correcting the ticket: an ASK reason only reaches people, so the loop is denied with guidance to the AI. Quote-aware detector for sh and PowerShell. Merged; 369 tests pass. |
+
+## Numbers
+
+| Ticket | Workflow | Runs | Tool approvals | Questions | Gates | API-equivalent cost |
+|---|---|---|---|---|---|---|
+| SI-1 | quick | 5 | 1 | 0 | 1 | $1.02 |
+| SI-2 | code | 8 | 0 | 1 | 3 | $6.27 |
+| SI-3 | quick | 5 | 0 | 1 | 1 | $1.67 |
+| SI-4 | code | 9 | 0 | 3 | 3 | $4.85 |
+| SI-5 | code | 6 | 0 | 0 | 3 | $3.86 |
+| SI-6 | code | 7 | 0 | 4 | 3 | $4.84 |
+
+The only tool approval (a multi-line commit message) was fixed after SI-1. Two of the questions came from the
+watchdog false positive fixed in round 1; the others were real design decisions.
 
 ### Process fixes found by watching
 
@@ -28,5 +49,7 @@ holds.
    now the same edit twice, an edit undone, or 10 edits without a command; reads count per part of a file.
 5. SI-1's build ran the whole suite itself and then again in the `repo:test` check: filed as SI-3 for the AI.
 6. SI-1's reply points people to "Settings" to switch groups, which did not exist: filed as SI-4.
+8. In SI-4's PR stage the AI ran the suite in the background and waited with an unbounded `until … sleep` loop:
+   filed as SI-6.
 7. The independent reviewer (review_clean) found a real race in SI-4's `unbind()`; the AI fixed it before the
    gate. The reviewer and the suite then ran again: a second `stage_complete` repeats every check.

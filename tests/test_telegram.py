@@ -128,6 +128,23 @@ async def test_other_groups_are_ignored_once_bound(office, bot):
     assert len(bot.calls) == before
 
 
+async def test_only_start_binds_a_group(office, bot):
+    await office.telegram.handle_update(tg_message("tin nhắn cũ", 5))
+    assert office.telegram.chat_id is None and not bot.calls
+    await office.telegram.handle_update(tg_message("/start@OfficeBot"))
+    assert office.telegram.chat_id == GROUP
+
+
+async def test_start_in_another_group_explains_how_to_switch(office, bot):
+    await bind(office, bot)
+    before = len(bot.calls)
+    await office.telegram.handle_update(tg_message("/start", 5, chat=-999))
+    reply = bot.calls[before:]
+    assert len(reply) == 1 and reply[0][0] == "sendMessage"
+    assert reply[0][1]["chat_id"] == -999 and reply[0][1]["message_thread_id"] == 5 and "Cài đặt" in reply[0][1]["text"]
+    assert office.telegram.chat_id == GROUP
+
+
 # ---- messages both ways ---------------------------------------------------------------------------
 
 

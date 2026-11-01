@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from actoroffice.app import Office
 from actoroffice.domain.errors import NotFound
-from actoroffice.domain.stage import default_templates
+from actoroffice.domain.stage import TEMPLATE_TITLES, default_templates
 from actoroffice.domain.team import LOCAL_OWNER_ID, TeamSettings
 from actoroffice.domain.work import TicketStatus
 
@@ -73,7 +73,7 @@ def register(app: FastAPI, office: Office) -> None:
         result = []
         for team in await teams.list_teams():
             result.append({**team.model_dump(), "members": [m.model_dump() for m in await teams.members(team.id)]})
-        return {"teams": result, "users": [u.model_dump() for u in await teams.list_users()], "templates": list(default_templates())}
+        return {"teams": result, "users": [u.model_dump() for u in await teams.list_users()], "templates": list(default_templates()), "template_titles": TEMPLATE_TITLES}
 
     @app.post("/api/people")
     async def add_person(body: PersonBody) -> dict[str, Any]:
@@ -213,6 +213,10 @@ def register(app: FastAPI, office: Office) -> None:
             ticket = await stages.steer(key, body.text, by=by)
         elif cmd == "merged":
             ticket = await stages.external_passed(key, "merge", by=by, note=body.text or "PR đã merge")
+        elif cmd in ("quick", "full"):
+            target = "quick" if cmd == "quick" else "code"
+            label = "Sửa nhỏ" if cmd == "quick" else "đầy đủ"
+            ticket = await stages.switch_template(key, target, reason=body.text or f"người chọn quy trình {label}", by=by)
         elif cmd == "approved_script":
             ticket = await stages.external_passed(key, "script", by=by, note=body.text or "đã duyệt")
         else:

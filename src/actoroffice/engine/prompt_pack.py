@@ -68,6 +68,10 @@ calls and follow it with logs_trace; logs_diff shows what changed after your cha
 Flows across services: test from the start of the flow when you can; otherwise record the state before the step
 you change with scenario_record and start tests from it.
 
+## Work in proportion
+Size the work and the documents to the task, like a senior engineer: a small change gets a few lines and one
+approval, not a template. Read a skill only when the stage needs the full document it describes.
+
 ## Work out loud (people watch your progress live)
 Before each group of tool calls write one short line: what you are about to do and why. After a surprise or an
 error say what you found and what you will do next. Never write secrets.
@@ -82,6 +86,9 @@ error say what you found and what you will do next. Never write secrets.
 STAGE_INSTRUCTIONS: dict[str, str] = {
     "understand": """\
 Goal: an exact, testable requirement the BA can approve.
+- First judge the size, from the ticket and a quick look at the code. If the change is small and clear — one area,
+  a few files, nothing for people to decide (a layout fix, a typo, a config value, a bug whose cause you can point
+  to) — call stage_switch(template="quick", reason) right away and end your turn. Do not write requirements for it.
 - Read the ticket and its Jira issue (jira_issue, related issues with jira_search). Search Confluence
   (wiki_search / wiki_page), earlier tickets and memories for the same area, and the code for what exists today
   (entry points, rules already implemented, data). Other services' code: repos_list / repo_fetch. Note
@@ -104,6 +111,22 @@ Goal: a plan a Dev can choose from and approve.
   4. Test plan: a table mapping every AC-n to the tests that prove it (unit / integration / e2e).
   5. Access needs: environments, databases, services the build needs (or "none").
 - stage_complete: a Dev chooses and approves (they may edit the plan first: always follow the approved revision).""",
+    "scope": """\
+Goal: one short note a Dev approves in one click (small, clear change).
+- Find the cause in the code (file:line). Do not read skills or document templates; do not write requirements,
+  user stories, options or KPIs.
+- Write the document `plan` in at most 15 lines: Problem (with file:line) · Fix (what you will change) · Files ·
+  How it is checked (a test, or for UI a manual check / screenshot) · AC-1 … AC-3, one line each
+  (Given … When … Then …).
+- If it turns out bigger or needs a decision from people, call stage_switch(template="code", reason) instead.
+- stage_complete: a Dev approves (or sends it back with a note).""",
+    "quick:build": """\
+Goal: the change the approved plan describes, checked and committed.
+- Make the change with Edit/Write in your working directory. Keep it as small as the plan.
+- Add or update a test when that area has tests; for a UI or CSS change say how a person checks it (and take a
+  screenshot if you can run the page).
+- Run the project's build/test/lint if it has them. Commit with a clear message (no push to the main branch).
+- No handoff document and no plan_steps needed: say what changed and how to check it in the stage_complete summary.""",
     "design": """\
 Goal: an automation design the people can approve.
 - Read the approved `requirements`. Write the document `plan`: what triggers the flow (schedule/event), its steps
@@ -213,7 +236,8 @@ def build(
             f"# Current stage: {stage.id} (attempt {stage_run.attempt}) of workflow '{template.name}': {route}",
             f"Required documents: {outputs}. Checks before it can finish: {checks}. {gate}",
             "",
-            STAGE_INSTRUCTIONS.get(stage.id, "Do what the stage requires, then stage_complete."),
+            STAGE_INSTRUCTIONS.get(f"{template.name}:{stage.id}")
+            or STAGE_INSTRUCTIONS.get(stage.id, "Do what the stage requires, then stage_complete."),
             stage.instructions.strip(),
             "",
             (

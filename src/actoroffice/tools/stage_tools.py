@@ -152,6 +152,17 @@ async def stage_reopen(args: dict[str, Any], ctx: ToolCtx) -> str:
     return f"{updated.key} is back at stage {updated.stage}. End your turn now; a fresh session continues there."
 
 
+async def stage_switch(args: dict[str, Any], ctx: ToolCtx) -> str:
+    ticket = await _stage_ctx(ctx)
+    try:
+        updated = await ctx.office.stages.switch_template(
+            ticket.id, str(args["template"]), reason=str(args.get("reason") or ""), by=ctx.actor.name, run_id=ctx.run_id
+        )
+    except (OfficeError, KeyError) as exc:
+        raise ToolError(str(exc)) from exc
+    return f"{updated.key} now follows workflow '{updated.stage_template}' from stage {updated.stage}. End your turn now; a fresh session continues there."
+
+
 async def dossier_update(args: dict[str, Any], ctx: ToolCtx) -> str:
     office = ctx.office
     if ctx.ticket_id is None:
@@ -314,6 +325,13 @@ STAGE_TOOLS: list[ToolDef] = [
         "Go back to an earlier stage when something essential is missing (e.g. a requirement found missing while building).",
         schema({"stage": {"type": "string"}, "reason": {"type": "string"}}, required=["stage", "reason"]),
         stage_reopen,
+    ),
+    ToolDef(
+        "stage_switch",
+        "Move the ticket to the other workflow: 'quick' for a small, clear change (one short plan, one approval), "
+        "'code' when it turns out bigger or has decisions people must make (requirements, plan with options).",
+        schema({"template": {"type": "string", "enum": ["quick", "code"]}, "reason": {"type": "string"}}, required=["template", "reason"]),
+        stage_switch,
     ),
     ToolDef(
         "dossier_update",

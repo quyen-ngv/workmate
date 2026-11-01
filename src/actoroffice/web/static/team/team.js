@@ -243,7 +243,9 @@ function card(item) {
     const remember = (p.suggestions || []).filter((s) => s.scope !== "exact" || (p.suggestions || []).length === 1).slice(0, 3);
     return `<div class="card" data-card="${esc(item.id)}"><div class="who">🔐 AI xin chạy: ${esc(p.tool)}${p.reason ? ` · ${esc(p.reason)}` : ""}</div><pre>${esc(p.target || "")}</pre>
       <div class="opts"><button class="btn good" data-approve="1">Cho phép 1 lần</button>
-        ${remember.map((s) => `<button class="btn" data-remember="${esc(s.rule)}" title="Không hỏi lại lệnh này${where}">♾ Luôn cho phép <code>${esc(s.rule.replace(/^\w+\(|\)$/g, ""))}</code>${where}</button>`).join("")}
+        ${remember.map((s) => s.scope === "mode"
+          ? `<button class="btn" data-remember="${esc(s.rule)}" title="Đổi quyền của dự án sang: Toàn quyền trong thư mục code">♾ Cho phép mọi lệnh trong thư mục code${where}</button>`
+          : `<button class="btn" data-remember="${esc(s.rule)}" title="Không hỏi lại lệnh này${where}">♾ Luôn cho phép <code>${esc(s.rule.replace(/^\w+\(|\)$/g, ""))}</code>${where}</button>`).join("")}
         <button class="btn bad" data-approve="0">Từ chối</button></div></div>`;
   }
   return `<div class="card"><div class="who">${esc(item.kind)}</div></div>`;
@@ -276,6 +278,8 @@ function renderPane(key) {
           ${st.status === "paused" ? `<button class="btn small" data-cmd="resume">▶ Tiếp</button>` : `<button class="btn small" data-cmd="pause">⏸ Dừng</button>`}
           <button class="btn small" data-cmd="retry" title="Làm lại giai đoạn">↻</button>
           ${t.stage === "pr" ? `<button class="btn small" data-cmd="merged">PR đã merge</button>` : ""}
+          ${t.stage_template === "code" && ["understand", "plan"].includes(t.stage) ? `<button class="btn small" data-cmd="quick" title="Việc nhỏ: 1 ghi chú ngắn, 1 lần duyệt">⇄ Sửa nhỏ</button>` : ""}
+          ${t.stage_template === "quick" && ["scope", "build"].includes(t.stage) ? `<button class="btn small" data-cmd="full" title="Quy trình đầy đủ: requirements, plan, kiến thức">⇄ Đầy đủ</button>` : ""}
         </span>
       </div>
     </div>
@@ -365,7 +369,7 @@ async function pageNewTask() {
   const body = sheet("Giao việc mới cho AI", `
     <div class="form">
       <label>Tiêu đề<input data-f="title" placeholder="vd. Hoàn tiền cho đơn VIP trong 60 ngày"></label>
-      <label>Loại việc<select data-f="template">${people.templates.map((t) => `<option>${esc(t)}</option>`).join("")}</select></label>
+      <label>Loại việc<select data-f="template">${people.templates.map((t) => `<option value="${esc(t)}">${esc((people.template_titles || {})[t] || t)}</option>`).join("")}</select></label>
       <label>Repo / dự án<select data-f="project_id"><option value="">— (không có repo)</option>${setup.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
       <label>Team<select data-f="team_id"><option value="">—</option>${people.teams.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</select></label>
       <label>Người yêu cầu<select data-f="owner_user_id"><option value="">—</option>${people.users.filter((u) => u.id !== "user").map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join("")}</select></label>
@@ -463,6 +467,7 @@ async function pageSetup() {
 const PERM_MODES = [
   ["read_only", "Chỉ đọc", "AI đọc code và chạy lệnh chỉ đọc; mọi thay đổi (sửa file, commit, chạy lệnh khác) đều hỏi."],
   ["workspace", "Tự động trong workspace (khuyên dùng)", "AI tự sửa file, chạy test/build và commit trong nhánh riêng của việc. Chỉ hỏi khi ra mạng (push, curl), đụng thư mục khác, xoá đệ quy hoặc chạy chương trình lạ."],
+  ["folder", "Toàn quyền trong thư mục code", "AI làm mọi thứ trong thư mục của việc: chạy mọi lệnh và script, xoá, git reset. Chỉ hỏi khi ra mạng (push, tải gói, curl) hoặc đụng thư mục khác. Không có sandbox: một script tự viết vẫn có thể ghi ra ngoài."],
   ["full", "Tin tưởng hoàn toàn", "Không hỏi gì, trừ các lệnh nguy hiểm luôn bị chặn và luật của team. Chỉ dùng với repo thử nghiệm."],
 ];
 

@@ -506,6 +506,49 @@ class StageService:
         office.scheduler.kick()
         await self._publish(ticket.id)
 
+    async def switch_template(self, ref: int | str, template: str, *, reason: str, by: str, run_id: str | None = None) -> Ticket:
+        """Move a ticket between the full and the quick workflow (before its build is done); it restarts at the new
+        workflow's first stage. Documents already written stay."""
+        from actoroffice.domain.stage import SWITCHABLE, TEMPLATE_TITLES
+
+        office = self.office
+        ticket = await office.tickets.get(ref)
+        if SWITCHABLE.get(ticket.stage_template or "") != template:
+            raise StageError(f"Chỉ chuyển được giữa quy trình code và quick (đang là {ticket.stage_template})")
+        if ticket.stage in ("pr", "close"):
+            raise StageError("Đã tới pull request: không đổi quy trình nữa")
+        tpl = await office.teams.template(ticket.model_copy(update={"stage_template": template}))
+        if tpl is None or not tpl.stages:
+            raise StageError(f"Không có mẫu giai đoạn '{template}'")
+        current = await self.current_run(ticket)
+        if current is not None and current.finished_at is None:
+            await office.db.execute(
+                "UPDATE stage_runs SET finished_at = ?, outcome = ?, summary = ? WHERE id = ?",
+                (utcnow(), StageOutcome.SWITCHED.value, reason[:2000], current.id),
+            )
+        for item in await office.interactions.pending(ticket_id=ticket.id):
+            if item.kind.value == "approve_stage":
+                await office.interactions.cancel(item.id)
+        if run_id:
+            self.finished_runs.add(run_id)
+        first = tpl.stages[0]
+        await office.db.execute(
+            "UPDATE tickets SET stage = ?, stage_template = ?, updated_at = ? WHERE id = ?", (first.id, tpl.name, utcnow(), ticket.id)
+        )
+        await self._open_run(ticket.id, first.id)
+        await office.tickets.add_comment(
+            ticket.id,
+            f"🔀 Chuyển sang quy trình {TEMPLATE_TITLES.get(tpl.name, tpl.name)} ({await self._name(by)}): {reason}. {self._route(tpl)}",
+            author_kind="system",
+            author_id=None,
+        )
+        await self._set_status(ticket.id, S.TODO, run_id=run_id, comment=None)
+        if ticket.assignee_actor_id:
+            await office.wakes.enqueue(ticket.assignee_actor_id, WakeSource.MANUAL, ticket_id=ticket.id, payload={"stage": first.id})
+        office.scheduler.kick()
+        await office.audit.record("stage:switch", "switched", ticket_id=ticket.id, target=tpl.name, detail={"by": by, "reason": reason})
+        return await self._publish(ticket.id)
+
     async def reopen(self, ref: int | str, target: str, *, reason: str, by: str, run_id: str | None = None) -> Ticket:
         """Go back to an earlier stage (e.g. a missing requirement found while building)."""
         office = self.office

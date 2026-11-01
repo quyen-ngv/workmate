@@ -79,6 +79,7 @@ class StageOutcome(StrEnum):
     COMPLETED = "completed"
     REJECTED = "rejected"  # a gate sent it back
     REOPENED = "reopened"  # moved back to an earlier stage
+    SWITCHED = "switched"  # the ticket moved to another workflow (quick ↔ code)
     STOPPED = "stopped"
 
 
@@ -107,6 +108,7 @@ class StageRun(BaseModel):
 
 STAGE_TITLES = {
     "understand": "Tìm hiểu",
+    "scope": "Chốt cách sửa",
     "plan": "Lên kế hoạch",
     "design": "Thiết kế",
     "build": "Làm",
@@ -146,6 +148,29 @@ def _code() -> StageTemplate:
     )
 
 
+def _quick() -> StageTemplate:
+    """A small, clear change (a layout fix, a typo, a config value, a bug whose cause is known): one short note and
+    one approval, then the change and its pull request. No requirements document, options, handoff or KB stage."""
+    return StageTemplate(
+        name="quick",
+        stages=[
+            StageDef(id="scope", outputs=["plan"], checks=["outputs", "plan_ac"], gate="plan"),
+            StageDef(id="build", checks=["no_secrets", "log_lint", "repo:build", "repo:test", "repo:lint"]),
+            StageDef(id="pr", checks=["pr_linked"], gate="merge"),
+        ],
+    )
+
+
+TEMPLATE_TITLES = {
+    "code": "Code (đầy đủ)",
+    "quick": "Sửa nhỏ (1 lần duyệt)",
+    "automation": "Tự động hoá",
+    "research": "Nghiên cứu",
+    "doc": "Tài liệu",
+}
+SWITCHABLE = {"code": "quick", "quick": "code"}  # workflows a ticket can move between before its PR
+
+
 def _automation() -> StageTemplate:
     return StageTemplate(
         name="automation",
@@ -172,6 +197,7 @@ def _produce(name: str, output: str) -> StageTemplate:
 def default_templates() -> dict[str, StageTemplate]:
     return {
         "code": _code(),
+        "quick": _quick(),
         "automation": _automation(),
         "research": _produce("research", "report"),
         "doc": _produce("doc", "document"),

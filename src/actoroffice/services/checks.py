@@ -250,6 +250,14 @@ async def check_ac_testable(ctx: CheckContext) -> CheckResult:
     return CheckResult(id="ac_testable", status="passed", summary=f"{len(blocks)} AC đều kiểm thử được", data={"acs": list(blocks)})
 
 
+async def check_plan_ac(ctx: CheckContext) -> CheckResult:
+    """Quick workflow: the short plan states at least one acceptance criterion (AC-1 …)."""
+    acs = list(ac_blocks(ctx.docs.get("plan", "")))
+    if not acs:
+        return CheckResult(id="plan_ac", status="failed", summary="plan chưa có tiêu chí chấp nhận AC-1 (1–3 dòng là đủ)")
+    return CheckResult(id="plan_ac", status="passed", summary=f"{len(acs)} AC", data={"acs": acs})
+
+
 async def check_plan_has_ac_map(ctx: CheckContext) -> CheckResult:
     acs = list(ac_blocks(ctx.docs.get("requirements", "")))
     if not acs:
@@ -336,6 +344,7 @@ BUILTIN = {
     "outputs": check_outputs,
     "ac_testable": check_ac_testable,
     "plan_has_ac_map": check_plan_has_ac_map,
+    "plan_ac": check_plan_ac,
     "plan_has_options": check_plan_has_options,
     "steps_done": check_steps_done,
     "tests_changed": check_tests_changed,

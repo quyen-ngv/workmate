@@ -32,8 +32,9 @@ uv run actoroffice init                                   # creates the AI engin
 uv run actoroffice user add Lan --telegram 111 && uv run actoroffice user add Minh --telegram 222
 uv run actoroffice team add Billing --jira BIL            # --jira: issues labelled "ai" become tickets
 uv run actoroffice team member Billing Lan ba && uv run actoroffice team member Billing Minh dev lead
+uv run actoroffice project add billing --path F:/code/billing      # the repo the AI works in (git worktree per ticket)
 uv run actoroffice project set billing --team Billing --repo-url acme/billing --profile '{"test": ["mvn","-q","test"]}'
-uv run actoroffice task "Hoàn tiền VIP 60 ngày" --team Billing --owner Lan
+uv run actoroffice task "Hoàn tiền VIP 60 ngày" --team Billing --owner Lan --project billing
 uv run actoroffice serve                                  # web: /team (herdr-like) · Telegram: /task, topic per ticket
 ```
 

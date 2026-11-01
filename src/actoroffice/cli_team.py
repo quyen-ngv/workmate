@@ -62,7 +62,12 @@ async def cmd_task(office: Office, args: argparse.Namespace) -> None:
     owner = await office.teams.find_user(args.owner) if args.owner else None
     if args.owner and owner is None:
         raise OfficeError(f"Không có người '{args.owner}'")
-    ticket = await office.tickets.create(args.title, description=args.description or args.title, created_by=LOCAL_OWNER_ID)
+    project = await office.projects.find(args.project) if args.project else None
+    if args.project and project is None:
+        raise OfficeError(f"Không có project '{args.project}' (actoroffice project list)")
+    ticket = await office.tickets.create(
+        args.title, description=args.description or args.title, created_by=LOCAL_OWNER_ID, project_id=project.id if project else None
+    )
     ticket = await office.stages.start(
         ticket.id, template=args.template, by=LOCAL_OWNER_ID, team_id=team.id if team else None, owner_user_id=owner.id if owner else None, mode=args.mode
     )
@@ -166,6 +171,16 @@ async def cmd_bitbucket(office: Office, args: argparse.Namespace) -> None:
 async def cmd_project(office: Office, args: argparse.Namespace) -> None:
     import json as _json
 
+    from actoroffice.domain.work import ProjectAccess
+
+    if args.action == "add":
+        if not args.path:
+            raise OfficeError("Cách dùng: actoroffice project add <tên> --path <thư mục repo> [--access worktree]")
+        await office.projects.create(args.name, path=args.path, access=ProjectAccess(args.access))
+    elif args.action == "list":
+        for p in await office.projects.list():
+            out(f"{p.name:16} {p.access.value:10} team={p.team_id or '-':18} {p.path or '-'}")
+        return
     project = await office.projects.find(args.name)
     if project is None:
         raise OfficeError(f"Không có project '{args.name}'")
@@ -320,6 +335,7 @@ def register(sub: Any) -> None:
     p.add_argument("--template", default="code", choices=list(default_templates()))
     p.add_argument("--team")
     p.add_argument("--owner")
+    p.add_argument("--project", help="project (repo) the AI works in")
     p.add_argument("--mode", choices=["wait", "assume"])
     p.set_defaults(fn=cmd_task)
 
@@ -353,9 +369,15 @@ def register(sub: Any) -> None:
     p.add_argument("workspace", nargs="?")
     p.set_defaults(fn=cmd_bitbucket)
 
-    p = sub.add_parser("project", help='project set <name> --team T --kind code|reference --repo-url ws/slug --profile '{"test": ["mvn","-q","test"]}'')
-    p.add_argument("action", choices=["set"])
-    p.add_argument("name")
+    p = sub.add_parser(
+        "project",
+        help='project add <name> --path <repo> | list | set <name> --team T --kind code|reference --repo-url ws/slug '
+        "--profile '{\"test\": [\"mvn\",\"-q\",\"test\"]}'",
+    )
+    p.add_argument("action", choices=["add", "set", "list"])
+    p.add_argument("name", nargs="?", default="")
+    p.add_argument("--path", help="repo folder (add)")
+    p.add_argument("--access", default="worktree", choices=["worktree", "read_only", "direct"])
     p.add_argument("--team")
     p.add_argument("--kind", choices=["code", "reference", "automation"])
     p.add_argument("--repo-url")

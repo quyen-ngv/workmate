@@ -21,6 +21,30 @@ server: one Python process and one SQLite file.
 > See [docs/DESIGN.md](docs/DESIGN.md) and the scenario test plan
 > [docs/test-plan/scenarios.md](docs/test-plan/scenarios.md).
 
+## Team copilot (one AI engineer with a team of people)
+
+One AI engineer ("Copilot") works with people who hold roles (BA, Dev, QE, Lead, Admin). A ticket goes through
+stages with gates people pass: **understand → [BA approves] → plan → [Dev approves] → build → pr → [merge] →
+close → [people confirm the knowledge]**. Design: [docs/plans/2026-10-31-team-copilot-design.md](docs/plans/2026-10-31-team-copilot-design.md).
+
+```sh
+uv run actoroffice init                                   # creates the AI engineer, checks this machine (doctor)
+uv run actoroffice user add Lan --telegram 111 && uv run actoroffice user add Minh --telegram 222
+uv run actoroffice team add Billing --jira BIL            # --jira: issues labelled "ai" become tickets
+uv run actoroffice team member Billing Lan ba && uv run actoroffice team member Billing Minh dev lead
+uv run actoroffice project set billing --team Billing --repo-url acme/billing --profile '{"test": ["mvn","-q","test"]}'
+uv run actoroffice task "Hoàn tiền VIP 60 ngày" --team Billing --owner Lan
+uv run actoroffice serve                                  # web: /team (herdr-like) · Telegram: /task, topic per ticket
+```
+
+- Connections (credentials stay in `<data>/secrets`, never shown to the AI): `jira login <url> <email> <token>`
+  (Jira + Confluence), `bitbucket <email> <token> <workspace>`, `resource add` for shared environments.
+- Rules: `rules add … --scope team:<id>` / web Rules page / `/rule` on Telegram; repo `CLAUDE.md`, `AGENTS.md`,
+  `.kiro/steering/*.md` are imported with `rules import <project>`.
+- Runtime per team: Claude (default) or Kiro CLI (`ai_model: kiro` in config.yaml or the team settings).
+- Demo without the LLM: `uv run py scenarios/team_demo.py --home F:/_ao_demo`. Live run with Claude:
+  `uv run py scenarios/live_e2e.py --home F:/_ao_live` (uses tokens).
+
 ## Requirements
 
 - Windows 11, macOS or Linux; Python 3.12 (`py` on Windows); [uv](https://docs.astral.sh/uv/); git

@@ -13,6 +13,7 @@ from actoroffice.domain.run import Run, RunKind, RunStatus, TurnResult, TurnStat
 from actoroffice.domain.work import InteractionKind, InteractionStatus, Ticket, TicketStatus
 from actoroffice.runtimes.base import TurnSpec
 from actoroffice.services.chat import handle
+from actoroffice.services.checks import command_list
 from actoroffice.services.runs import ticket_session_key
 from actoroffice.tools.chat_tools import CHAT_TOOLS
 from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
@@ -271,6 +272,7 @@ class Executor:
             answered=answered,
             new_comments=new_comments,
             changes=changes,
+            office_runs_tests=bool(command_list((project.profile if project else None) or {}, "test")),
         )
 
     async def _drop_seen_changes(self, actor_id: str, ticket_id: int, seen: int) -> None:

@@ -168,6 +168,19 @@ Goal: what the team learned is written down and confirmed by people.
   items in one go (they can drop some).""",
 }
 
+# When the project profile declares `test`, the office runs the whole suite at stage_complete (check repo:test):
+# the AI runs only the tests for what it changed instead of running everything twice.
+OFFICE_RUNS_TESTS = {
+    "Run the project's build/test/lint if it has them.": (
+        "Run the build/lint if it has them, but only the tests for what you changed (their test file, or -k), not the\n"
+        "  whole suite: the office runs it at stage_complete (check repo:test) and sends you the end of its output when it fails."
+    ),
+    "run the project's build/test/lint.": (
+        "run only the tests for\n  what you changed (their test file, or -k), not the whole suite: the office runs it at stage_complete (check\n"
+        "  repo:test) and sends you the end of its output when it fails. Run the build/lint if the project has them."
+    ),
+}
+
 
 @dataclass
 class StagePrompt:
@@ -199,6 +212,7 @@ def build(
     answered: list[Interaction],
     new_comments: list[Comment],
     changes: list[Comment],
+    office_runs_tests: bool = False,
 ) -> StagePrompt:
     parts: dict[str, str] = {}
     team = f" of team {team_name}" if team_name else ""
@@ -237,8 +251,7 @@ def build(
             f"# Current stage: {stage.id} (attempt {stage_run.attempt}) of workflow '{template.name}': {route}",
             f"Required documents: {outputs}. Checks before it can finish: {checks}. {gate}",
             "",
-            STAGE_INSTRUCTIONS.get(f"{template.name}:{stage.id}")
-            or STAGE_INSTRUCTIONS.get(stage.id, "Do what the stage requires, then stage_complete."),
+            _instructions(template, stage, office_runs_tests),
             stage.instructions.strip(),
             "",
             (
@@ -301,6 +314,16 @@ def build(
         "person: say for what) or ticket_set_status todo (you will continue by yourself).",
     ]
     return StagePrompt(system=system, turn="\n".join(delta), parts=parts)
+
+
+def _instructions(template: StageTemplate, stage: StageDef, office_runs_tests: bool) -> str:
+    text = STAGE_INSTRUCTIONS.get(f"{template.name}:{stage.id}") or STAGE_INSTRUCTIONS.get(
+        stage.id, "Do what the stage requires, then stage_complete."
+    )
+    if office_runs_tests and "repo:test" in stage.checks:
+        for old, new in OFFICE_RUNS_TESTS.items():
+            text = text.replace(old, new)
+    return text
 
 
 def disposition_reminder(ticket_key: str) -> str:

@@ -25,6 +25,7 @@ from actoroffice.domain.work import (
 )
 from actoroffice.engine.gate import OfficeGate
 from actoroffice.runtimes.base import GateDecision
+from actoroffice.security.policy import WAIT_LOOP_REASON
 from actoroffice.services.approvals_recheck import AUTO_BY
 from actoroffice.services.interactions import input_hash
 
@@ -459,3 +460,19 @@ async def test_ac12_api_reports_auto_approved_count(office, api, tmp_path):
     body = r.json()
     assert r.status_code == 200 and body["auto_approved"] == 2
     assert body["id"] == billing.id and body["name"] == "billing" and body["permission_mode"] == "folder" and "allow_rules" in body
+
+
+async def test_ac10_gate_denies_wait_loop_without_a_card(office, tmp_path):
+    ai = await office.ensure_ai()
+    billing = await project(office, tmp_path, "billing")
+    await office.projects.set_permissions(billing.id, mode="full")
+    ticket = await ticket_in(office, billing.id, ai.id)
+    run_id = new_id("run")
+    await office.runs.start(Run(id=run_id, actor_id=ai.id, kind=RunKind.TICKET, ticket_id=ticket.id))
+    gate = OfficeGate(office, ai, await office.org.get_position(ai.position_id), run_id, Path(billing.path), ticket_id=ticket.id, ticket_key=ticket.key)
+
+    result = await gate.before_tool("Bash", {"command": "while true; do sleep 5; done"}, None)
+    assert result.decision == GateDecision.DENY and result.reason == WAIT_LOOP_REASON
+    rows = await office.db.fetchall("SELECT outcome, detail_json FROM audit_log WHERE action = 'tool:Bash'")
+    assert [r["outcome"] for r in rows] == ["denied"] and WAIT_LOOP_REASON[:40] in rows[0]["detail_json"]
+    assert await office.interactions.pending() == [] and gate.asked == []

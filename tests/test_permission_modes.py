@@ -12,7 +12,7 @@ import yaml
 
 from actoroffice.domain.org import Position
 from actoroffice.security import shell
-from actoroffice.security.policy import Decision, PolicyEngine, ToolCallContext, office_tool
+from actoroffice.security.policy import WAIT_LOOP_REASON, Decision, PolicyEngine, ToolCallContext, office_tool
 
 
 @pytest.fixture
@@ -222,3 +222,132 @@ def test_newlines_inside_quotes_are_text_and_outside_they_split(engine, ws):
     parts = shell.split("ls\ncat a.txt")
     assert [p.argv[0] for p in parts] == ["ls", "cat"]
     assert shell.split("ls \\\nrm x") is None  # a line continuation is judged as a whole
+
+
+# ---- SI-6: a wait loop without a bound is denied, with guidance for the AI ----------------------------------
+
+def without_wait_check(monkeypatch, engine: PolicyEngine, tool: str, command: str, c: ToolCallContext):
+    """The verdict the command got before SI-6: the same policy with the wait-loop check switched off."""
+    monkeypatch.setattr(shell, "wait_loop", lambda _command: False)
+    try:
+        return engine.decide(tool, {"command": command}, c)
+    finally:
+        monkeypatch.undo()
+
+
+def test_ac2_wait_loop_is_denied_with_guidance(engine, ws):
+    verdict = engine.decide("Bash", {"command": "until [ -s .pytest-report.xml ]; do sleep 15; done"}, ctx(ws))
+    assert verdict.decision == Decision.DENY
+    assert verdict.reason == WAIT_LOOP_REASON
+    assert "foreground" in verdict.reason and "timeout" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"mode": "read_only"},
+        {"mode": "workspace"},
+        {"mode": "folder"},
+        {"mode": "full"},
+        {"mode": "full", "trust_all": True},
+        {"mode": "folder", "allow_rules": ["Bash(*)", "Bash"]},
+        {"mode": "folder", "project_commands": ["while true; do sleep 5; done"]},
+        {"mode": "folder", "bash_allow": ["*"]},
+    ],
+)
+def test_ac3_wait_loop_denied_in_every_mode_and_trust(engine, ws, extra):
+    extra = dict(extra)
+    position = engineer()
+    position.policy.bash_allow = extra.pop("bash_allow", position.policy.bash_allow)
+    c = ToolCallContext(position=position, workspace=ws, **extra)
+    verdict = engine.decide("Bash", {"command": "while true; do sleep 5; done"}, c)
+    assert verdict.decision == Decision.DENY and verdict.reason == WAIT_LOOP_REASON
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -q > out.txt & until [ -s out.txt ]; do sleep 15; done",
+        "pytest -q > out.txt &\nuntil [ -s out.txt ]\ndo\n  sleep 15\ndone\ncat out.txt",
+        "while ! test -f out.xml; do\n  echo waiting\n  sleep 10\ndone",
+        "ls && while true; do sleep 1; done",
+    ],
+)
+def test_ac4_background_then_wait_and_multiline(engine, ws, command):
+    assert decide(engine, ctx(ws, "folder"), command) == Decision.DENY, command
+
+
+def test_ac5_counter_loop_is_still_unbounded(engine, ws):
+    command = "i=0; while [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done"
+    assert decide(engine, ctx(ws, "folder"), command) == Decision.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -c 'until [ -s f ]; do sleep 5; done'",
+        'sh -c "while true; do sleep 5; done"',
+        "bash -lc 'until [ -s f ]; do sleep 5; done' && cat f",
+        "timeout 5 ls; bash -c 'until [ -s f ]; do sleep 5; done'",  # the timeout bounds another command
+    ],
+)
+def test_ac6_loop_inside_bash_c_is_denied(engine, ws, command):
+    assert decide(engine, ctx(ws, "folder"), command) == Decision.DENY, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "timeout 300 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout -k 5 300 sh -c 'until [ -s f ]; do sleep 5; done'",
+        "FOO=1 timeout 60s bash -c \"while true; do sleep 5; done\"",
+        "uv run pytest -q; timeout 300 bash -c 'until [ -s f ]; do sleep 5; done'",
+    ],
+)
+def test_ac7_timeout_bounds_the_loop(engine, ws, command, monkeypatch):
+    c = ctx(ws, "folder")
+    assert shell.wait_loop(command) is False
+    verdict = engine.decide("Bash", {"command": command}, c)
+    assert verdict.reason != WAIT_LOOP_REASON
+    assert verdict == without_wait_check(monkeypatch, engine, "Bash", command, c)
+
+
+@pytest.mark.parametrize(
+    ("tool", "command"),
+    [
+        ("PowerShell", "while (-not (Test-Path out.xml)) { Start-Sleep 5 }"),
+        ("PowerShell", "do { Start-Sleep -Seconds 5 } until (Test-Path out.xml)"),
+        ("PowerShell", "do {\n  sleep 2\n} while (-not (Test-Path out.xml))"),
+        ("PowerShell", "Start-Job { pytest }; while ($true) { Start-Sleep -Milliseconds 500 }"),
+        ("Bash", 'powershell -Command "while (-not (Test-Path out.xml)) { Start-Sleep 5 }"'),
+        ("Bash", "pwsh -NoProfile -c 'do { Start-Sleep 1 } until (Test-Path x)'"),
+    ],
+)
+def test_ac8_powershell_wait_loops(engine, ws, tool, command):
+    verdict = engine.decide(tool, {"command": command}, ctx(ws, "folder"))
+    assert verdict.decision == Decision.DENY and verdict.reason == WAIT_LOOP_REASON, command
+
+
+@pytest.mark.parametrize(
+    ("tool", "command"),
+    [
+        ("Bash", "uv run pytest -q"),
+        ("Bash", "git status"),
+        ("Bash", 'grep -rn "while true; do sleep" src'),
+        ("Bash", 'git commit -m "fix: until loop with sleep"'),
+        ("Bash", "git commit -m 'fix: while x; do sleep 1; done'"),
+        ("Bash", "sleep 2"),
+        ("Bash", "while read line; do echo $line; done < f.txt"),
+        ("Bash", "pytest -q &"),
+        ("Bash", "for f in a b; do sleep 1; done"),
+        ("Bash", "echo until done; sleep 1"),
+        ("PowerShell", "Get-ChildItem | Where-Object { $_.Name -like 'while*' }"),
+        ("PowerShell", "Start-Sleep 2"),
+        ("PowerShell", "Select-String -Pattern 'while (1) { Start-Sleep 1 }' a.ps1"),
+    ],
+)
+def test_ac9_ordinary_commands_unchanged(engine, ws, tool, command, monkeypatch):
+    c = ctx(ws)
+    assert shell.wait_loop(command) is False, command
+    verdict = engine.decide(tool, {"command": command}, c)
+    assert verdict == without_wait_check(monkeypatch, engine, tool, command, c)

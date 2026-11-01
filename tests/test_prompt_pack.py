@@ -54,3 +54,11 @@ def test_ac2_profile_without_test_keeps_running_the_suite(template_name: str) ->
     system = _system(template_name, office_runs_tests=False)
     assert OLD in system.lower()
     assert "only the tests for" not in system
+
+
+def test_ac1_base_says_run_long_commands_in_the_foreground() -> None:
+    """SI-6: long commands run in the foreground, not in the background with a sleep loop waiting for them."""
+    section = _system("code", office_runs_tests=True).split("# How you work", 1)[1].split("\n# ", 1)[0]
+    how_you_work = " ".join(section.split())
+    assert "Run long commands (tests, builds) in the foreground, one command per call" in how_you_work
+    assert "never start them in the background and wait with a sleep/until/while loop" in how_you_work

@@ -385,6 +385,98 @@ def _where(raw: str, place: Place, cwd: Path | None) -> str:
     return "outside"
 
 
+# ---- wait loops (SI-6) -----------------------------------------------------------------------------------
+
+# Where a shell keyword can start a command: the start, after a separator, or after then/do/else.
+_CMD_START = r"(?:^|[;&|\n({]|\b(?:then|do|else|elif)\b)\s*"
+_BASH_LOOP = re.compile(_CMD_START + r"(?:until|while)\s.*?[;\n]\s*do\b(?P<body>.*?)[;&\n]\s*done\b", re.DOTALL)
+_BASH_SLEEP = re.compile(_CMD_START + r"sleep\b")
+_PS_START = r"(?:^|[;\n{}]|&&|\|\|)\s*"
+_PS_WHILE = re.compile(_PS_START + r"while\s*\(", re.IGNORECASE)
+_PS_DO = re.compile(_PS_START + r"do\s*\{", re.IGNORECASE)
+_PS_DO_END = re.compile(r"\s*(?:until|while)\s*\(", re.IGNORECASE)
+_PS_SLEEP = re.compile(r"(?<![\w$-])(?:start-sleep|sleep)\b", re.IGNORECASE)
+# A quoted string that another shell runs: bash -c '…', sh -lc "…", powershell -NoProfile -Command "…"
+_LAUNCH = re.compile(r"(?<![\w-])(?:bash|sh|zsh|dash|powershell|pwsh)(?:\.exe)?(?:\s+\S+)*?\s+-(?:[a-z]*c|command)\s*$", re.IGNORECASE)
+_BOUNDED = re.compile(r"^\s*(?:[A-Za-z_]\w*=\S*\s+)*timeout\s")
+
+
+def wait_loop(command: str, depth: int = 0) -> bool:
+    """True when the command waits in a loop that nothing bounds: `until/while …; do … sleep …; done` (sh) or
+    `while (…) { Start-Sleep … }`, `do { … sleep … } until/while (…)` (PowerShell). Keywords count only outside
+    quotes; a string run by `bash -c` / `powershell -Command` is looked into, unless `timeout N` wraps that command."""
+    masked, strings = _mask_quotes(command)
+    if _sh_wait(masked) or _ps_wait(masked):
+        return True
+    if depth >= 3:
+        return False
+    for start, inner in strings:
+        segment = re.split(r"[;&|\n]", masked[:start])[-1]
+        launch = _LAUNCH.search(segment)
+        if launch and not _BOUNDED.match(segment[: launch.start()]) and wait_loop(inner, depth + 1):
+            return True
+    return False
+
+
+def _mask_quotes(command: str) -> tuple[str, list[tuple[int, str]]]:
+    """The command with every quoted string blanked out, and the strings: (where it starts, its text)."""
+    out = list(command)
+    strings: list[tuple[int, str]] = []
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch not in "'\"":
+            i += 1
+            continue
+        start, text = i, []
+        i += 1
+        while i < len(command) and command[i] != ch:
+            if ch == '"' and command[i] == "\\" and i + 1 < len(command):
+                i += 1  # \" \\ \$ inside double quotes
+            text.append(command[i])
+            i += 1
+        end = min(i + 1, len(command))
+        out[start:end] = " " * (end - start)
+        strings.append((start, "".join(text)))
+        i = end
+    return "".join(out), strings
+
+
+def _sh_wait(masked: str) -> bool:
+    return any(_BASH_SLEEP.search(m.group("body")) for m in _BASH_LOOP.finditer(masked))
+
+
+def _ps_wait(masked: str) -> bool:
+    for m in _PS_WHILE.finditer(masked):
+        cond_end = _closing(masked, m.end() - 1, "(", ")")
+        brace = re.compile(r"\s*\{").match(masked, cond_end) if cond_end is not None else None
+        if brace:
+            end = _closing(masked, brace.end() - 1, "{", "}")
+            if _PS_SLEEP.search(masked[brace.end():end]):
+                return True
+    for m in _PS_DO.finditer(masked):
+        end = _closing(masked, m.end() - 1, "{", "}")
+        if end is not None and _PS_DO_END.match(masked, end) and _PS_SLEEP.search(masked[m.end():end]):
+            return True
+    return False
+
+
+def _closing(text: str, at: int, open_: str, close: str) -> int | None:
+    """The index just after the bracket that closes the one at `at` (None when it is never closed)."""
+    level = 0
+    for i in range(at, len(text)):
+        if text[i] == open_:
+            level += 1
+        elif text[i] == close:
+            level -= 1
+            if level == 0:
+                return i + 1
+    return None
+
+
 def program_name(word: str) -> str:
     name = word.replace("\\", "/").rsplit("/", 1)[-1].lower()
     return name[:-4] if name.endswith(".exe") else name

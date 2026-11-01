@@ -4,8 +4,9 @@ developer instead.
 
 - slow:     one command has been running longer than `slow_command_s`
 - stalled:  no event at all for `stall_after_s`
-- looping:  the same failing command 3 times, the same file read 4 times, or 3 edits of one file with no command
-            (test/build run) in between
+- looping:  the same failing command 3 times, the same part of a file read 4 times, the same edit made twice or
+            an edit undone, or 10 edits of one file with no command (test/build run) in between. Several different
+            edits of one file are normal work, not a loop.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 
 FAILS_FOR_LOOP = 3
 READS_FOR_LOOP = 4
-EDITS_FOR_LOOP = 3
+EDITS_FOR_LOOP = 10
 
 
 def normalize_command(cmd: str) -> str:
@@ -41,6 +42,7 @@ class Watchdog:
     failures: Counter[str] = field(default_factory=Counter)
     reads: Counter[str] = field(default_factory=Counter)
     edits_since_command: Counter[str] = field(default_factory=Counter)
+    edit_sigs: dict[str, set[str]] = field(default_factory=dict)  # path → edits made since the last command
     running: dict[str, tuple[str, float]] = field(default_factory=dict)  # call id → (command, started)
     reported: set[str] = field(default_factory=set)
     loop: str | None = None  # set when a loop is detected; the gate turns it into a stop-and-ask
@@ -69,6 +71,7 @@ class Watchdog:
                 return
             self.running.pop(str(call), None)
             self.edits_since_command.clear()
+            self.edit_sigs.clear()
             if status == "error":
                 self.failures[command] += 1
                 if self.failures[command] >= FAILS_FOR_LOOP:
@@ -77,12 +80,21 @@ class Watchdog:
                 self.failures.pop(command, None)
         elif kind == "read" and status == "running":
             path = str(fields.get("path") or fields.get("command") or "")
+            path = f"{path}@{fields['part']}" if fields.get("part") not in (None, "", ":") else path
             if path:
                 self.reads[path] += 1
                 if self.reads[path] >= READS_FOR_LOOP:
                     await self._loop(f"đọc lại `{path[-80:]}` {self.reads[path]} lần")
         elif kind == "edit" and status == "running":
             path = str(fields.get("path") or "")
+            seen = self.edit_sigs.setdefault(path, set())
+            sig, undo = fields.get("sig"), fields.get("undo")
+            if sig and sig in seen:
+                await self._loop(f"lặp lại đúng một chỗ sửa trong `{path[-80:]}`")
+            elif undo and undo in seen and undo != sig:
+                await self._loop(f"sửa rồi lại hoàn tác trong `{path[-80:]}`")
+            if sig:
+                seen.add(sig)
             self.edits_since_command[path] += 1
             if self.edits_since_command[path] >= EDITS_FOR_LOOP:
                 await self._loop(f"sửa `{path[-80:]}` {self.edits_since_command[path]} lần mà không chạy lại test")

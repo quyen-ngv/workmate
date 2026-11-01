@@ -155,17 +155,30 @@ class ActivityTracker:
         return done
 
 
+def _digest(*parts: str) -> str:
+    import hashlib
+
+    return hashlib.sha1("\x00".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def describe_call(tool: str, args: dict[str, Any]) -> Activity | None:
     if tool in QUIET_OFFICE:
         return None
     path = str(args.get("file_path") or args.get("path") or args.get("notebook_path") or "")
     if tool in EDIT_TOOLS:
         added, removed = _line_delta(tool, args)
-        return Activity(kind="edit", title=f"Sửa `{_short_path(path)}` +{added} −{removed}", fields={"path": path, "added": added, "removed": removed})
+        old, new = str(args.get("old_string") or ""), str(args.get("new_string") or args.get("content") or "")
+        return Activity(
+            kind="edit",
+            title=f"Sửa `{_short_path(path)}` +{added} −{removed}",
+            # sig / undo let the watchdog tell "the same edit again" or "an edit undone" from many different edits
+            fields={"path": path, "added": added, "removed": removed, "sig": _digest(old, new), "undo": _digest(new, old)},
+        )
     if tool in READ_TOOLS:
         target = path or str(args.get("key") or args.get("name") or args.get("ticket") or "")
+        part = f"{args.get('offset') or ''}:{args.get('limit') or ''}"
         verb = {"doc_get": "Đọc tài liệu", "ticket_get": "Đọc ticket", "skill_read": "Đọc skill", "list_dir": "Xem thư mục", "stage_info": "Xem giai đoạn"}.get(tool, "Đọc")
-        return Activity(kind="read", title=f"{verb} `{_short_path(target)}`" if target else verb, fields={"tool": tool, "path": target})
+        return Activity(kind="read", title=f"{verb} `{_short_path(target)}`" if target else verb, fields={"tool": tool, "path": target, "part": part})
     if tool in SEARCH_TOOLS:
         query = str(args.get("pattern") or args.get("query") or args.get("glob") or "")
         return Activity(kind="search", title=f"Tìm `{_one_line(query, 80)}`" + (f" trong `{_short_path(path)}`" if path else ""), fields={"tool": tool, "query": query})

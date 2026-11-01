@@ -238,3 +238,37 @@ async def test_artifacts_reach_the_ticket_topic(office: Office, tmp_path: Path) 
         assert [name for _thread, name in bot.documents] == ["a.png"]  # files outside the artifacts folder are never sent
     finally:
         task.cancel()
+
+
+async def test_watchdog_lets_many_different_edits_through_but_stops_repeats_and_undos() -> None:
+    from types import SimpleNamespace
+
+    from actoroffice.engine.activity import describe_call
+    from actoroffice.engine.watchdog import Watchdog
+
+    async def event(*_args, **_kwargs) -> None:
+        return None
+
+    def edit(old: str, new: str) -> dict:
+        activity = describe_call("Edit", {"file_path": "src/a.py", "old_string": old, "new_string": new})
+        return {"kind": "edit", "status": "running", "fields": activity.fields}
+
+    office = SimpleNamespace(runs=SimpleNamespace(event=event))
+    dog = Watchdog(office, "run_x", stall_after_s=600, slow_command_s=600)
+    for i in range(5):  # one change written in several pieces (SI-2, SI-3 were stopped at the third)
+        await dog.observe(edit(f"old {i}", f"new {i}"))
+    assert dog.loop is None
+
+    await dog.observe(edit("old 1", "new 1"))
+    assert dog.loop and "lặp lại" in dog.loop
+
+    undo = Watchdog(office, "run_y", stall_after_s=600, slow_command_s=600)
+    await undo.observe(edit("a = 1", "a = 2"))
+    await undo.observe(edit("a = 2", "a = 1"))
+    assert undo.loop and "hoàn tác" in undo.loop
+
+    reads = Watchdog(office, "run_z", stall_after_s=600, slow_command_s=600)
+    for offset in (1, 200, 400, 600, 800):  # reading a big file part by part is not a loop
+        activity = describe_call("Read", {"file_path": "src/big.py", "offset": offset, "limit": 200})
+        await reads.observe({"kind": "read", "status": "running", "fields": activity.fields})
+    assert reads.loop is None

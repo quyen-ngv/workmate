@@ -107,14 +107,21 @@ class CheckRunner:
             return CheckResult(id=check_id, status="skipped", summary="không có workspace")
         outputs: list[str] = []
         timeout = float(profile.get("timeouts", {}).get(key, 900)) if isinstance(profile.get("timeouts"), dict) else 900.0
+        # The commit that was tested, taken before the command runs: flaky_rerun reuses this result when it is unchanged.
+        state: dict[str, Any] = {}
+        if key == "test":
+            head, clean = await git_state(ctx.workspace)
+            state = {"head": head, "clean": clean} if head else {}
         for argv in argv_list:
             code, out, secs = await run_argv(argv, ctx.workspace, timeout=timeout, env=self._env(ctx))
             outputs.append(f"$ {' '.join(argv)}\n{out}\n(exit {code}, {secs:.0f}s)")
             if code != 0:
                 ref = self._save(ctx, check_id, "\n\n".join(outputs))
-                return CheckResult(id=check_id, status="failed", summary=f"`{' '.join(argv)[:80]}` → exit {code}", output_ref=ref, data={"exit": code})
+                return CheckResult(
+                    id=check_id, status="failed", summary=f"`{' '.join(argv)[:80]}` → exit {code}", output_ref=ref, data={"exit": code, **state}
+                )
         ref = self._save(ctx, check_id, "\n\n".join(outputs))
-        return CheckResult(id=check_id, status="passed", summary=f"{len(argv_list)} lệnh chạy thành công", output_ref=ref)
+        return CheckResult(id=check_id, status="passed", summary=f"{len(argv_list)} lệnh chạy thành công", output_ref=ref, data=state)
 
     async def _rule(self, check_id: str, ctx: CheckContext) -> CheckResult:
         rule = await self.office.rules.get(check_id.split(":", 1)[1])
@@ -203,6 +210,17 @@ async def run_argv(argv: list[str], cwd: Path, *, timeout: float, env: dict[str,
         return 124, f"timeout after {timeout:.0f}s", time.monotonic() - started
     text = out.decode("utf-8", "replace").replace("\r\n", "\n")
     return proc.returncode or 0, text[-OUTPUT_TAIL * 10 :], time.monotonic() - started
+
+
+async def git_state(workspace: Path | None) -> tuple[str | None, bool | None]:
+    """(HEAD sha, tree clean: no uncommitted change and no untracked file), or (None, None) outside a git workspace."""
+    if workspace is None or not (workspace / ".git").exists():
+        return None, None
+    code, head, _ = await run_argv(["git", "rev-parse", "HEAD"], workspace, timeout=30)
+    if code != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", head.strip()):
+        return None, None
+    code, status, _ = await run_argv(["git", "status", "--porcelain"], workspace, timeout=30)
+    return head.strip(), code == 0 and not status.strip()
 
 
 def _kill_tree(pid: int) -> None:
@@ -555,7 +573,17 @@ async def check_flaky_rerun(ctx: CheckContext) -> CheckResult:
         return CheckResult(id="flaky_rerun", status="skipped", summary="project chưa khai báo lệnh test")
     runner = ctx.office.stages.checks
     codes = []
-    for _ in range(2):
+    note = ""
+    data: dict[str, Any] = {"runs": 2}
+    previous = await _build_test_result(ctx)
+    if previous is not None:
+        head, clean = await git_state(ctx.workspace)
+        if head and clean and previous["data"].get("clean") is True and previous["data"]["head"] == head:
+            # Same commit, clean tree both times: the build stage's run is the first of the two.
+            codes.append(0 if previous["status"] == "passed" else int(previous["data"].get("exit", 1)))
+            note = f" (lần 1 là kết quả repo:test của bước Làm, commit {head[:7]})"
+            data = {"runs": 1, "reused_head": head}
+    while len(codes) < 2:
         code = 0
         for argv in argv_list:
             code, _out, _secs = await run_argv(argv, ctx.workspace, timeout=1800, env=runner._env(ctx))
@@ -563,10 +591,23 @@ async def check_flaky_rerun(ctx: CheckContext) -> CheckResult:
                 break
         codes.append(code)
     if codes[0] != codes[1]:
-        return CheckResult(id="flaky_rerun", status="failed", summary=f"test cho kết quả khác nhau giữa 2 lần chạy (exit {codes[0]} rồi {codes[1]}): có test flaky")
+        return CheckResult(
+            id="flaky_rerun", status="failed", summary=f"test cho kết quả khác nhau giữa 2 lần chạy (exit {codes[0]} rồi {codes[1]}): có test flaky{note}", data=data
+        )
     if codes[0] != 0:
-        return CheckResult(id="flaky_rerun", status="failed", summary=f"test lỗi cả 2 lần (exit {codes[0]})")
-    return CheckResult(id="flaky_rerun", status="passed", summary="test ổn định qua 2 lần chạy")
+        return CheckResult(id="flaky_rerun", status="failed", summary=f"test lỗi cả 2 lần (exit {codes[0]}){note}", data=data)
+    return CheckResult(id="flaky_rerun", status="passed", summary=f"test ổn định qua 2 lần chạy{note}", data=data)
+
+
+async def _build_test_result(ctx: CheckContext) -> dict[str, Any] | None:
+    """The repo:test result of the ticket's last finished build stage run, when it ran (passed/failed) and knows its commit."""
+    runs = [r for r in await ctx.office.stages.runs(ctx.ticket.id) if r.stage == "build" and r.finished_at]
+    if not runs:
+        return None
+    result = next((c for c in runs[-1].checks if c.get("id") == "repo:test"), None)
+    if result is None or result.get("status") not in ("passed", "failed") or not (result.get("data") or {}).get("head"):
+        return None
+    return result
 
 
 async def check_review_clean(ctx: CheckContext) -> CheckResult:

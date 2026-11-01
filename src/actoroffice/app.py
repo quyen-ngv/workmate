@@ -32,6 +32,7 @@ from actoroffice.security.policy import FOLDER_MODE_RULE, PolicyEngine
 from actoroffice.security.redact import Redactor
 from actoroffice.services.automations import AutomationService
 from actoroffice.services.chat import ChatService
+from actoroffice.services.approvals_recheck import ApprovalRecheck
 from actoroffice.services.interactions import InteractionService
 from actoroffice.services.access import AccessService
 from actoroffice.services.atlassian import Atlassian
@@ -80,6 +81,7 @@ class Office:
         self.wakes = WakeService(self.db)
         self.tickets = TicketService(self.db, self.wakes, self.bus, key_prefix=settings.key_prefix)
         self.interactions = InteractionService(self.db, self.wakes, self.bus)
+        self.approvals = ApprovalRecheck(self)
         self.runs = RunService(self.db, self.bus, self.redact)
         self.chat = ChatService(self.db, self.bus, self.org, self.wakes, max_unattended=settings.max_unattended_agent_messages)
         self.projects = ProjectService(self.db, self.bus, forbidden=[settings.data_dir, *self.policy.protected])
@@ -220,6 +222,14 @@ class Office:
         project = await self.projects.get(ticket.project_id)
         return None if project.is_default else project
 
+    async def permissions_recheck(self, *, project_id: str | None = None, actor_id: str | None = None) -> int:
+        """Approve the pending tool cards a wider permission now allows; never fails the change itself."""
+        try:
+            return await self.approvals.run(project_id=project_id, actor_id=actor_id)
+        except Exception:
+            log.exception("could not re-check pending approvals")
+            return 0
+
     async def answer(self, interaction_id: str, response: dict[str, Any], *, by: str = "user") -> Interaction:
         """Resolve anything waiting for the user. Ticket proposals become real tickets here, and an approval
         can be remembered as an "always allow" rule for that actor (like Claude Code's permission prompt).
@@ -239,16 +249,19 @@ class Office:
                 if ticket and ticket.project_id:
                     await self.projects.set_permissions(ticket.project_id, mode="folder")
                     await self.audit.record("permission:project", "changed", actor_id=item.actor_id, target=ticket.project_id, detail={"by": by, "to": {"mode": "folder"}})
+                    await self.permissions_recheck(project_id=ticket.project_id)
                 return resolved
             project = await self._project_of(item.ticket_id)
             if project is not None:
                 # Like Claude Code: "don't ask again for this command in this project".
                 await self.projects.set_permissions(project.id, allow_rules=[*project.allow_rules, rule])
                 await self.audit.record("permission:allow_rule", "added", actor_id=item.actor_id, target=rule, detail={"by": by, "project": project.id})
+                await self.permissions_recheck(project_id=project.id)
             elif item.actor_id:
                 await self.org.add_allow_rule(item.actor_id, rule)
                 await self.audit.record("permission:allow_rule", "added", actor_id=item.actor_id, target=rule, detail={"by": by})
                 self.bus.publish("team.changed")
+                await self.permissions_recheck(actor_id=item.actor_id)
             return resolved
         if item.kind == InteractionKind.APPROVE_AUTOMATION:
             return await self._answer_automation(item, response, by=by)

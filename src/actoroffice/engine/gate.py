@@ -13,7 +13,7 @@ from actoroffice.domain.org import Actor, PermissionMode, Position
 from actoroffice.core.stats import RunStats
 from actoroffice.domain.work import InteractionKind
 from actoroffice.runtimes.base import GateDecision, GateResult
-from actoroffice.security.policy import Decision, Risk, ToolCallContext, office_tool, suggest_rules, target_of
+from actoroffice.security.policy import Decision, Risk, ToolCallContext, Verdict, office_tool, suggest_rules, target_of
 from actoroffice.services.interactions import input_hash
 
 if TYPE_CHECKING:
@@ -77,34 +77,20 @@ class OfficeGate:
             if message:
                 await self._audit(tool, tool, Risk.READ, "interrupted", "watchdog loop")
                 return GateResult(GateDecision.DENY, message)
-        if self.ticket_id is not None and tool in ("Bash", "PowerShell") and ENV_DUMP.search(str(args.get("command") or "")):
-            await self._audit(tool, str(args.get("command"))[:200], Risk.READ, "denied", "env dump")
-            return GateResult(GateDecision.DENY, "Printing the environment is not allowed (it may hold granted credentials). Use access_list to see what you can reach.")
-        if self.policies:
-            from actoroffice.services.rules import policy_denial
-
-            rule = policy_denial(self.policies, tool, args)
-            if rule is not None:
-                await self._audit(tool, target_of(tool, args) or tool, Risk.READ, "denied", f"rule {rule.ref}")
-                await office.runs.event(self.run_id, "rule", {"id": rule.id, "ref": rule.ref, "title": rule.title, "tool": tool, "effect": "deny"})
-                return GateResult(
-                    GateDecision.DENY,
-                    f"Team rule {rule.id} ({rule.title}) forbids this action. {rule.body[:400]}\nDo it another way, or ask a person (ask_human).",
-                )
-        # Re-read the actor and the project: an "always allow" chosen on a previous card applies right away.
-        actor = await office.org.get_actor(self.actor.id)
         project = await self._project()
-        ctx = ToolCallContext(
-            position=self.position,
-            workspace=self.workspace,
-            tainted=self.tainted,
-            extra_read_dirs=self.read_dirs,
-            allow_rules=[*(project.allow_rules if project else []), *actor.allow_rules],
-            trust_all=actor.permission_mode == PermissionMode.TRUST_ALL,
-            mode=project.permission_mode if project else "workspace",
-            project_commands=_profile_commands(project),
+        check = await evaluate_call(
+            office, self.actor.id, self.position, project, self.workspace, self.read_dirs, self.tainted, self.policies,
+            tool, args, on_ticket=self.ticket_id is not None,
         )
-        verdict = office.policy.decide(tool, args, ctx, external=office_tool(tool) in EXTERNAL_OFFICE_TOOLS)
+        verdict = check.verdict
+        if check.env_dump:
+            await self._audit(tool, str(args.get("command"))[:200], Risk.READ, "denied", "env dump")
+            return GateResult(GateDecision.DENY, verdict.reason)
+        if check.rule is not None:
+            rule = check.rule
+            await self._audit(tool, target_of(tool, args) or tool, Risk.READ, "denied", f"rule {rule.ref}")
+            await office.runs.event(self.run_id, "rule", {"id": rule.id, "ref": rule.ref, "title": rule.title, "tool": tool, "effect": "deny"})
+            return GateResult(GateDecision.DENY, verdict.reason)
         target = target_of(tool, args) or tool
 
         if verdict.decision == Decision.ALLOW:
@@ -141,6 +127,8 @@ class OfficeGate:
                 "risk": verdict.risk.value,
                 "actor": self.actor.name,
                 "ticket": self.ticket_key,
+                # what the call was decided with: a wider permission later re-checks exactly this call (SI-2)
+                "context": {"workspace": str(self.workspace), "read_dirs": [str(d) for d in self.read_dirs], "tainted": self.tainted},
             },
             actor_id=self.actor.id,
             ticket_id=self.ticket_id,
@@ -191,6 +179,54 @@ class OfficeGate:
             target=target,
             detail={"risk": risk.value, "detail": detail},
         )
+
+
+@dataclass(frozen=True)
+class CallCheck:
+    verdict: Verdict
+    env_dump: bool = False  # denied: prints the environment
+    rule: Any = None  # denied by this team policy (services/rules.py)
+
+
+async def evaluate_call(
+    office: Office,
+    actor_id: str,
+    position: Position,
+    project: Any,
+    workspace: Path | None,
+    read_dirs: list[Path],
+    tainted: bool,
+    policies: list[Any],
+    tool: str,
+    args: dict[str, Any],
+    *,
+    on_ticket: bool,
+) -> CallCheck:
+    """The permission decision for one call: env dump, team policies, then the policy engine with the project's mode
+    and the "always allow" rules as they are now. The gate and the re-check of pending cards share it."""
+    if on_ticket and tool in ("Bash", "PowerShell") and ENV_DUMP.search(str(args.get("command") or "")):
+        reason = "Printing the environment is not allowed (it may hold granted credentials). Use access_list to see what you can reach."
+        return CallCheck(Verdict(Decision.DENY, Risk.READ, reason), env_dump=True)
+    if policies:
+        from actoroffice.services.rules import policy_denial
+
+        rule = policy_denial(policies, tool, args)
+        if rule is not None:
+            reason = f"Team rule {rule.id} ({rule.title}) forbids this action. {rule.body[:400]}\nDo it another way, or ask a person (ask_human)."
+            return CallCheck(Verdict(Decision.DENY, Risk.READ, reason), rule=rule)
+    # Re-read the actor: an "always allow" chosen on a previous card applies right away.
+    actor = await office.org.get_actor(actor_id)
+    ctx = ToolCallContext(
+        position=position,
+        workspace=workspace,
+        tainted=tainted,
+        extra_read_dirs=read_dirs,
+        allow_rules=[*(project.allow_rules if project else []), *actor.allow_rules],
+        trust_all=actor.permission_mode == PermissionMode.TRUST_ALL,
+        mode=project.permission_mode if project else "workspace",
+        project_commands=_profile_commands(project),
+    )
+    return CallCheck(office.policy.decide(tool, args, ctx, external=office_tool(tool) in EXTERNAL_OFFICE_TOOLS))
 
 
 def _profile_commands(project: Any) -> list[str]:

@@ -54,6 +54,9 @@ uv run actoroffice serve                                  # web: /team (herdr-li
   (Jira + Confluence), `bitbucket <email> <token> <workspace>`, `resource add` for shared environments.
 - Rules: `rules add … --scope team:<id>` / web Rules page / `/rule` on Telegram; repo `CLAUDE.md`, `AGENTS.md`,
   `.kiro/steering/*.md` are imported with `rules import <project>`.
+- Permissions per repo (Settings): **read-only** (every change asks), **workspace** (default: edits, read-only
+  commands, local git and the repo's test/build commands run; the network, other folders and unknown programs
+  ask) or **full**. "Always allow" on an approval card is remembered for that repo, by command prefix.
 - Runtime per team: Claude (default) or Kiro CLI (`ai_model: kiro` in config.yaml or the team settings).
 - Demo without the LLM: `uv run py scenarios/team_demo.py --home F:/_ao_demo`. Live run with Claude:
   `uv run py scenarios/live_e2e.py --home F:/_ao_live` (uses tokens).

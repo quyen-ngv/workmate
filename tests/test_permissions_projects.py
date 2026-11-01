@@ -50,7 +50,8 @@ def test_rule_matching_and_suggestions():
     assert rule_matches("mcp__fb__*", "mcp__fb__post", "")
     assert not rule_matches("WebFetch", "Bash", "ls")
     scopes = {s["scope"]: s["rule"] for s in suggest_rules("Bash", "npm install left-pad")}
-    assert scopes == {"exact": "Bash(npm install left-pad)", "prefix": "Bash(npm install*)", "tool": "Bash"}
+    # a shell is never offered whole on a card ("allow every command" is the full-trust mode)
+    assert scopes == {"exact": "Bash(npm install left-pad)", "prefix": "Bash(npm install*)"}
     assert rule_matches(scopes["prefix"], "Bash", "npm install") and rule_matches(scopes["prefix"], "Bash", "npm install is-even")
 
 

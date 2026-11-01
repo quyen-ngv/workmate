@@ -6,6 +6,7 @@ import asyncio
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from actoroffice.core.events import EventBus
 from actoroffice.domain.errors import Conflict, NotFound, OfficeError
@@ -75,6 +76,23 @@ class ProjectService:
         if kind is not None and kind not in ("code", "reference", "automation"):
             raise ProjectError("kind: code | reference | automation")
         updates = {k: v for k, v in {"team_id": team_id, "kind": kind, "repo_url": repo_url, "profile": profile, "test_command": test_command}.items() if v is not None}
+        updated = current.model_copy(update=updates)
+        await self.db.execute("UPDATE projects SET config_json = ? WHERE id = ?", (updated.model_dump_json(), project_id))
+        self.bus.publish("project.changed", project=updated.model_dump())
+        return updated
+
+    async def set_permissions(self, project_id: str, *, mode: str | None = None, allow_rules: list[str] | None = None) -> Project:
+        """The project's permission mode and its "always allow" rules."""
+        from actoroffice.security.policy import MODES
+
+        current = await self.get(project_id)
+        updates: dict[str, Any] = {}
+        if mode is not None:
+            if mode not in MODES:
+                raise ProjectError(f"permission mode: {' | '.join(MODES)}")
+            updates["permission_mode"] = mode
+        if allow_rules is not None:
+            updates["allow_rules"] = list(dict.fromkeys(r.strip() for r in allow_rules if r.strip()))
         updated = current.model_copy(update=updates)
         await self.db.execute("UPDATE projects SET config_json = ? WHERE id = ?", (updated.model_dump_json(), project_id))
         self.bus.publish("project.changed", project=updated.model_dump())

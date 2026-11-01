@@ -163,7 +163,7 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
         for i, s in enumerate((p.get("suggestions") or [])[:4]):
             short = re.sub(r"^\w+\(|\)$", "", str(s.get("rule", "")))  # "Bash(ls -a*)" → "ls -a*"
             labels = {"exact": "Luôn cho phép lệnh này", "tool": f"Luôn cho phép mọi {s.get('rule', '')}"}
-            label = labels.get(str(s.get("scope")), f"Luôn cho phép {short}")
+            label = labels.get(str(s.get("scope")), f"Luôn cho phép {short}") + (f" ({p['project']})" if p.get("project") else "")
             rows.append([btn(("♾ " + label)[:60], f"r{i}")])
         return text, rows
     if kind == "question":

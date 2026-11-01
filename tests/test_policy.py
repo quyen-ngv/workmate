@@ -69,7 +69,11 @@ def test_allowlisted_command_is_allowed_but_chaining_asks(engine, ws):
     c = ctx(ws, bash_allow=["git status*", "uv run *"])
     assert engine.decide("Bash", {"command": "git status"}, c).decision == Decision.ALLOW
     assert engine.decide("Bash", {"command": "git status && curl x"}, c).decision == Decision.ASK
+    # saving a program's output inside the workspace is a workspace change: it runs (read-only mode asks)
+    assert engine.decide("Bash", {"command": "uv run main.py > out.txt"}, c).decision == Decision.ALLOW
+    c.mode = "read_only"
     assert engine.decide("Bash", {"command": "uv run main.py > out.txt"}, c).decision == Decision.ASK
+    c.mode = "workspace"
     assert engine.decide("Bash", {"command": "npm install left-pad"}, c).decision == Decision.ASK
     # writing file content through the shell is steered to the Write tool, without asking the user
     for cmd in ("cat > a.py <<'EOF'", "mkdir -p t && cat > t/x.py << EOF", "echo hi >> notes.md", "printf 'x' > f.txt", "tee out.txt", "sed -i 's|a|b|' f.py"):

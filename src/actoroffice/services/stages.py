@@ -639,6 +639,12 @@ class StageService:
             status = StageStatus.BLOCKED
         elif srun is not None and srun.outcome == StageOutcome.COMPLETED.value and ticket.status == S.IN_REVIEW:
             status = StageStatus.WAITING_EXTERNAL
+        elif ticket.status == S.IN_REVIEW:
+            # the AI stopped for a person without a question card (its last comment says what for)
+            status = StageStatus.NEEDS_YOU
+            with contextlib.suppress(NotFound):
+                who = [(await office.teams.get_user(ticket.owner_user_id)).name] if ticket.owner_user_id else []
+            needs_viewer = bool(viewer and viewer in (ticket.owner_user_id, LOCAL_OWNER_ID))
         else:
             last = await office.runs.for_ticket(ticket.id, limit=1)
             if last and last[0].status.value == "failed":

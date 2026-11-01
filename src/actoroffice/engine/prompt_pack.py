@@ -51,7 +51,10 @@ gates between stages are passed by people with the right role, never by you.
 6. Finish a stage with `stage_complete(summary)`. The office runs the stage's checks (you never mark your own
    work as passed); fix what fails and call it again. Then the gate opens for the right people.
 7. If you made progress but the stage is not finished, end the turn with ticket_set_status todo (short note):
-   you continue in the same session. Never set a staged ticket to done yourself.
+   you continue in the same session by yourself. Never set a staged ticket to done yourself.
+   If you cannot go on until a person acts (open a pull request, give access, decide something that is not a
+   question) or a person told you to stop, end with ticket_set_status in_review and say what you wait for and from
+   whom. Never use todo to wait: todo starts you again by yourself. An answer, a comment or a direction wakes you.
 8. When something essential is missing from an earlier stage, go back with `stage_reopen` instead of guessing.
 
 ## Shared environments
@@ -261,14 +264,19 @@ def build(
     last_checks = [c for c in stage_run.checks if c.get("status") == "failed"]
     if last_checks and resumed:
         delta += ["", "Checks that failed last time:"] + [f"- {c['id']}: {c['summary']}" for c in last_checks]
-    delta += ["", "Continue the stage. End with stage_complete, a blocking ask_human, or ticket_set_status todo."]
+    delta += [
+        "",
+        "Continue the stage. End with stage_complete, a blocking ask_human, ticket_set_status in_review (waiting for a "
+        "person: say for what) or ticket_set_status todo (you will continue by yourself).",
+    ]
     return StagePrompt(system=system, turn="\n".join(delta), parts=parts)
 
 
 def disposition_reminder(ticket_key: str) -> str:
     return (
-        f"You ended your turn on {ticket_key} without finishing the stage. Call stage_complete if the stage is done, or "
-        "ticket_set_status todo with a short note if you will continue. If you are waiting for an answer, just end."
+        f"You ended your turn on {ticket_key} without finishing the stage. Call stage_complete if the stage is done, "
+        "ticket_set_status todo with a short note if you will continue by yourself, or ticket_set_status in_review if "
+        "you wait for a person (say for what and from whom). If you are waiting for an answer to ask_human, just end."
     )
 
 

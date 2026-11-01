@@ -122,9 +122,8 @@ async def test_pull_request_flow_with_review_and_merge(office: Office, runtime: 
     assert (await office.tickets.get(ticket.id)).stage == "close"
 
 
-async def test_external_tools_need_approval(office: Office, runtime: FakeRuntime) -> None:
+async def test_external_tools_follow_the_project_permission_mode(office: Office, runtime: FakeRuntime) -> None:
     office.atlassian.use(code_host=FakeHost())
-    ticket = await office.tickets.create("x", description="x")
     seen: list[str] = []
 
     async def try_reply(ctx: TurnCtx) -> TurnResult:
@@ -134,10 +133,22 @@ async def test_external_tools_need_approval(office: Office, runtime: FakeRuntime
         seen.append(decision.decision.value)
         return TurnResult(status=TurnStatus.COMPLETED, session_id=f"s-{ctx.spec.run_id}")
 
+    # default (workspace) mode: acting on the ticket's own PR is covered by the approved plan
     runtime.scripts.append(try_reply)
+    ticket = await office.tickets.create("x", description="x")
     await office.stages.start(ticket.id, template="code", by="user")
     await office.scheduler.wait_idle(timeout=20)
-    assert seen == ["defer", "allow"]  # a write waits for a person; a read does not
+    assert seen == ["allow", "allow"]
+
+    # read-only mode: a write waits for a person; a read does not
+    seen.clear()
+    project = await office.projects.get(office.chat.default_project_id)
+    await office.projects.set_permissions(project.id, mode="read_only")
+    runtime.scripts.append(try_reply)
+    other = await office.tickets.create("y", description="y", project_id=project.id)
+    await office.stages.start(other.id, template="code", by="user")
+    await office.scheduler.wait_idle(timeout=20)
+    assert seen == ["defer", "allow"]
 
 
 async def test_confluence_search_read_and_publish() -> None:

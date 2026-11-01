@@ -348,6 +348,11 @@ class TelegramBody(BaseModel):
     token: str
 
 
+class PermissionsBody(BaseModel):
+    mode: str | None = None
+    allow_rules: list[str] | None = None
+
+
 class AiBody(BaseModel):
     model: str
 
@@ -521,6 +526,17 @@ def register_setup(app: FastAPI, office: Office) -> None:
         await office.stop_telegram()
         token_path(office.settings).unlink(missing_ok=True)
         return {"ok": True, "warning": f"Biến môi trường {_telegram_env_key()} vẫn còn token: lần khởi động sau bot sẽ chạy lại." if _telegram_env_key() else None}
+
+    @app.post("/api/projects/{project_id}/permissions")
+    async def project_permissions(project_id: str, body: PermissionsBody) -> dict[str, Any]:
+        """The project's permission mode and its "always allow" rules (removing a rule asks again next time)."""
+        before = await office.projects.get(project_id)
+        project = await office.projects.set_permissions(project_id, mode=body.mode, allow_rules=body.allow_rules)
+        await office.audit.record(
+            "permission:project", "changed", target=project.name,
+            detail={"from": {"mode": before.permission_mode, "rules": before.allow_rules}, "to": body.model_dump(exclude_none=True)},
+        )
+        return project.model_dump()
 
     @app.post("/api/setup/ai")
     async def setup_ai(body: AiBody) -> dict[str, Any]:

@@ -97,6 +97,14 @@ async def ticket_set_status(args: dict[str, Any], ctx: ToolCtx) -> str:
                 f"Definition of done for {ctx.position.title}: write the document(s) {', '.join(missing)} first "
                 "(doc_put, template in skill doc-standards), then set done."
             )
+    if status == S.IN_REVIEW and current.stage:
+        # A ticket on stages may wait for a person without a question card (open a PR, give access, "stop here"):
+        # the comment says what for. It does not continue by itself; an answer, a comment or a direction wakes it.
+        try:
+            ticket = await office.tickets.transition(ticket_id, S.IN_REVIEW, by=ctx.actor.name, run_id=ctx.run_id, comment=summary)
+        except OfficeError as exc:
+            raise ToolError(str(exc)) from exc
+        return f"{ticket.key} now waits for a person. End your turn; you are woken when someone answers, comments or steers."
     if status == S.IN_REVIEW and not await office.interactions.pending(ticket_id=ticket_id):
         answered = [i for i in await office.interactions.for_run(ctx.run_id) if i.status.value == "answered"]
         if answered:

@@ -13,7 +13,7 @@ from actoroffice.domain.org import Actor, PermissionMode, Position
 from actoroffice.core.stats import RunStats
 from actoroffice.domain.work import InteractionKind
 from actoroffice.runtimes.base import GateDecision, GateResult
-from actoroffice.security.policy import Decision, Risk, ToolCallContext, suggest_rules, target_of
+from actoroffice.security.policy import Decision, Risk, ToolCallContext, office_tool, suggest_rules, target_of
 from actoroffice.services.interactions import input_hash
 
 if TYPE_CHECKING:
@@ -91,17 +91,20 @@ class OfficeGate:
                     GateDecision.DENY,
                     f"Team rule {rule.id} ({rule.title}) forbids this action. {rule.body[:400]}\nDo it another way, or ask a person (ask_human).",
                 )
-        # Re-read the actor: an "always allow" chosen on a previous card applies right away.
+        # Re-read the actor and the project: an "always allow" chosen on a previous card applies right away.
         actor = await office.org.get_actor(self.actor.id)
+        project = await self._project()
         ctx = ToolCallContext(
             position=self.position,
             workspace=self.workspace,
             tainted=self.tainted,
             extra_read_dirs=self.read_dirs,
-            allow_rules=actor.allow_rules,
+            allow_rules=[*(project.allow_rules if project else []), *actor.allow_rules],
             trust_all=actor.permission_mode == PermissionMode.TRUST_ALL,
+            mode=project.permission_mode if project else "workspace",
+            project_commands=_profile_commands(project),
         )
-        verdict = office.policy.decide(tool, args, ctx, external=tool.removeprefix("mcp__office__") in EXTERNAL_OFFICE_TOOLS)
+        verdict = office.policy.decide(tool, args, ctx, external=office_tool(tool) in EXTERNAL_OFFICE_TOOLS)
         target = target_of(tool, args) or tool
 
         if verdict.decision == Decision.ALLOW:
@@ -132,7 +135,8 @@ class OfficeGate:
                 "input": _shown_input(args, office.redact),
                 "input_hash": input_hash(tool, args),
                 "target": office.redact(target)[:300],
-                "suggestions": suggest_rules(tool, office.redact(target)),
+                "suggestions": verdict.suggestions if verdict.suggestions is not None else suggest_rules(tool, office.redact(target)),
+                "project": project.name if project and not project.is_default else None,
                 "reason": verdict.reason,
                 "risk": verdict.risk.value,
                 "actor": self.actor.name,
@@ -157,6 +161,15 @@ class OfficeGate:
             return GateResult(GateDecision.ALLOW)
         return GateResult(GateDecision.DENY, "The user rejected this action. Do not retry it; continue another way or ask.")
 
+    async def _project(self) -> Any:
+        if self.ticket_id is None:
+            return None
+        try:
+            ticket = await self.office.tickets.get(self.ticket_id)
+            return await self.office.projects.get(ticket.project_id) if ticket.project_id else None
+        except Exception:  # a missing project must not break a run: the default mode applies
+            return None
+
     def _count(self, tool: str, args: dict[str, Any]) -> None:
         if self.stats.workspace is None:
             self.stats.workspace = self.workspace
@@ -178,6 +191,19 @@ class OfficeGate:
             target=target,
             detail={"risk": risk.value, "detail": detail},
         )
+
+
+def _profile_commands(project: Any) -> list[str]:
+    """The project's own test/build/lint commands (argv lists in its profile), as the shell would show them."""
+    if project is None:
+        return []
+    commands = []
+    for value in (project.profile or {}).values():
+        if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
+            commands.append(" ".join(value))
+    if project.test_command:
+        commands.append(project.test_command)
+    return commands
 
 
 def _shown_input(args: dict[str, Any], redact: Any, limit: int = 4000) -> dict[str, Any]:

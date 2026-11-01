@@ -30,6 +30,9 @@ class Project(BaseModel):
     repo_url: str | None = None
     # How to set up, build, test, lint and run the project (argv lists, see doc/plans design §9.2).
     profile: dict[str, Any] = Field(default_factory=dict)
+    # How much the AI may do without a click (security/policy.py): read_only | workspace | full.
+    permission_mode: str = "workspace"
+    allow_rules: list[str] = Field(default_factory=list)  # "always allow" rules chosen on approval cards
 
     @property
     def workspace_kind(self) -> WorkspaceKind:

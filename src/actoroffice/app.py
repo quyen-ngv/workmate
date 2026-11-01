@@ -211,6 +211,15 @@ class Office:
         await self.access.close()
         await self.db.close()
 
+    async def _project_of(self, ticket_id: int | None) -> Any:
+        if ticket_id is None:
+            return None
+        ticket = await self.tickets.get(ticket_id)
+        if not ticket.project_id:
+            return None
+        project = await self.projects.get(ticket.project_id)
+        return None if project.is_default else project
+
     async def answer(self, interaction_id: str, response: dict[str, Any], *, by: str = "user") -> Interaction:
         """Resolve anything waiting for the user. Ticket proposals become real tickets here, and an approval
         can be remembered as an "always allow" rule for that actor (like Claude Code's permission prompt).
@@ -224,7 +233,12 @@ class Office:
             if rule not in offered:
                 raise PolicyDenied("Chỉ được ghi nhớ một trong các luật được đề xuất")
             resolved = await self.interactions.resolve(interaction_id, response, by=by)
-            if item.actor_id:
+            project = await self._project_of(item.ticket_id)
+            if project is not None:
+                # Like Claude Code: "don't ask again for this command in this project".
+                await self.projects.set_permissions(project.id, allow_rules=[*project.allow_rules, rule])
+                await self.audit.record("permission:allow_rule", "added", actor_id=item.actor_id, target=rule, detail={"by": by, "project": project.id})
+            elif item.actor_id:
                 await self.org.add_allow_rule(item.actor_id, rule)
                 await self.audit.record("permission:allow_rule", "added", actor_id=item.actor_id, target=rule, detail={"by": by})
                 self.bus.publish("team.changed")

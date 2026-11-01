@@ -239,8 +239,12 @@ function card(item) {
       <div class="q">${esc(p.reason)}</div><div class="opts"><button class="btn good" data-approve="1">Cho phép</button><button class="btn bad" data-approve="0">Không</button></div></div>`;
   }
   if (item.kind === "approve_tool") {
-    return `<div class="card" data-card="${esc(item.id)}"><div class="who">🔐 Xin phép: ${esc(p.tool)}</div><pre>${esc(p.target || "")}</pre>
-      <div class="opts"><button class="btn good" data-approve="1">Cho phép 1 lần</button><button class="btn bad" data-approve="0">Từ chối</button></div></div>`;
+    const where = p.project ? ` trong ${esc(p.project)}` : "";
+    const remember = (p.suggestions || []).filter((s) => s.scope !== "exact" || (p.suggestions || []).length === 1).slice(0, 3);
+    return `<div class="card" data-card="${esc(item.id)}"><div class="who">🔐 AI xin chạy: ${esc(p.tool)}${p.reason ? ` · ${esc(p.reason)}` : ""}</div><pre>${esc(p.target || "")}</pre>
+      <div class="opts"><button class="btn good" data-approve="1">Cho phép 1 lần</button>
+        ${remember.map((s) => `<button class="btn" data-remember="${esc(s.rule)}" title="Không hỏi lại lệnh này${where}">♾ Luôn cho phép <code>${esc(s.rule.replace(/^\w+\(|\)$/g, ""))}</code>${where}</button>`).join("")}
+        <button class="btn bad" data-approve="0">Từ chối</button></div></div>`;
   }
   return `<div class="card"><div class="who">${esc(item.kind)}</div></div>`;
 }
@@ -456,6 +460,12 @@ async function pageSetup() {
         <label>Workspace<input data-c="bb_workspace" value="${esc(c.bitbucket.workspace || "")}"></label><button class="btn primary" data-save-bitbucket>Kiểm tra & lưu</button></div></div>`);
 }
 
+const PERM_MODES = [
+  ["read_only", "Chỉ đọc", "AI đọc code và chạy lệnh chỉ đọc; mọi thay đổi (sửa file, commit, chạy lệnh khác) đều hỏi."],
+  ["workspace", "Tự động trong workspace (khuyên dùng)", "AI tự sửa file, chạy test/build và commit trong nhánh riêng của việc. Chỉ hỏi khi ra mạng (push, curl), đụng thư mục khác, xoá đệ quy hoặc chạy chương trình lạ."],
+  ["full", "Tin tưởng hoàn toàn", "Không hỏi gì, trừ các lệnh nguy hiểm luôn bị chặn và luật của team. Chỉ dùng với repo thử nghiệm."],
+];
+
 function projectForm(p, teamOpts) {
   const k = esc(p.id || "new");
   return `<div class="rule" data-proj="${k}"><div class="h"><b>${p.id ? esc(p.name) : "Thêm repo mới"}</b>${p.path ? `<span class="chip">${esc(p.path)}</span>` : ""}</div>
@@ -468,7 +478,13 @@ function projectForm(p, teamOpts) {
       <label>Lệnh build<input data-pf="build" value="${esc(p.build)}" placeholder="vd. mvn -q package -DskipTests"></label>
       <label>Lệnh lint<input data-pf="lint" value="${esc(p.lint)}"></label>
       <button class="btn primary" data-save-project="${k}">${p.id ? "Lưu" : "Thêm"}</button>
-    </div></div>`;
+    </div>
+    ${p.id ? `<div class="form perm">
+      <label>Quyền của AI<select data-perm-mode="${k}">${PERM_MODES.map(([v, l]) => `<option value="${v}" ${v === (p.permission_mode || "workspace") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+      <div class="b">${esc((PERM_MODES.find(([v]) => v === (p.permission_mode || "workspace")) || [])[2] || "")}</div>
+    </div>
+    ${(p.allow_rules || []).length ? `<div class="b">Luôn cho phép: ${(p.allow_rules || []).map((r) => `<span class="chip">${esc(r)} <button class="x" data-rule-del="${k}" data-rule="${esc(r)}" title="Bỏ">×</button></span>`).join(" ")}</div>` : ""}` : ""}
+    </div>`;
 }
 
 // ---- events --------------------------------------------------------------------------------------------------
@@ -497,6 +513,12 @@ document.addEventListener("click", (e) => {
   if (ds.closeSheet !== undefined) { closeSheet(); return; }
   if (ds.new !== undefined) return act(pageNewTask);
   if (ds.page) return act({ inbox: pageInbox, rules: pageRules, kb: pageKb, people: pagePeople, setup: pageSetup }[ds.page]);
+  if (t.dataset.ruleDel) return act(async () => {
+    const s = await api("/api/setup");
+    const proj = s.projects.find((x) => x.id === t.dataset.ruleDel);
+    await api(`/api/projects/${t.dataset.ruleDel}/permissions`, { method: "POST", body: { allow_rules: (proj.allow_rules || []).filter((r) => r !== t.dataset.rule) } });
+    await pageSetup();
+  });
   if (ds.saveAi !== undefined) return act(async () => { await api("/api/setup/ai", { method: "POST", body: { model: $('[data-ai="model"]').value } }); toast("Đã lưu model"); });
   if (ds.saveProject) return act(async () => {
     const box = t.closest("[data-proj]");
@@ -525,6 +547,7 @@ document.addEventListener("click", (e) => {
     const note = ($("[data-text]", c)?.value || "").trim();
     if (ds.answer !== undefined) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { answer: ds.answer } }); await refresh(key); });
     if (ds.answerText !== undefined && note) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { answer: note } }); await refresh(key); });
+    if (ds.remember) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: true, remember: ds.remember } }); toast("Đã ghi nhớ: lần sau không hỏi lại"); await refresh(key); });
     if (ds.approve !== undefined) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: ds.approve === "1", note: note || undefined } }); await refresh(key); });
   }
   if (ds.revoke) return act(async () => { await api(`/api/grants/${ds.revoke}/revoke`, { method: "POST" }); renderSide(); });
@@ -563,6 +586,11 @@ document.addEventListener("click", (e) => {
     await api(`/api/teams/${ds.addMember}/members`, { method: "POST", body: { user_id: user, roles } });
     await pagePeople();
   });
+});
+
+document.addEventListener("change", (e) => {
+  const id = e.target.dataset?.permMode;
+  if (id) act(async () => { await api(`/api/projects/${id}/permissions`, { method: "POST", body: { mode: e.target.value } }); toast("Đã đổi quyền của AI cho dự án"); await pageSetup(); });
 });
 
 document.addEventListener("keydown", (e) => {

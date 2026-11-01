@@ -108,12 +108,16 @@ class ChatService:
         self.bus.publish("chat.conversation", conversation=conv.model_dump())
         return conv
 
-    async def ticket_room(self, root: Any, actor_ids: list[str], *, by: str, create: bool = True) -> Conversation | None:
+    async def ticket_room(
+        self, root: Any, actor_ids: list[str], *, by: str, create: bool = True, title: str | None = None
+    ) -> Conversation | None:
         """The group chat of a ticket tree (one per feature): where the team talks and reports; the user is a member."""
         async with self._room_locks.setdefault(root.id, asyncio.Lock()):
-            return await self._ticket_room(root, actor_ids, by=by, create=create)
+            return await self._ticket_room(root, actor_ids, by=by, create=create, title=title)
 
-    async def _ticket_room(self, root: Any, actor_ids: list[str], *, by: str, create: bool) -> Conversation | None:
+    async def _ticket_room(
+        self, root: Any, actor_ids: list[str], *, by: str, create: bool, title: str | None = None
+    ) -> Conversation | None:
         row = await self.db.fetchone(
             "SELECT id FROM conversations WHERE ticket_id = ? AND kind = 'group' AND archived = 0 ORDER BY created_at LIMIT 1",
             (root.id,),
@@ -128,7 +132,8 @@ class ChatService:
         if not create:
             return None
         ids = [a for a in dict.fromkeys(actor_ids) if a]
-        return await self.create_group(f"Họp {root.key}: {root.title}"[:80], ids, created_by=by, ticket_id=root.id, project_id=root.project_id)
+        name = title or f"Họp {root.key}: {root.title}"
+        return await self.create_group(name[:80], ids, created_by=by, ticket_id=root.id, project_id=root.project_id)
 
     async def add_members(self, conversation_id: str, actor_ids: list[str], *, by: str) -> None:
         conv = await self.get(conversation_id)

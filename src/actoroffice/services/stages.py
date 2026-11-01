@@ -105,7 +105,7 @@ class StageService:
         used as the ticket's origin conversation, so every notice, question and gate card lands there."""
         office = self.office
         ai = await office.ensure_ai()
-        room = await office.chat.ticket_room(ticket, [ai.id], by="office", create=True)
+        room = await office.chat.ticket_room(ticket, [ai.id], by="office", create=True, title=f"{ticket.key} · {ticket.title}")
         assert room is not None
         if not ticket.origin_conversation_id:
             await office.db.execute("UPDATE tickets SET origin_conversation_id = ? WHERE id = ?", (room.id, ticket.id))
@@ -308,6 +308,8 @@ class StageService:
                 )
             comment = f"👍 {name} duyệt giai đoạn {stage_title(ticket.stage)}" + (f": {note}" if note else "")
             await office.tickets.add_comment(ticket.id, comment, author_kind="system", author_id=None)
+            if item.payload.get("gate") == "requirement" and ticket.jira_key:
+                await office.jira.requirements_approved(ticket.id, name)
             await self.advance(ticket.id, by=by)
         else:
             comment = f"👎 {name} chưa duyệt {stage_title(ticket.stage)}" + (f": {note}" if note else "")

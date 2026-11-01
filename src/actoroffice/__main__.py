@@ -10,6 +10,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from actoroffice import cli_team
 from actoroffice.app import Office
 from actoroffice.config import load_settings, write_default_config
 from actoroffice.core.events import Event
@@ -28,10 +29,18 @@ def out(text: str = "") -> None:
 
 
 async def cmd_init(office: Office, _args: argparse.Namespace) -> None:
+    from actoroffice.cli_team import advice, detect_environment, save_environment
+
     write_default_config(office.settings)
     created = await office.install_default_positions()
+    ai = await office.ensure_ai()
     out(f"Office ready at {office.settings.data_dir}")
     out("Positions: " + ", ".join(p.name for p in await office.org.list_positions()) + (f" (new: {len(created)})" if created else ""))
+    out(f"AI engineer: {ai.name}")
+    env = detect_environment()
+    save_environment(office, env)
+    for tip in advice(env):
+        out(f"• {tip}")
 
 
 async def cmd_positions(office: Office, _args: argparse.Namespace) -> None:
@@ -362,6 +371,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("token", nargs="?")
     p.add_argument("--off", action="store_true", help="remove the token")
     p.set_defaults(fn=cmd_telegram)
+
+    cli_team.register(sub)
 
     p = sub.add_parser("serve", help="run the office with the web UI")
     p.add_argument("--host")

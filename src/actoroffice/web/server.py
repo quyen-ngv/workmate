@@ -35,6 +35,8 @@ from actoroffice.domain.org import ActorStatus, PermissionMode, Position, Positi
 from actoroffice.domain.run import RunStatus
 from actoroffice.domain.work import Priority, ProjectAccess, TicketStatus
 
+from . import team_api
+
 STATIC = Path(__file__).parent / "static"
 COOKIE = "ao_session"
 LOOPBACK = {"127.0.0.1", "localhost", "[::1]"}
@@ -198,6 +200,7 @@ def _since(days: int) -> str:
 def create_app(office: Office, token: str) -> FastAPI:
     app = FastAPI(title="actor-office", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    team_api.register(app, office)
 
     def authed(request: Request) -> bool:
         return secrets.compare_digest(request.cookies.get(COOKIE, ""), token)
@@ -332,7 +335,7 @@ def create_app(office: Office, token: str) -> FastAPI:
         text = body.body.strip()
         if not text:
             raise HTTPException(422, "empty message")
-        msg = await office.chat.post_user(conv_id, text[:20000])
+        msg = await office.post_user_message(conv_id, text[:20000])
         office.scheduler.kick()
         return msg.model_dump()
 

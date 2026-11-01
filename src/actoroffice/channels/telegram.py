@@ -30,6 +30,7 @@ from actoroffice.domain.errors import Conflict, OfficeError
 from . import tg_format as fmt
 from .tg_menu import COMMANDS, Menus
 from .tg_progress import LiveProgress
+from .tg_team import TEAM_COMMANDS, TEAM_HELP, TeamCommands
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -49,7 +50,7 @@ HELP = (
     "• /menu mở menu chính: tạo ticket, nhóm, dự án, tuyển nhân viên; xem ticket, automation, nhân sự, skill, usage.\n"
     "• /projects chọn dự án để mở topic chat với nhân viên trong dự án đó (như chọn dự án trên web).\n"
     "• /sync tạo lại topic còn thiếu · /cancel huỷ thao tác đang làm · /help xem hướng dẫn này.\n"
-    "Gõ “/” để xem mọi lệnh."
+    "Gõ “/” để xem mọi lệnh.\n\n" + TEAM_HELP
 )
 
 
@@ -150,6 +151,8 @@ class TelegramBridge:
         self._warned = False
         self.menus = Menus(self)
         self.progress = LiveProgress(self)
+        self.team = TeamCommands(self)
+        self._hinted: set[int] = set()  # unregistered senders already told how to join
 
     # ---- lifecycle --------------------------------------------------------------------------------
 
@@ -211,13 +214,15 @@ class TelegramBridge:
             return
         if kind == "chat.message":
             await self._on_message(data["message"])
-        elif kind == "interaction.resolved":
+        elif kind in ("interaction.resolved", "interaction.updated"):
             await self._refresh_card(data["interaction"])
         elif kind == "run.finished":
             await self._on_run_finished(data)
             await self.progress.finished(str(data.get("run_id")), data.get("run"), str(data.get("status")))
         elif kind == "run.event":
-            await self.progress.event(str(data.get("run_id")), str(data.get("kind")), data.get("payload") or {})
+            await self.progress.event(str(data.get("run_id")), str(data.get("kind")), data.get("payload") or {}, data.get("activity"))
+        elif kind == "ticket.steps":
+            await self.progress.steps_changed(int(data.get("ticket_id") or 0))
         elif kind == "run.started":
             run = data.get("run") or {}
             if run.get("conversation_id"):
@@ -277,6 +282,10 @@ class TelegramBridge:
             emoji = f"{actor.emoji} " if actor.emoji else ""
             return f"<b>{fmt.esc(emoji + actor.name)}</b> · <i>{fmt.esc(position.title)}</i>\n"
         if m["author_kind"] == "user":
+            author = m.get("author_id")
+            if author and author != "user":
+                with contextlib.suppress(OfficeError):
+                    return f"<b>🧑 {fmt.esc((await self.office.teams.get_user(author)).name)}</b>\n"
             return "<b>🧑 Bạn</b> <i>(trên web)</i>\n"
         return ""
 
@@ -382,9 +391,12 @@ class TelegramBridge:
         )
         if not row:
             return
-        text, _rows = fmt.card(item)
+        text, rows = fmt.card(item)
         with contextlib.suppress(TelegramError):  # "message is not modified" when nothing changed
-            await self._edit(row["message_id"], text + f"\n\n<b>{fmt.esc(fmt.verdict(item))}</b>", [])
+            if item.get("status") == "pending":  # e.g. one of two approvals came in: keep the buttons
+                await self._edit(row["message_id"], text, rows)
+            else:
+                await self._edit(row["message_id"], text + f"\n\n<b>{fmt.esc(fmt.verdict(item))}</b>", [])
 
     # ---- Telegram → office -------------------------------------------------------------------------
 
@@ -406,14 +418,19 @@ class TelegramBridge:
                 note = await self._open_project_button(data[2:], message.get("message_thread_id"))
             elif data.startswith("m:"):
                 note = await self.menus.button(data, message.get("message_thread_id"), int(message.get("message_id") or 0))
+            elif data.startswith("t:"):
+                note = await self.team.button(data, cq.get("from") or {}, message.get("message_thread_id"))
             else:
                 _prefix, interaction_id, choice = data.split(":", 2)
                 item = await self.office.interactions.get(interaction_id)
+                who = await self.team.who(cq.get("from"))
                 if item.status.value != "pending":
                     note = "Việc này đã được trả lời rồi."
                     await self._refresh_card(item.model_dump())
+                elif who is None:
+                    note, alert = "Bạn chưa được đăng ký: nhờ admin reply tin của bạn với /adduser Tên vai.", True
                 else:
-                    await self.office.answer(interaction_id, fmt.response_for(item.model_dump(), choice), by="user")
+                    await self.office.answer(interaction_id, fmt.response_for(item.model_dump(), choice), by=who)
                     self.office.scheduler.kick()
         except Conflict:
             note = "Việc này đã được trả lời rồi."
@@ -452,6 +469,9 @@ class TelegramBridge:
         thread = msg.get("message_thread_id") if msg.get("is_topic_message") else None
         if text.startswith("/"):
             command = text.split()[0].split("@")[0].lower()
+            args = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
+            if await self.team.command(command, args, msg, thread):
+                return
             if not await self.menus.command(command, thread):
                 await self._command(command, thread)
             return
@@ -460,9 +480,16 @@ class TelegramBridge:
             return
         if await self.menus.text(thread, text):  # the answer to a form's question (ticket title, group name…)
             return
+        who = await self.team.who(msg.get("from"))
+        if who is None:
+            sender = int((msg.get("from") or {}).get("id") or 0)
+            if sender not in self._hinted:
+                self._hinted.add(sender)
+                await self.send(thread, f"<i>Bạn chưa được đăng ký (Telegram id <code>{sender}</code>): nhờ admin reply tin của bạn với /adduser Tên vai.</i>")
+            return
         reply = msg.get("reply_to_message") or {}
         if reply and reply.get("message_id") != thread and not reply.get("forum_topic_created"):
-            if await self._answer_card(int(reply["message_id"]), text):
+            if await self._answer_card(int(reply["message_id"]), text, who):
                 return
         conv_id = await self._conversation_of(thread)
         if conv_id is None:
@@ -471,14 +498,14 @@ class TelegramBridge:
         self._echo.append((conv_id, text))
         del self._echo[:-50]
         try:
-            await self.office.chat.post_user(conv_id, text)
+            await self.office.post_user_message(conv_id, text, user_id=who)
         except OfficeError as exc:
             self._echo.remove((conv_id, text))
             await self.send(thread, f"<i>Không gửi được: {fmt.esc(exc)}</i>")
             return
         self.office.scheduler.kick()
 
-    async def _answer_card(self, message_id: int, text: str) -> bool:
+    async def _answer_card(self, message_id: int, text: str, who: str = "user") -> bool:
         row = await self.office.db.fetchone(
             "SELECT interaction_id FROM telegram_cards WHERE chat_id = ? AND message_id = ?", (self.chat_id, message_id)
         )
@@ -486,11 +513,17 @@ class TelegramBridge:
             return False
         try:
             item = await self.office.interactions.get(row["interaction_id"])
-            if item.status.value != "pending" or item.kind.value not in ("question", "ask_colleague"):
+            if item.status.value != "pending" or item.kind.value not in ("question", "ask_colleague", "approve_stage"):
                 return False
-            await self.office.answer(item.id, {"answer": text}, by="user")
+            if item.kind.value == "approve_stage":  # a text reply to a gate card sends the stage back with that note
+                await self.office.answer(item.id, {"approved": False, "note": text}, by=who)
+            else:
+                await self.office.answer(item.id, {"answer": text}, by=who)
         except Conflict:
             return False
+        except OfficeError as exc:
+            await self.send(None, f"<i>Không trả lời được: {fmt.esc(exc)}</i>")
+            return True
         self.office.scheduler.kick()
         return True
 
@@ -518,7 +551,8 @@ class TelegramBridge:
     async def _set_commands(self) -> None:
         """The "/" menu in Telegram lists every command with a short description."""
         with contextlib.suppress(TelegramError):
-            await self.api.call("setMyCommands", commands=[{"command": c, "description": d} for c, d in COMMANDS])
+            commands = [*COMMANDS, *[c for c in TEAM_COMMANDS if c[0] not in {x for x, _ in COMMANDS}]]
+            await self.api.call("setMyCommands", commands=[{"command": c, "description": d} for c, d in commands])
 
     # ---- topics -----------------------------------------------------------------------------------
 

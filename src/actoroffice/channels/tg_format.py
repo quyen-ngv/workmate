@@ -167,9 +167,32 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
             rows.append([btn(("♾ " + label)[:60], f"r{i}")])
         return text, rows
     if kind == "question":
-        text = f"❓ <b>{esc(p.get('asked_by'))} hỏi bạn</b>\n{md_to_html(str(p.get('question', ''))[:3000])}"
-        rows = [[btn(str(o)[:60], f"o{i}")] for i, o in enumerate((p.get("options") or [])[:8])]
+        names = p.get("approver_names") or []
+        target = (", ".join(names) + (f" ({p.get('roles_label')})" if p.get("roles_label") else "")) if names else (p.get("roles_label") or "bạn")
+        where = f" · {esc(p.get('ticket'))}" if p.get("ticket") else ""
+        text = f"❓ <b>{esc(p.get('asked_by'))} hỏi {esc(target)}</b>{where}\n{md_to_html(str(p.get('question', ''))[:3000])}"
+        if p.get("context"):
+            text += f"\n<i>{esc(str(p['context'])[:600])}</i>"
+        recommended = str(p.get("recommended") or "")
+        rows = [[btn(("⭐ " if str(o) == recommended else "") + str(o)[:58], f"o{i}")] for i, o in enumerate((p.get("options") or [])[:8])]
         return text + "\n\n<i>↩️ Reply tin này để trả lời bằng chữ.</i>", rows
+    if kind == "approve_stage":
+        names = ", ".join(p.get("approver_names") or []) or str(p.get("roles_label") or "")
+        icons = {"passed": "✅", "failed": "❌", "skipped": "⏭"}
+        checks = "\n".join(
+            f"{icons.get(c.get('status'), '•')} {esc(c.get('id'))}: {esc(str(c.get('summary', ''))[:120])}" for c in p.get("checks") or []
+        )
+        docs = ", ".join(f"{esc(d['key'])} (rev {d['revision']})" for d in p.get("docs") or [])
+        approvals = p.get("approvals") or []
+        need = int(p.get("min") or 1)
+        text = (
+            f"✋ <b>{esc(p.get('ticket'))} · {esc(p.get('stage_title'))} xong — cần {esc(names)} duyệt</b>\n"
+            f"<b>{esc(p.get('title'))}</b>\n{md_to_html(str(p.get('summary') or '')[:1500])}"
+            + (f"\n\n<b>Tài liệu:</b> {docs}" if docs else "")
+            + (f"\n<b>Kiểm tra:</b>\n{checks}" if checks else "")
+            + (f"\n<i>Đã duyệt {len(approvals)}/{need}: {esc(', '.join(a.get('name', '') for a in approvals))}</i>" if need > 1 else "")
+        )
+        return text + "\n\n<i>↩️ Reply tin này để trả lại kèm ghi chú.</i>", [[btn("👍 Duyệt", "y"), btn("👎 Trả lại", "n")]]
     if kind == "confirm_ticket":
         desc = str(p.get("description") or "")
         text = (
@@ -215,6 +238,8 @@ def response_for(item: dict[str, Any], choice: str) -> dict[str, Any]:
         return {"confirmed": True}
     if kind == "approve_automation":
         return {"approved": True, "run_now": choice == "y"}
+    if kind == "approve_stage":
+        return {"approved": choice == "y"}
     if kind == "approve_access" and choice in ("gw", "gd"):
         return {"approved": True, "access": "worktree" if choice == "gw" else "direct"}
     if kind == "question" and choice.startswith("o"):
@@ -236,6 +261,11 @@ def verdict(item: dict[str, Any]) -> str:
         return f"✅ Đã tạo {r['ticket_key']}" if r.get("ticket_key") else "Đã bỏ"
     if kind == "approve_automation":
         return "✅ Đã duyệt và bật" if r.get("approved") else "⛔ Đã từ chối"
+    if kind == "approve_stage":
+        who = r.get("by_name") or "Bạn"
+        if r.get("approved"):
+            return f"👍 {who} đã duyệt"
+        return f"👎 {who} trả lại" + (f": {r['note']}" if r.get("note") else "")
     if kind == "approve_access":
         mode = {"worktree": "git worktree", "direct": "sửa trực tiếp"}.get(str(r.get("access")), "")
         return f"✅ Đã cho phép ({mode})" if r.get("approved") else "⛔ Không cho phép"

@@ -33,6 +33,7 @@ from actoroffice.security.redact import Redactor
 from actoroffice.services.automations import AutomationService
 from actoroffice.services.chat import ChatService
 from actoroffice.services.interactions import InteractionService
+from actoroffice.services.jira import JiraMirror
 from actoroffice.services.memory import MemoryService
 from actoroffice.services.merges import MergeService
 from actoroffice.services.notices import ChatNotifier
@@ -80,6 +81,7 @@ class Office:
         self.workspaces = WorkspaceManager(settings.workspaces_dir)
         self.teams = TeamService(self.db, self.bus)
         self.stages = StageService(self)
+        self.jira = JiraMirror(self)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),
             KiroAcpRuntime(cli_path=settings.kiro_cli_path, engine=settings.kiro_engine),
@@ -107,6 +109,8 @@ class Office:
         if schedule:
             self._tasks.append(asyncio.create_task(self.scheduler.run_forever(), name="scheduler"))
             self._tasks.append(asyncio.create_task(run_timers(self), name="timers"))
+            if self.jira.ready():
+                self._tasks.append(asyncio.create_task(self.jira.run_forever(), name="jira"))
 
     async def start_notifier(self) -> None:
         ready = asyncio.Event()
@@ -171,6 +175,7 @@ class Office:
         self._tasks.clear()
         if self.telegram is not None:
             await self.telegram.api.close()
+        await self.jira.close()
         await self.db.close()
 
     async def answer(self, interaction_id: str, response: dict[str, Any], *, by: str = "user") -> Interaction:

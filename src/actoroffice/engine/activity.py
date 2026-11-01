@@ -129,6 +129,10 @@ class ActivityTracker:
         if done.kind == "command":
             suffix = "lỗi" if payload.get("error") else "xong"
             done.title = f"{done.title} → {suffix} ({_duration(seconds)})"
+            if payload.get("error"):
+                last = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "")
+                if last:
+                    done.title += ": " + _one_line(last, 100)
             done.fields["output_tail"] = text[-600:]
         elif done.kind == "search" and not payload.get("error"):
             hits = _hits(text)

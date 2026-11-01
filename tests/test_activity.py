@@ -37,14 +37,15 @@ async def test_telegram_shows_live_progress_for_a_ticket_run(office, bot, monkey
     await office.runs.event(run.id, "text", {"text": "Kế hoạch: 1. đọc yêu cầu 2. viết code 3. test"})
     await office.runs.event(run.id, "tool_use", {"tool": "Bash", "input": {"command": "uv run pytest -q"}, "id": "t1"})
     await office.runs.event(run.id, "tool_result", {"id": "t1", "error": True, "text": "1 failed"})
-    await until(lambda: any("lỗi: 1 failed" in p["text"] for p in bot.sent("editMessageText")))
+    # the running command line is replaced by its result (same call id)
+    await until(lambda: any("uv run pytest -q` → lỗi" in p["text"] and "1 failed" in p["text"] for p in bot.sent("editMessageText")))
     progress = [p for p in bot.sent() if p["text"].startswith("⏳")]
     assert len(progress) == 1 and "Minh" in progress[0]["text"] and ticket.key in progress[0]["text"]
     assert progress[0]["message_thread_id"] == await office.telegram.topic_for(dm.id)
     await office.runs.finish(run.id, RunStatus.SUCCEEDED, usage=Usage(input_tokens=1200, output_tokens=300), cost_usd=0.02)
     await until(lambda: any(p["text"].startswith("✅") for p in bot.sent("editMessageText")))
     final = [p for p in bot.sent("editMessageText") if p["text"].startswith("✅")][-1]["text"]
-    assert "xong lượt · 3 bước" in final and "chạy lệnh: uv run pytest -q" in final and "<blockquote expandable>" in final
+    assert "xong lượt · 2 bước" in final and "uv run pytest -q" in final and "<blockquote expandable>" in final
 
 
 async def test_a_plain_chat_reply_gets_no_progress_message(office, bot):

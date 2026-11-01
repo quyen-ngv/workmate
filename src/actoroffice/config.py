@@ -30,6 +30,7 @@ class Settings(BaseModel):
     jira_poll_s: float = 60  # Jira mirror interval in seconds (0 = off)
     stall_after_s: float = 900  # watchdog: a run with no event for this long is reported as stalled
     slow_command_s: float = 300  # watchdog: one command running longer than this is reported as slow
+    environment: dict = {}  # what this machine can run (written by `actoroffice doctor` / init)
 
     @property
     def db_path(self) -> Path:

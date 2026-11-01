@@ -48,6 +48,7 @@ from actoroffice.services.projects import ProjectService
 from actoroffice.services.rules import RuleService
 from actoroffice.domain.knowledge import SkillRef, SkillScope
 from actoroffice.services.skills import SkillService, split_front_matter
+from actoroffice.services.models import ModelService
 from actoroffice.services.stages import StageService
 from actoroffice.services.teams import TeamService
 from actoroffice.services.org import OrgService
@@ -90,6 +91,7 @@ class Office:
         self.workspaces = WorkspaceManager(settings.workspaces_dir)
         self.teams = TeamService(self.db, self.bus)
         self.stages = StageService(self)
+        self.models = ModelService(self)
         self.jira = JiraMirror(self)
         self.rules = RuleService(self, settings.data_dir / "rules")
         self.atlassian = Atlassian(settings.data_dir)

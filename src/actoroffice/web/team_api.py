@@ -14,6 +14,7 @@ from actoroffice.domain.errors import NotFound
 from actoroffice.domain.stage import default_templates
 from actoroffice.domain.team import LOCAL_OWNER_ID, TeamSettings
 from actoroffice.domain.work import TicketStatus
+from actoroffice.services.models import ModelError
 
 
 class PersonBody(BaseModel):
@@ -51,6 +52,14 @@ class TaskBody(BaseModel):
     owner_user_id: str | None = None
     project_id: str | None = None
     mode: str | None = None
+    model: str | None = None
+
+
+class ModelBody(BaseModel):
+    model: str | None = None  # None with when="set" clears the model
+    stage: str | None = None  # None = the whole task
+    when: str = "turn"  # turn | stage: wait for a boundary · set: store now (configure ahead, clear)
+    cancel: bool = False  # drop the waiting switch
 
 
 class ControlBody(BaseModel):
@@ -145,9 +154,16 @@ def register(app: FastAPI, office: Office) -> None:
         title = body.title.strip()
         if not title:
             raise HTTPException(422, "Cần tiêu đề")
-        ticket = await office.tickets.create(
-            title[:200], description=body.description or title, project_id=body.project_id or office.chat.default_project_id, created_by="user"
-        )
+        try:
+            ticket = await office.tickets.create(
+                title[:200],
+                description=body.description or title,
+                project_id=body.project_id or office.chat.default_project_id,
+                created_by="user",
+                model=body.model.strip() if body.model is not None else None,
+            )
+        except ModelError as exc:
+            raise HTTPException(422, str(exc)) from exc
         ticket = await office.stages.start(
             ticket.id, template=body.template, by=LOCAL_OWNER_ID, team_id=body.team_id, owner_user_id=body.owner_user_id, mode=body.mode
         )
@@ -195,6 +211,29 @@ def register(app: FastAPI, office: Office) -> None:
         ticket = await office.tickets.get(key)
         await teams.set_participant(ticket.id, body.user_id, body.roles)
         return {"participants": [m.model_dump() for m in await teams.participants(ticket.id)]}
+
+    @app.get("/api/tickets/{key}/model")
+    async def get_model(key: str) -> dict[str, Any]:
+        return await office.models.info(await office.tickets.get(key))
+
+    @app.post("/api/tickets/{key}/model")
+    async def set_model(key: str, body: ModelBody) -> dict[str, Any]:
+        """Choose the model of a task or of one stage, switch it while the task runs (waits for the chosen
+        boundary, never interrupts a run), or cancel a waiting switch."""
+        models = office.models
+        try:
+            if body.cancel:
+                ticket = await models.cancel_switch(key, by=LOCAL_OWNER_ID)
+            elif body.when == "set":
+                if body.stage:
+                    ticket = await models.set_stage_model(key, body.stage, body.model, by=LOCAL_OWNER_ID)
+                else:
+                    ticket = await models.set_task_model(key, body.model, by=LOCAL_OWNER_ID)
+            else:
+                ticket = await models.request_switch(key, body.model or "", scope=body.when, by=LOCAL_OWNER_ID, stage=body.stage)
+        except ModelError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return await models.info(ticket)
 
     @app.post("/api/tickets/{key}/control")
     async def control(key: str, body: ControlBody) -> dict[str, Any]:

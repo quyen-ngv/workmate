@@ -13,6 +13,7 @@ from actoroffice.domain.run import Run, RunKind, RunStatus, TurnResult, TurnStat
 from actoroffice.domain.work import InteractionKind, InteractionStatus, Ticket, TicketStatus
 from actoroffice.runtimes.base import TurnSpec
 from actoroffice.services.chat import handle
+from actoroffice.services.models import provider
 from actoroffice.services.runs import ticket_session_key
 from actoroffice.tools.chat_tools import CHAT_TOOLS
 from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
@@ -64,6 +65,9 @@ class Executor:
             root = await office.tickets.root_of(ticket.id)
             ws = await office.workspaces.realize(ticket, project, position, root)
             stage_run = await office.stages.ensure_run(ticket) if ticket.stage else None
+            # A model switch waits for a run/stage boundary; this run start is where it lands (never mid-run).
+            ticket = await office.models.apply_due(ticket, stage_run, actor, position)
+            model = await office.models.effective(ticket, actor, position)
             read_dirs = list(ws.read_dirs)
             if stage_run is not None:
                 read_dirs += await self._reference_dirs(ticket, project)
@@ -72,6 +76,10 @@ class Executor:
                 # One session per stage attempt: a new stage (or a retry) starts fresh from the dossier.
                 session_key += f":{stage_run.stage}:{stage_run.attempt}"
                 await office.db.execute("UPDATE runs SET stage_run_id = ? WHERE id = ?", (stage_run.id, run_id))
+            if provider(model) == "kiro":
+                # A Kiro session cannot be resumed by Claude (or the reverse): each provider keeps its own session.
+                session_key += ":kiro"
+            await office.db.execute("UPDATE runs SET model = ? WHERE id = ?", (model, run_id))
             resume = await office.runs.get_session(session_key, str(ws.path))
             changes = await office.tickets.changes_after(ticket.id, 0)
             gate = OfficeGate(
@@ -107,11 +115,8 @@ class Executor:
                 system, prompt = pack.system, pack.turn
                 replaced = {t.name for t in INFRA_TOOLS}
                 tools = [t for t in tools if t.name not in replaced] + STAGE_TOOLS + ATLASSIAN_TOOLS + INFRA_TOOLS
-                model = office.settings.ai_model or actor.model or position.model or office.settings.default_model
                 if ticket.team_id:
-                    team = await office.teams.get_team(ticket.team_id)
-                    model = team.settings.model or model
-                    mcp_servers = dict(team.settings.mcp_servers)
+                    mcp_servers = dict((await office.teams.get_team(ticket.team_id)).settings.mcp_servers)
             else:
                 prompt = context.ticket_prompt(
                     ticket,
@@ -131,7 +136,6 @@ class Executor:
                     skills=office.skills.for_actor(actor, position),
                     memories=await office.memory.context_for(actor, f"{ticket.title} {ticket.description}"),
                 )
-                model = actor.model or position.model or office.settings.default_model
             spec = TurnSpec(
                 run_id=run_id,
                 prompt=prompt,
@@ -155,7 +159,7 @@ class Executor:
                 mcp_servers=mcp_servers,
             )
             await office.runs.event(
-                run_id, "prompt", {"text": prompt, "resume": bool(resume), "cwd": str(ws.path), "stage": ticket.stage}
+                run_id, "prompt", {"text": prompt, "resume": bool(resume), "cwd": str(ws.path), "stage": ticket.stage, "model": model}
             )
 
             result = await self._turn(spec, gate)

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .org import WorkspaceKind
 
@@ -101,6 +102,20 @@ class Ticket(BaseModel):
     jira_url: str | None = None
     pr_url: str | None = None
     confluence_url: str | None = None
+    # Model choice (see services/models.py): per task, per stage, and one switch waiting for a boundary
+    model: str | None = None
+    stage_models: dict[str, str] = Field(default_factory=dict)
+    pending_model: dict[str, Any] | None = None
+
+    @field_validator("stage_models", "pending_model", mode="before")
+    @classmethod
+    def _json_column(cls, value: Any, info: Any) -> Any:
+        """The DB stores both as JSON text (NULL on rows from before this feature)."""
+        if isinstance(value, str) and value:
+            return json.loads(value)
+        if not value:
+            return {} if info.field_name == "stage_models" else None
+        return value
 
 
 class Comment(BaseModel):

@@ -660,6 +660,7 @@ class StageService:
             "steps_done": sum(1 for s in steps if s.done),
             "usage": srun.usage if srun else {},
             "paused": ticket.paused,
+            "model": await office.models.info(ticket),
             "jira_key": ticket.jira_key,
             "pr_url": ticket.pr_url,
         }

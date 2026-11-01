@@ -66,12 +66,42 @@ async def cmd_task(office: Office, args: argparse.Namespace) -> None:
     if args.project and project is None:
         raise OfficeError(f"Không có project '{args.project}' (actoroffice project list)")
     ticket = await office.tickets.create(
-        args.title, description=args.description or args.title, created_by=LOCAL_OWNER_ID, project_id=project.id if project else None
+        args.title,
+        description=args.description or args.title,
+        created_by=LOCAL_OWNER_ID,
+        project_id=project.id if project else None,
+        model=args.model,
     )
     ticket = await office.stages.start(
         ticket.id, template=args.template, by=LOCAL_OWNER_ID, team_id=team.id if team else None, owner_user_id=owner.id if owner else None, mode=args.mode
     )
     out(f"{ticket.key} · {ticket.title} → giai đoạn {ticket.stage} ({args.template}). Chạy `actoroffice serve` hoặc `actoroffice run` để AI làm.")
+
+
+async def cmd_model(office: Office, args: argparse.Namespace) -> None:
+    """Show or change the model of a task / one stage; `--when turn|stage` waits for a boundary, never interrupts."""
+    models = office.models
+    if args.cancel:
+        await models.cancel_switch(args.key, by=LOCAL_OWNER_ID)
+    elif args.clear:
+        if args.stage:
+            await models.set_stage_model(args.key, args.stage, None, by=LOCAL_OWNER_ID)
+        else:
+            await models.set_task_model(args.key, None, by=LOCAL_OWNER_ID)
+    elif args.model and args.when == "set":
+        if args.stage:
+            await models.set_stage_model(args.key, args.stage, args.model, by=LOCAL_OWNER_ID)
+        else:
+            await models.set_task_model(args.key, args.model, by=LOCAL_OWNER_ID)
+    elif args.model:
+        await models.request_switch(args.key, args.model, scope=args.when, by=LOCAL_OWNER_ID, stage=args.stage)
+    info = await models.info(await office.tickets.get(args.key))
+    out(f"{args.key} · model hiện tại: {info['current']} · task: {info['task'] or '-'}")
+    for stage, model in info["stages"].items():
+        out(f"  giai đoạn {stage}: {model}")
+    if info["pending"]:
+        p = info["pending"]
+        out(f"  đang chờ: {p['model']} ({p['scope_label']}) bởi {p.get('by_name') or p['by']} lúc {p['at']}")
 
 
 async def cmd_stage(office: Office, args: argparse.Namespace) -> None:
@@ -337,7 +367,17 @@ def register(sub: Any) -> None:
     p.add_argument("--owner")
     p.add_argument("--project", help="project (repo) the AI works in")
     p.add_argument("--mode", choices=["wait", "assume"])
+    p.add_argument("--model", help="haiku | sonnet | opus | kiro | kiro:<id> for this task (default: workspace settings)")
     p.set_defaults(fn=cmd_task)
+
+    p = sub.add_parser("model", help="model of a task: model <key> [<model>] [--stage S] [--when turn|stage|set] [--clear] [--cancel]")
+    p.add_argument("key")
+    p.add_argument("model", nargs="?")
+    p.add_argument("--stage", help="only this stage (default: the whole task)")
+    p.add_argument("--when", choices=["turn", "stage", "set"], default="turn", help="turn = next run · stage = next stage · set = store now")
+    p.add_argument("--clear", action="store_true", help="remove the task/stage model")
+    p.add_argument("--cancel", action="store_true", help="cancel the switch that is waiting")
+    p.set_defaults(fn=cmd_model)
 
     p = sub.add_parser("stage", help="stage status / control: stage <key> [pause|resume|retry|merged|steer|reopen] [text]")
     p.add_argument("key")

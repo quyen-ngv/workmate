@@ -47,6 +47,12 @@ policy:
     - "docker compose ps*"
     - "docker compose logs*"
     - "docker ps*"
+    - "tail *"
+    - "head *"
+    - "grep *"
+    - "wc *"
+    - "sort *"
+    - "ls*"
   web: ask
   external: ask
   max_turns: 80

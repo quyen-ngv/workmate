@@ -166,3 +166,16 @@ async def test_repo_conventions_import_and_gate_rules(office: Office, setup, tmp
     )
     assert gate_rules_hit([gate], ["src/a.py", "db/migrations/V7__refund.sql"]) == [gate]
     assert gate_rules_hit([gate], ["src/a.py"]) == []
+
+
+def test_chains_of_allowed_commands_need_no_approval(tmp_path) -> None:
+    from actoroffice.domain.org import Position, PositionPolicy
+    from actoroffice.security.policy import Decision, PolicyEngine, ToolCallContext
+
+    position = Position(id="p", name="engineer", title="E", policy=PositionPolicy(bash_allow=["git add *", "git commit *", "py -m pytest*", "tail *"]))
+    ctx = ToolCallContext(position=position, workspace=tmp_path)
+    engine = PolicyEngine()
+    assert engine.decide("Bash", {"command": "git add -A && git commit -q -m 'x'"}, ctx).decision == Decision.ALLOW
+    assert engine.decide("Bash", {"command": "py -m pytest -q 2>&1 | tail -5"}, ctx).decision == Decision.ALLOW
+    assert engine.decide("Bash", {"command": "git add -A && rm -r build"}, ctx).decision != Decision.ALLOW
+    assert engine.decide("Bash", {"command": "git commit -m $(cat secret)"}, ctx).decision != Decision.ALLOW

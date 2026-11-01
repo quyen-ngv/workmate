@@ -208,6 +208,10 @@ class PolicyEngine:
         chained = bool(SHELL_CHAINING.search(cmd))
         if not chained and any(fnmatch.fnmatchcase(cmd, pat) for pat in policy.bash_allow):
             return Verdict(Decision.ALLOW, Risk.EXEC)
+        parts = chain_parts(cmd)
+        if parts and all(any(fnmatch.fnmatchcase(part, pat) for pat in policy.bash_allow) for part in parts):
+            # `git add -A && git commit -m x`, `pytest -q 2>&1 | tail -5`: every piece is allowed on its own.
+            return Verdict(Decision.ALLOW, Risk.EXEC)
         reason = "chained/redirected shell command needs approval" if chained else "shell command needs approval"
         return Verdict(_decision(policy.exec_default, allow_means_ask=chained), Risk.EXEC, reason)
 
@@ -218,6 +222,19 @@ class PolicyEngine:
         if ctx.tainted and rule == "allow":
             return Verdict(Decision.ASK, Risk.EXTERNAL, "session read untrusted content; external actions need approval")
         return Verdict(_decision(rule), Risk.EXTERNAL, f"external tool {tool}")
+
+
+CHAIN_SPLIT = re.compile(r"\s*(?:&&|\|\||;|\|)\s*")
+UNSAFE_IN_CHAIN = re.compile(r"`|\$\(|\r|\n|<|(?<![0-9])>(?!&)|[0-9]>(?!&1)")
+
+
+def chain_parts(cmd: str) -> list[str] | None:
+    """The commands of a simple chain (&&, ||, ;, |), or None when it uses substitution or redirects into files.
+    `2>&1` is fine. Quotes are not parsed: a chain character inside quotes just makes a part not match."""
+    if UNSAFE_IN_CHAIN.search(cmd):
+        return None
+    parts = [re.sub(r"\s*2>&1\s*", " ", part).strip() for part in CHAIN_SPLIT.split(cmd)]
+    return [part for part in parts if part] or None
 
 
 RULE = re.compile(r"^(?P<tool>[\w*.\-]+)(?:\((?P<pattern>.*)\))?$", re.DOTALL)

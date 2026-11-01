@@ -262,6 +262,9 @@ class Executor:
             memories=known["memories"],
             similar=known["similar"],
             kb=known["kb"],
+            approved=[
+                f"{d.key} rev {d.approved_revision}" for d in await office.tickets.list_documents(ticket.id) if d.approved_revision
+            ],
             skills=office.skills.for_actor(actor, position),
             wake=wake,
             resumed=resumed,

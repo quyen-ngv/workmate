@@ -166,6 +166,7 @@ def build(
     skills: list[Skill],
     similar: list[dict[str, Any]] | None = None,
     kb: list[Any] | None = None,
+    approved: list[str] | None = None,
     wake: WakeRequest,
     resumed: bool,
     answered: list[Interaction],
@@ -212,6 +213,12 @@ def build(
             STAGE_INSTRUCTIONS.get(stage.id, "Do what the stage requires, then stage_complete."),
             stage.instructions.strip(),
             "",
+            (
+                "Approved by people: " + ", ".join(approved) + ". Everything in these revisions, including the assumptions "
+                "they list, is confirmed: do not describe it as pending or waiting for confirmation."
+            )
+            if approved
+            else "",
             "# Ticket",
             f"{ticket.key} — {ticket.title}" + (f" (Jira {ticket.jira_key})" if ticket.jira_key else ""),
             project_line,

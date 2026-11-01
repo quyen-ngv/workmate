@@ -75,7 +75,8 @@ def test_allowlisted_command_is_allowed_but_chaining_asks(engine, ws):
     for cmd in ("cat > a.py <<'EOF'", "mkdir -p t && cat > t/x.py << EOF", "echo hi >> notes.md", "printf 'x' > f.txt", "tee out.txt", "sed -i 's|a|b|' f.py"):
         verdict = engine.decide("Bash", {"command": cmd}, c)
         assert verdict.decision == Decision.DENY and "Write tool" in verdict.reason, cmd
-    assert engine.decide("Bash", {"command": "uv run pytest -q 2>&1"}, c).decision == Decision.ASK
+    # merging stderr into stdout is harmless: an allowed command stays allowed
+    assert engine.decide("Bash", {"command": "uv run pytest -q 2>&1"}, c).decision == Decision.ALLOW
 
 
 def test_web_and_taint(engine, ws):

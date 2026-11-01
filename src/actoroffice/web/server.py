@@ -86,6 +86,7 @@ class Answer(BaseModel):
     description: str | None = None
     run_now: bool | None = None  # approving an automation also runs it once
     access: str | None = None  # approving project access: "worktree" or "direct"
+    note: str | None = None  # a stage gate sent back (or knowledge items dropped: "bỏ 2, 5")
 
 
 class NewTicket(BaseModel):
@@ -245,6 +246,16 @@ def create_app(office: Office, token: str) -> FastAPI:
         response = RedirectResponse("/", status_code=303)
         response.set_cookie(COOKIE, token, httponly=True, samesite="strict", max_age=60 * 60 * 24 * 30)
         return response
+
+    @app.get("/team")
+    async def team_page(request: Request) -> Any:
+        """The team copilot UI (herdr-like: teams and tickets, tabs, split panes, Files/Changes)."""
+        if not authed(request):
+            return HTMLResponse(_SIGNED_OUT, status_code=401)
+        folder = STATIC / "team"
+        version = str(int(max((folder / f).stat().st_mtime for f in ("team.js", "team.css"))))
+        html = (folder / "index.html").read_text(encoding="utf-8").replace("{{v}}", version)
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     @app.get("/")
     async def index(request: Request) -> Any:

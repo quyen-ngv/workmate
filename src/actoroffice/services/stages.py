@@ -629,7 +629,7 @@ class StageService:
             for item in pending:
                 names, ids = await self._askees(item, ticket)
                 who += [n for n in names if n not in who]
-                if viewer and (viewer in ids or (viewer == LOCAL_OWNER_ID and not ids)):
+                if viewer and (viewer in ids or viewer == LOCAL_OWNER_ID):  # the local owner is admin: may answer anything
                     needs_viewer = True
         elif running:
             status = StageStatus.WORKING

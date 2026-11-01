@@ -283,6 +283,18 @@ def register_rules(app: FastAPI, office: Office) -> None:
         project = await office.projects.get(project_id)
         return [r.model_dump() for r in await rules.import_conventions(project, by=LOCAL_OWNER_ID)]
 
+    @app.get("/api/kb")
+    async def kb(team_id: str | None = None, status: str | None = None, kind: str | None = None, q: str | None = None) -> list[dict[str, Any]]:
+        if q:
+            items = await office.knowledge.search(q, team_id=team_id, limit=50)
+        else:
+            items = await office.knowledge.list(team_id=team_id, status=status, kind=kind)
+        return [i.model_dump() for i in items if i.status != "rejected" or status == "rejected"]
+
+    @app.post("/api/kb/{item_id}/status")
+    async def kb_status(item_id: int, body: dict[str, Any]) -> dict[str, Any]:
+        return (await office.knowledge.set_status(item_id, str(body.get("status") or ""), by=LOCAL_OWNER_ID)).model_dump()
+
     @app.get("/api/resources")
     async def resources(team_id: str | None = None) -> list[dict[str, Any]]:
         return [r.model_dump() for r in await office.access.resources_for(team_id)]

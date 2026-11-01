@@ -38,3 +38,17 @@ def test_people_teams_tasks_board_and_controls(client):  # noqa: F811
     # refs are flat file names inside the run's folder only
     assert client.get("/api/runs/run_x/refs/..%2F..%2Foffice.db").status_code in (404, 422)
     assert client.get("/api/runs/run_x/refs/check-repo-test.txt").status_code == 404
+
+
+def test_team_page_and_knowledge_api(client):  # noqa: F811
+    login(client)
+    page = client.get("/team")
+    assert page.status_code == 200 and "/static/team/team.js?v=" in page.text
+    assert client.get("/static/team/team.js").status_code == 200
+    assert client.get("/api/kb").json() == []
+    task = client.post("/api/tasks", json={"title": "Báo cáo", "template": "research"}, headers=HEADERS).json()
+    assert task["stage"] == "understand"
+    # a gate note reaches the stage service (answer body accepts `note`)
+    from actoroffice.web.server import Answer
+
+    assert Answer(approved=False, note="thiếu AC").note == "thiếu AC"

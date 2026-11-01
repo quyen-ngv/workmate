@@ -523,6 +523,16 @@ def register_setup(app: FastAPI, office: Office) -> None:
             "warning": f"Biến môi trường {env} đang đặt token khác: lần khởi động sau token đó sẽ được dùng. Hãy xoá biến này." if env else None,
         }
 
+    @app.post("/api/setup/telegram/unbind")
+    async def setup_telegram_unbind() -> dict[str, Any]:
+        """Move the bot to another group: it leaves a notice in the current one, then waits for /start."""
+        if office.telegram is None:
+            raise HTTPException(409, "Telegram chưa chạy")
+        if office.telegram.chat_id is None:
+            raise HTTPException(409, "Bot chưa gắn group nào")
+        await office.telegram.unbind()
+        return {"ok": True, "next": "Nhắn /start trong group mới (đã bật Topics, bot là admin)."}
+
     @app.post("/api/setup/telegram/off")
     async def setup_telegram_off() -> dict[str, Any]:
         from actoroffice.channels.telegram import token_path

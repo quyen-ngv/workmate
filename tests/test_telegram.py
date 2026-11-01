@@ -8,7 +8,8 @@ import pytest
 
 from actoroffice.app import Office
 from actoroffice.channels import tg_format as fmt
-from actoroffice.channels.telegram import TelegramBridge
+from actoroffice.channels.telegram import TelegramBridge, TelegramError
+from actoroffice.channels.tg_progress import Progress
 from actoroffice.config import Settings
 from actoroffice.domain.work import InteractionKind, ProjectAccess
 
@@ -23,6 +24,7 @@ class FakeBot:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.documents: list[tuple[int | None, str]] = []
+        self.failing: set[str] = set()  # methods that answer with a Telegram error (e.g. the bot was kicked)
         self._next = 100
 
     async def call(self, method: str, **params: Any) -> Any:
@@ -30,6 +32,8 @@ class FakeBot:
             await asyncio.sleep(0.05)
             return []
         self.calls.append((method, params))
+        if method in self.failing:
+            raise TelegramError("Forbidden: bot was kicked from the supergroup chat", 403)
         self._next += 1
         if method == "createForumTopic":
             return {"message_thread_id": self._next, "name": params["name"]}
@@ -143,6 +147,121 @@ async def test_start_in_another_group_explains_how_to_switch(office, bot):
     assert len(reply) == 1 and reply[0][0] == "sendMessage"
     assert reply[0][1]["chat_id"] == -999 and reply[0][1]["message_thread_id"] == 5 and "Cài đặt" in reply[0][1]["text"]
     assert office.telegram.chat_id == GROUP
+
+
+# ---- switching to a new group ---------------------------------------------------------------------
+
+NEW_GROUP = -100456
+
+
+async def bound_state(office: Office) -> str | None:
+    row = await office.db.fetchone("SELECT value FROM telegram_state WHERE key = 'chat_id'")
+    return row["value"] if row else None
+
+
+async def test_ac3_unbind_notifies_old_group_once_and_forgets_it(office, bot):
+    await bind(office, bot)
+    before = len(bot.calls)
+    await office.telegram.unbind()
+    notice = bot.calls[before:]
+    assert len(notice) == 1 and notice[0][0] == "sendMessage"
+    assert notice[0][1]["chat_id"] == GROUP and notice[0][1].get("message_thread_id") is None and "chuyển sang" in notice[0][1]["text"]
+    assert office.telegram.chat_id is None and await bound_state(office) is None
+
+
+async def test_ac4_unbind_succeeds_when_old_group_is_gone(office, bot):
+    await bind(office, bot)
+    bot.failing.add("sendMessage")
+    await office.telegram.unbind()
+    assert office.telegram.chat_id is None and await bound_state(office) is None
+
+
+async def test_ac5_unbound_bot_stays_silent(office, bot):
+    hoa = await hire(office, "ba", "Hoa")
+    await bind(office, bot)
+    dm = await office.chat.dm(hoa.id)
+    thread = await office.telegram.topic_for(dm.id)
+    await office.telegram.unbind()
+    before = len(bot.calls)
+    for chat in (GROUP, NEW_GROUP):
+        await office.telegram.handle_update(tg_message("chào", thread, chat=chat))
+        await office.telegram.handle_update(tg_message("/help", chat=chat))
+    await office.chat.post_actor(dm.id, hoa, "tin khi đang chờ", wake=False)
+    await asyncio.sleep(0.2)
+    assert bot.calls[before:] == []
+    assert all(m.body != "chào" for m in await office.chat.messages(dm.id))
+
+
+async def test_ac6_start_in_new_group_binds_it_and_recreates_topics(office, bot):
+    hoa = await hire(office, "ba", "Hoa")
+    await bind(office, bot)
+    group = await office.chat.create_group("Dự án A", [hoa.id])
+    await office.telegram.unbind()
+    before = len(bot.calls)
+    await office.telegram.handle_update(tg_message("/start", chat=NEW_GROUP))
+    assert office.telegram.chat_id == NEW_GROUP and await bound_state(office) == str(NEW_GROUP)
+    calls = bot.calls[before:]
+    assert any(m == "sendMessage" and p["chat_id"] == NEW_GROUP and "Đã kết nối" in p["text"] for m, p in calls)
+    topics = [p for m, p in calls if m == "createForumTopic"]
+    assert all(p["chat_id"] == NEW_GROUP for p in topics)
+    names = [p["name"] for p in topics]
+    assert any(n.startswith("💬 Hoa · ") for n in names) and any(n == f"👥 {group.title}" for n in names)
+    dm = await office.chat.dm(hoa.id)
+    thread = await office.telegram.topic_for(dm.id)
+    await office.chat.post_actor(dm.id, hoa, "tin ở group mới", wake=False)
+    await until(lambda: any("tin ở group mới" in p["text"] for p in bot.sent()))
+    msg = next(p for p in bot.sent() if "tin ở group mới" in p["text"])
+    assert msg["chat_id"] == NEW_GROUP and msg["message_thread_id"] == thread
+
+
+async def test_ac7_start_in_old_group_rebinds_and_reuses_topics(office, bot):
+    await hire(office, "ba", "Hoa")
+    await bind(office, bot)
+    topics = len(bot.sent("createForumTopic"))
+    await office.telegram.unbind()
+    await bind(office, bot)
+    assert len(bot.sent("createForumTopic")) == topics
+    assert await bound_state(office) == str(GROUP)
+
+
+async def test_ac9_old_cards_stay_after_switch(office, bot):
+    hoa = await hire(office, "ba", "Hoa")
+    await bind(office, bot)
+    dm = await office.chat.dm(hoa.id)
+    item = await office.interactions.create(
+        InteractionKind.QUESTION, {"asked_by": "Hoa", "question": "Gửi lúc mấy giờ?", "options": ["8h", "9h"], "conversation_id": dm.id}, actor_id=hoa.id
+    )
+    await until(lambda: any("Gửi lúc mấy giờ" in p["text"] for p in bot.sent()))
+    await office.telegram.unbind()
+    press = {"update_id": 5, "callback_query": {"id": "cb-wait", "data": f"i:{item.id}:o0", "message": {"chat": {"id": GROUP}}}}
+    await office.telegram.handle_update(press)
+    assert bot.sent("answerCallbackQuery")[-1] == {"callback_query_id": "cb-wait"}  # silent while waiting
+    await office.telegram.handle_update(tg_message("/start", chat=NEW_GROUP))
+    await asyncio.sleep(0.1)
+    assert not any("Gửi lúc mấy giờ" in p["text"] for p in bot.sent() if p["chat_id"] == NEW_GROUP)
+    press["callback_query"]["id"] = "cb-old"
+    await office.telegram.handle_update(press)
+    assert (await office.interactions.get(item.id)).status.value == "pending"  # a press in the old group does nothing
+    await office.answer(item.id, {"answer": "8h"})
+    assert (await office.interactions.get(item.id)).status.value == "answered"
+
+
+async def test_ac9_switch_forgets_live_progress(office, bot):
+    hoa = await hire(office, "ba", "Hoa")
+    await bind(office, bot)
+    dm = await office.chat.dm(hoa.id)
+    await office.chat.post_actor(dm.id, hoa, "trả lời ở group cũ", meta={"run_id": "run_old"}, wake=False)
+    await until(lambda: "run_old" in office.telegram._runs)
+    flush = asyncio.create_task(asyncio.sleep(30))
+    office.telegram.progress.runs["run_live"] = Progress("run_live", 5, "Hoa", chat=False, message_id=777, flush=flush)
+    await office.telegram.unbind()
+    await asyncio.sleep(0)
+    assert flush.cancelled() and not office.telegram.progress.runs and not office.telegram._runs
+    await office.telegram.handle_update(tg_message("/start", chat=NEW_GROUP))
+    office.bus.publish("run.finished", run_id="run_old", status="succeeded", error=None, run={"usage": {}, "stats": {}})
+    office.bus.publish("run.finished", run_id="run_live", status="succeeded", error=None, run={"usage": {}, "stats": {}})
+    await asyncio.sleep(0.2)
+    assert not bot.sent("editMessageText")  # message ids of the old group are never edited in the new one
 
 
 # ---- messages both ways ---------------------------------------------------------------------------

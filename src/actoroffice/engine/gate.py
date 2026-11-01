@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # Our own tools that act outside the machine: they follow the position's "external" rule (usually ask).
+ENV_DUMP = re.compile(r"^\s*(env|printenv|set|export\s+-p|declare\s+-x|Get-ChildItem\s+env:|gci\s+env:|dir\s+env:)\s*(\||$)|\becho\s+\$\w*(DSN|TOKEN|SECRET|PASSWORD|KEY)\b|\bcat\s+/proc/(self|\d+)/environ", re.IGNORECASE)
 EXTERNAL_OFFICE_TOOLS = {"jira_comment", "pr_create", "pr_reply", "repo_fetch"}
 
 
@@ -75,6 +77,9 @@ class OfficeGate:
             if message:
                 await self._audit(tool, tool, Risk.READ, "interrupted", "watchdog loop")
                 return GateResult(GateDecision.DENY, message)
+        if self.ticket_id is not None and tool in ("Bash", "PowerShell") and ENV_DUMP.search(str(args.get("command") or "")):
+            await self._audit(tool, str(args.get("command"))[:200], Risk.READ, "denied", "env dump")
+            return GateResult(GateDecision.DENY, "Printing the environment is not allowed (it may hold granted credentials). Use access_list to see what you can reach.")
         if self.policies:
             from actoroffice.services.rules import policy_denial
 

@@ -47,6 +47,7 @@ WAITING_KINDS = (
     InteractionKind.APPROVE_ACCESS.value,
     InteractionKind.APPROVE_AUTOMATION.value,
     InteractionKind.ASK_COLLEAGUE.value,
+    InteractionKind.ENV_ACCESS.value,
 )
 
 
@@ -346,6 +347,11 @@ class StageService:
             "summary": summary.strip()[:3000],
             "docs": docs,
             "checks": [{"id": r.id, "status": r.status, "summary": r.summary} for r in results],
+            "access": [
+                f"{i.payload.get('resource')} ({i.payload.get('level_label')}, {i.payload.get('ttl_h')}h)"
+                for i in await office.interactions.pending(ticket_id=ticket.id)
+                if i.kind == InteractionKind.ENV_ACCESS
+            ],
             "approvals": [],
             "rules": [{"id": r.id, "title": r.title, "roles": r.spec.get("roles")} for r in extra or []],
         }
@@ -389,6 +395,10 @@ class StageService:
             await office.tickets.add_comment(ticket.id, comment, author_kind="system", author_id=None)
             if item.payload.get("gate") == "requirement" and ticket.jira_key:
                 await office.jira.requirements_approved(ticket.id, name)
+            if item.payload.get("gate") == "plan":
+                granted = await office.access.approve_with_plan(ticket.id, by=by)
+                if granted:
+                    await office.tickets.add_comment(ticket.id, f"🔑 Cấp quyền cùng plan: {', '.join(granted)}", author_kind="system", author_id=None)
             await self.advance(ticket.id, by=by)
         else:
             comment = f"👎 {name} chưa duyệt {stage_title(ticket.stage)}" + (f": {note}" if note else "")

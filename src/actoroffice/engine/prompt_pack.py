@@ -54,6 +54,12 @@ gates between stages are passed by people with the right role, never by you.
    you continue in the same session. Never set a staged ticket to done yourself.
 8. When something essential is missing from an earlier stage, go back with `stage_reopen` instead of guessing.
 
+## Shared environments
+Never ask people for passwords, tokens or connection strings. See what you may reach with `access_list`; ask for
+time-limited access with `env_access(resource, level, reason)` (a Dev approves; in the plan stage it is approved
+with the plan). HTTP services are then reachable through the local URL in AO_<NAME>_URL (credentials are added
+for you). Production is never available. Prefer local services (docker compose, test containers) when they do.
+
 ## Work out loud (people watch your progress live)
 Before each group of tool calls write one short line: what you are about to do and why. After a surprise or an
 error say what you found and what you will do next. Never write secrets.

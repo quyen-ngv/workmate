@@ -176,6 +176,14 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
         recommended = str(p.get("recommended") or "")
         rows = [[btn(("⭐ " if str(o) == recommended else "") + str(o)[:58], f"o{i}")] for i, o in enumerate((p.get("options") or [])[:8])]
         return text + "\n\n<i>↩️ Reply tin này để trả lời bằng chữ.</i>", rows
+    if kind == "env_access":
+        names = ", ".join(p.get("approver_names") or []) or str(p.get("roles_label") or "")
+        text = (
+            f"🔑 <b>{esc(p.get('ticket'))}: AI xin quyền {esc(p.get('level_label'))} vào {esc(p.get('resource'))}</b> "
+            f"({esc(p.get('kind'))}, môi trường {esc(p.get('env'))}) trong {esc(p.get('ttl_h'))} giờ\n"
+            f"{esc(p.get('reason'))}\n<i>Cần {esc(names)} duyệt. AI không thấy mật khẩu/token; mọi request đi qua proxy và được ghi lại.</i>"
+        )
+        return text, [[btn("✅ Cho phép", "y"), btn("⛔ Không", "n")]]
     if kind == "approve_stage":
         names = ", ".join(p.get("approver_names") or []) or str(p.get("roles_label") or "")
         icons = {"passed": "✅", "failed": "❌", "skipped": "⏭"}
@@ -190,6 +198,7 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
             f"<b>{esc(p.get('title'))}</b>\n{md_to_html(str(p.get('summary') or '')[:1500])}"
             + (f"\n\n<b>Tài liệu:</b> {docs}" if docs else "")
             + (f"\n<b>Kiểm tra:</b>\n{checks}" if checks else "")
+            + (f"\n<b>Duyệt kèm quyền môi trường:</b> {esc(', '.join(p.get('access') or []))}" if p.get("access") else "")
             + (f"\n<i>Đã duyệt {len(approvals)}/{need}: {esc(', '.join(a.get('name', '') for a in approvals))}</i>" if need > 1 else "")
         )
         return text + "\n\n<i>↩️ Reply tin này để trả lại kèm ghi chú.</i>", [[btn("👍 Duyệt", "y"), btn("👎 Trả lại", "n")]]
@@ -238,7 +247,7 @@ def response_for(item: dict[str, Any], choice: str) -> dict[str, Any]:
         return {"confirmed": True}
     if kind == "approve_automation":
         return {"approved": True, "run_now": choice == "y"}
-    if kind == "approve_stage":
+    if kind in ("approve_stage", "env_access"):
         return {"approved": choice == "y"}
     if kind == "approve_access" and choice in ("gw", "gd"):
         return {"approved": True, "access": "worktree" if choice == "gw" else "direct"}
@@ -261,6 +270,10 @@ def verdict(item: dict[str, Any]) -> str:
         return f"✅ Đã tạo {r['ticket_key']}" if r.get("ticket_key") else "Đã bỏ"
     if kind == "approve_automation":
         return "✅ Đã duyệt và bật" if r.get("approved") else "⛔ Đã từ chối"
+    if kind == "env_access":
+        if not r.get("approved"):
+            return "⛔ Không cấp quyền"
+        return f"✅ Đã cấp quyền đến {str(r.get('expires_at') or '')[:16].replace('T', ' ')} UTC"
     if kind == "approve_stage":
         who = r.get("by_name") or "Bạn"
         if r.get("approved"):

@@ -145,7 +145,11 @@ class Executor:
                 add_dirs=read_dirs,
                 max_turns=position.policy.max_turns,
                 hook_timeout_s=office.settings.approval_wait_s + 60,
-                env={**self._env(actor, position), **ticket_env(ticket, project)},
+                env={
+                    **self._env(actor, position),
+                    **ticket_env(ticket, project),
+                    **(await office.access.env_for(ticket.id) if stage_run is not None else {}),
+                },
                 mcp_servers=mcp_servers,
             )
             await office.runs.event(
@@ -380,7 +384,11 @@ class Executor:
         """The user may answer while the run is still finishing; that answer must still wake the actor."""
         for item in await self.office.interactions.for_run(run_id):
             parked_or_question = item.kind in (
-                InteractionKind.QUESTION, InteractionKind.ASK_COLLEAGUE, InteractionKind.APPROVE_AUTOMATION, InteractionKind.APPROVE_ACCESS
+                InteractionKind.QUESTION,
+                InteractionKind.ASK_COLLEAGUE,
+                InteractionKind.APPROVE_AUTOMATION,
+                InteractionKind.APPROVE_ACCESS,
+                InteractionKind.ENV_ACCESS,
             ) or item.payload.get("parked")
             if item.status == InteractionStatus.ANSWERED and parked_or_question:
                 await self.office.wakes.enqueue(
@@ -421,7 +429,8 @@ class Executor:
         if result.status != TurnStatus.COMPLETED or run_id in self.office.stages.finished_runs:
             return False
         ticket = await self.office.tickets.get(ticket_id)
-        if ticket.stage and any(i.kind == InteractionKind.QUESTION for i in await self.office.interactions.pending(run_id=run_id)):
+        waiting = (InteractionKind.QUESTION, InteractionKind.ENV_ACCESS)
+        if ticket.stage and any(i.kind in waiting for i in await self.office.interactions.pending(run_id=run_id)):
             return False  # waiting for an answer: the office parks the ticket
         return ticket.status == S.IN_PROGRESS and ticket.checkout_run_id == run_id
 
@@ -431,7 +440,7 @@ class Executor:
         office = self.office
         current = await office.tickets.get(ticket.id)
         still_mine = current.status == S.IN_PROGRESS and current.checkout_run_id == run_id
-        waiting = (InteractionKind.QUESTION, InteractionKind.ASK_COLLEAGUE, InteractionKind.APPROVE_AUTOMATION)
+        waiting = (InteractionKind.QUESTION, InteractionKind.ASK_COLLEAGUE, InteractionKind.APPROVE_AUTOMATION, InteractionKind.ENV_ACCESS)
         questions = [i for i in await office.interactions.pending(run_id=run_id) if i.kind in waiting]
 
         if result.status == TurnStatus.DEFERRED or (questions and still_mine):

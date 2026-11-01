@@ -129,6 +129,7 @@ class InteractionKind(StrEnum):
     ASK_COLLEAGUE = "ask_colleague"  # a ticket run asked a colleague in the ticket's meeting group
     APPROVE_AUTOMATION = "approve_automation"  # an actor wants a script to run on its own; the user reviews it
     APPROVE_ACCESS = "approve_access"  # an actor needs to change files of a read-only project; the user decides
+    ENV_ACCESS = "env_access"  # the AI asks for time-limited access to a shared environment; a Dev/Lead decides
     APPROVE_STAGE = "approve_stage"  # a stage gate: people with the right role approve the stage's documents
 
 

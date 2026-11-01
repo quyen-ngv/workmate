@@ -449,3 +449,63 @@ STAGE_TOOLS.append(
         artifact_add,
     )
 )
+
+
+# ---- shared environments -----------------------------------------------------------------------------------
+
+
+async def access_list(_args: dict[str, Any], ctx: ToolCtx) -> str:
+    office = ctx.office
+    ticket = await office.tickets.get(ctx.ticket_id) if ctx.ticket_id else None
+    resources = await office.access.resources_for(ticket.team_id if ticket else None)
+    active = {g.resource_id: g for g, _r in (await office.access.active(ticket.id) if ticket else [])}
+    if not resources:
+        return "No shared environments are registered for this team. Use local services (docker compose, test containers)."
+    lines = []
+    for r in resources:
+        grant = active.get(r.id)
+        state = f"GRANTED {grant.level.value} until {grant.expires_at[:16]} → env {', '.join((grant.envelope.get('env') or {}).keys()) or grant.envelope.get('env_secret') or '(tools only)'}" if grant else "not granted"
+        lines.append(f"- {r.name} [{r.kind.value}, {r.env}, max {r.max_level.value}]: {state}")
+    return "\n".join(lines)
+
+
+async def env_access(args: dict[str, Any], ctx: ToolCtx) -> str:
+    if ctx.ticket_id is None:
+        raise ToolError("env_access works inside a ticket.")
+    try:
+        item = await ctx.office.access.request(
+            ctx.ticket_id,
+            str(args.get("resource") or ""),
+            str(args.get("level") or "read"),
+            str(args.get("reason") or ""),
+            float(args.get("ttl_h") or 4),
+            actor_id=ctx.actor.id,
+            run_id=ctx.run_id,
+        )
+    except OfficeError as exc:
+        raise ToolError(str(exc)) from exc
+    who = ", ".join(item.payload.get("approver_names") or []) or "a Dev/Lead"
+    ticket = await ctx.office.tickets.get(ctx.ticket_id)
+    if ticket.stage == "plan":
+        return f"Access request {item.id} recorded: {who} approves it together with the plan. Continue the plan."
+    return f"Access request {item.id} sent to {who}. Save your progress and end your turn; you are woken when it is decided."
+
+
+STAGE_TOOLS += [
+    ToolDef("access_list", "Shared environments (services, databases, brokers, logs) and what this ticket may reach now.", schema({}, required=[]), access_list, read_only=True),
+    ToolDef(
+        "env_access",
+        "Ask for time-limited access to a shared environment (never production). level: read | write-sandboxed | "
+        "write-shared. Say exactly why (which test or check needs it).",
+        schema(
+            {
+                "resource": {"type": "string"},
+                "level": {"type": "string", "enum": ["read", "write-sandboxed", "write-shared"]},
+                "reason": {"type": "string"},
+                "ttl_h": {"type": "number"},
+            },
+            required=["resource", "level", "reason"],
+        ),
+        env_access,
+    ),
+]

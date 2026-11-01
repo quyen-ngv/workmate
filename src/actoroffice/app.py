@@ -33,6 +33,7 @@ from actoroffice.security.redact import Redactor
 from actoroffice.services.automations import AutomationService
 from actoroffice.services.chat import ChatService
 from actoroffice.services.interactions import InteractionService
+from actoroffice.services.access import AccessService
 from actoroffice.services.atlassian import Atlassian
 from actoroffice.services.jira import JiraMirror
 from actoroffice.services.prwatch import PullRequestWatcher
@@ -91,6 +92,7 @@ class Office:
         self.atlassian = Atlassian(settings.data_dir)
         self.prs = PullRequestWatcher(self)
         self.review = ReviewService(self)
+        self.access = AccessService(self)
         self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),
@@ -122,6 +124,7 @@ class Office:
             if self.jira.ready():
                 self._tasks.append(asyncio.create_task(self.jira.run_forever(), name="jira"))
             self._tasks.append(asyncio.create_task(self.prs.run_forever(), name="pull-requests"))
+            self._tasks.append(asyncio.create_task(self.access.run_forever(), name="access-expiry"))
 
     async def start_notifier(self) -> None:
         ready = asyncio.Event()
@@ -188,6 +191,7 @@ class Office:
             await self.telegram.api.close()
         await self.jira.close()
         await self.atlassian.close()
+        await self.access.close()
         await self.db.close()
 
     async def answer(self, interaction_id: str, response: dict[str, Any], *, by: str = "user") -> Interaction:
@@ -214,6 +218,8 @@ class Office:
             return await self._answer_access(item, response, by=by)
         if item.kind == InteractionKind.APPROVE_STAGE:
             return await self.stages.answer_gate(item, response, by=by)
+        if item.kind == InteractionKind.ENV_ACCESS:
+            return await self.access.answer(item, response, by=by)
         if item.kind == InteractionKind.QUESTION and item.payload.get("roles") and by != LOCAL_OWNER_ID:
             ticket = await self.tickets.get(item.ticket_id) if item.ticket_id else None
             if not await self.teams.can_act(by, ticket, list(item.payload["roles"])):

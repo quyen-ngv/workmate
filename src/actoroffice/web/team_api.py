@@ -283,6 +283,20 @@ def register_rules(app: FastAPI, office: Office) -> None:
         project = await office.projects.get(project_id)
         return [r.model_dump() for r in await rules.import_conventions(project, by=LOCAL_OWNER_ID)]
 
+    @app.get("/api/resources")
+    async def resources(team_id: str | None = None) -> list[dict[str, Any]]:
+        return [r.model_dump() for r in await office.access.resources_for(team_id)]
+
+    @app.get("/api/tickets/{key}/access")
+    async def ticket_access(key: str) -> list[dict[str, Any]]:
+        ticket = await office.tickets.get(key)
+        return [{"grant": g.model_dump(), "resource": r.model_dump()} for g, r in await office.access.active(ticket.id)]
+
+    @app.post("/api/grants/{grant_id}/revoke")
+    async def revoke_grant(grant_id: str) -> dict[str, Any]:
+        await office.access.revoke(grant_id, by=LOCAL_OWNER_ID)
+        return {"ok": True}
+
     @app.get("/api/tickets/{key}/rules")
     async def ticket_rules(key: str) -> dict[str, Any]:
         """Rules in effect for the ticket's current stage."""

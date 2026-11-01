@@ -177,6 +177,27 @@ async def cmd_project(office: Office, args: argparse.Namespace) -> None:
     out(f"{project.name}: team={project.team_id or '-'} kind={project.kind} repo={project.repo_url or '-'} profile={list(project.profile) or '-'}")
 
 
+async def cmd_resource(office: Office, args: argparse.Namespace) -> None:
+    import json as _json
+
+    from actoroffice.services.access import save_secret
+
+    team = await office.teams.get_team(args.team) if args.team else None
+    if args.action == "add":
+        config = _json.loads(args.config) if args.config else {}
+        if args.secret_json:
+            name = config.get("secret") or args.name
+            save_secret(office.settings.data_dir, name, _json.loads(args.secret_json))
+            config["secret"] = name
+        resource = await office.access.add_resource(
+            args.name, args.kind, team_id=team.id if team else None, env=args.env, config=config, max_level=args.max_level
+        )
+        out(f"{resource.name} [{resource.kind.value}, {resource.env}, max {resource.max_level.value}] → env {resource.env_name}_URL khi được cấp")
+    else:
+        for r in await office.access.resources_for(team.id if team else None):
+            out(f"{r.name:20} {r.kind.value:6} {r.env:8} max={r.max_level.value:16} {r.config.get('base_url', '')}")
+
+
 # ---- environment ------------------------------------------------------------------------------------------
 
 
@@ -340,6 +361,17 @@ def register(sub: Any) -> None:
     p.add_argument("--repo-url")
     p.add_argument("--profile", help="JSON: setup/build/test/lint/run argv lists, test_glob, os overrides")
     p.set_defaults(fn=cmd_project)
+
+    p = sub.add_parser("resource", help="shared environments: list | add <name> --kind http --config '{\"base_url\": …}' --secret-json '{\"headers\": {…}}'")
+    p.add_argument("action", nargs="?", default="list", choices=["list", "add"])
+    p.add_argument("name", nargs="?")
+    p.add_argument("--kind", default="http", choices=["http", "db", "kafka", "mq", "redis", "logs"])
+    p.add_argument("--team")
+    p.add_argument("--env", default="dev")
+    p.add_argument("--max-level", default="read", choices=["read", "write-sandboxed", "write-shared"])
+    p.add_argument("--config", help="JSON (base_url, sandbox_paths, …)")
+    p.add_argument("--secret-json", help="JSON stored in secrets/resources.json (headers / dsn), never shown to the AI")
+    p.set_defaults(fn=cmd_resource)
 
     sub.add_parser("doctor", help="check what this machine can run (OS, WSL, git, bash, docker, kiro, claude)").set_defaults(fn=cmd_doctor)
 

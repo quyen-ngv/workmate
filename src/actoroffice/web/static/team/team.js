@@ -33,7 +33,7 @@ async function api(path, opts = {}) {
   if (res.status === 401) { location.href = "/"; throw new Error("not signed in"); }
   const text = await res.text();
   const data = text && (res.headers.get("content-type") || "").includes("json") ? JSON.parse(text) : text;
-  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  if (!res.ok) throw new Error((data && (data.error || (typeof data.detail === "string" ? data.detail : null))) || res.statusText);
   return data;
 }
 
@@ -137,7 +137,7 @@ function renderSidebar() {
     </div>
     <div class="side-foot">
       <button data-page="inbox">Cần tôi ${needs_you ? `(${needs_you})` : ""}</button>
-      <button data-page="rules">Rules</button><button data-page="kb">Kiến thức</button><button data-page="people">Người</button>
+      <button data-page="rules">Rules</button><button data-page="kb">Kiến thức</button><button data-page="people">Người</button><button data-page="setup">Cài đặt</button>
     </div>`;
 }
 
@@ -169,7 +169,8 @@ function paneKeys() {
 function renderPanes() {
   const keys = paneKeys();
   $("#panes").innerHTML = keys.length ? keys.map((k) => `<section class="pane ${k === state.focus ? "focus" : ""}" data-pane="${esc(k)}"></section>`).join("")
-    : `<div class="empty">Chọn một việc bên trái, hoặc bấm + để giao việc mới cho AI.</div>`;
+    : `<div class="welcome" id="welcome"><div class="empty">Chọn một việc bên trái, hoặc bấm + để giao việc mới cho AI.</div></div>`;
+  if (!keys.length) act(renderWelcome);
   for (const key of keys) renderPane(key);
   renderSide();
 }
@@ -321,7 +322,32 @@ async function renderSide() {
   }
 }
 
+// ---- first run checklist -------------------------------------------------------------------------------------
+
+async function renderWelcome() {
+  const box = $("#welcome");
+  if (!box) return;
+  const s = await api("/api/setup");
+  const steps = [
+    ["Thêm người và team (BA, Dev…)", s.people > 0 && s.teams.length > 0, "people"],
+    ["Thêm repo/dự án cho AI làm việc", s.projects.length > 0, "setup"],
+    ["Kết nối Telegram (tuỳ chọn)", s.connections.telegram.configured, "setup"],
+    ["Kết nối Jira + Confluence (tuỳ chọn)", s.connections.jira.configured, "setup"],
+    ["Giao việc đầu tiên cho AI", state.board.tickets.length > 0, "new"],
+  ];
+  if (steps.every(([, ok]) => ok)) return;
+  box.innerHTML = `<div class="checklist"><h2>Bắt đầu</h2>
+    ${steps.map(([label, ok, page]) => `<div class="step ${ok ? "ok" : ""}"><span class="tick">${ok ? "✓" : "○"}</span><span class="name">${esc(label)}</span>
+      ${ok ? "" : page === "new" ? `<button class="btn primary" data-new>Giao việc</button>` : `<button class="btn" data-page="${page}">Mở</button>`}</div>`).join("")}
+    <div class="hint">AI: ${esc(s.ai.name)} · model ${esc(s.ai.model)}. Mọi thứ đều chỉnh được trong Cài đặt.</div></div>`;
+}
+
 // ---- overlay pages -------------------------------------------------------------------------------------------
+
+function closeSheet() {
+  $("#overlay").hidden = true;
+  if (!paneKeys().length) act(async () => { await loadBoard(); renderPanes(); }); // the start checklist reflects what was just set up
+}
 
 function sheet(title, html) {
   const o = $("#overlay");
@@ -331,11 +357,12 @@ function sheet(title, html) {
 }
 
 async function pageNewTask() {
-  const people = await api("/api/people");
+  const [people, setup] = await Promise.all([api("/api/people"), api("/api/setup")]);
   const body = sheet("Giao việc mới cho AI", `
     <div class="form">
       <label>Tiêu đề<input data-f="title" placeholder="vd. Hoàn tiền cho đơn VIP trong 60 ngày"></label>
       <label>Loại việc<select data-f="template">${people.templates.map((t) => `<option>${esc(t)}</option>`).join("")}</select></label>
+      <label>Repo / dự án<select data-f="project_id"><option value="">— (không có repo)</option>${setup.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
       <label>Team<select data-f="team_id"><option value="">—</option>${people.teams.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</select></label>
       <label>Người yêu cầu<select data-f="owner_user_id"><option value="">—</option>${people.users.filter((u) => u.id !== "user").map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join("")}</select></label>
       <label>Khi người chưa trả lời<select data-f="mode"><option value="wait">Chờ</option><option value="assume">Làm theo giả định</option></select></label>
@@ -390,6 +417,57 @@ async function pagePeople() {
         <label>Vai trong team<input data-m-roles="${esc(t.id)}" placeholder="ba dev"></label><button class="btn" data-add-member="${esc(t.id)}">Gán</button></div></div>`).join("")}`);
 }
 
+const MODELS = [["sonnet", "Claude Sonnet (khuyên dùng)"], ["opus", "Claude Opus (mạnh nhất, tốn hơn)"], ["haiku", "Claude Haiku (nhanh, rẻ)"], ["kiro", "Kiro CLI (cần cài kiro-cli)"]];
+
+async function pageSetup() {
+  const s = await api("/api/setup");
+  const c = s.connections;
+  const status = (ok, text) => `<span class="chip ${ok ? "working" : ""}">${ok ? "✓ " : ""}${esc(text)}</span>`;
+  const teamOpts = (sel) => `<option value="">—</option>${s.teams.map((t) => `<option value="${esc(t.id)}" ${t.id === sel ? "selected" : ""}>${esc(t.name)}</option>`).join("")}`;
+  const models = MODELS.some(([v]) => v === s.ai.model) ? MODELS : [[s.ai.model, s.ai.model], ...MODELS];
+  sheet("Cài đặt", `
+    <h3>AI</h3>
+    <div class="form">
+      <label>Model<select data-ai="model">${models.map(([v, l]) => `<option value="${esc(v)}" ${v === s.ai.model ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+      <button class="btn primary" data-save-ai>Lưu</button>
+    </div>
+
+    <h3>Repo / dự án</h3>
+    <p class="hint">Thư mục repo trên máy này. AI làm trên git worktree riêng cho mỗi việc, không sửa thẳng nhánh của bạn. Lệnh test/build để AI tự kiểm tra (để trống nếu chưa có).</p>
+    ${s.projects.map((p) => projectForm(p, teamOpts)).join("")}
+    ${projectForm({ id: "", name: "", path: "", team_id: "", repo_url: "", test: "", build: "", lint: "" }, teamOpts)}
+
+    <h3>Kết nối</h3>
+    <p class="hint">Token được lưu trên máy chủ (thư mục secrets), không hiện lại và AI không bao giờ thấy.</p>
+    <div class="rule"><div class="h"><b>Telegram</b>${status(c.telegram.configured, c.telegram.configured ? (c.telegram.bound ? "đã nối group" : "đã có token, chờ /start trong group") : "chưa kết nối")}</div>
+      <div class="b">@BotFather → /newbot → dán token. Sau đó tạo group, bật Topics, thêm bot làm admin và nhắn /start trong group.</div>
+      <div class="form"><label>Bot token<input data-c="tg_token" type="password" placeholder="123456789:AA…"></label><button class="btn primary" data-save-telegram>Kết nối</button></div></div>
+    <div class="rule"><div class="h"><b>Jira + Confluence (Cloud)</b>${status(c.jira.configured, c.jira.configured ? `${c.jira.email} · ${c.jira.base_url}` : "chưa kết nối")}</div>
+      <div class="b">Tạo API token tại id.atlassian.com → Security → API tokens.</div>
+      <div class="form"><label>URL<input data-c="jira_url" placeholder="vd. https://acme.atlassian.net" value="${esc(c.jira.base_url || "")}"></label>
+        <label>Email<input data-c="jira_email" value="${esc(c.jira.email || "")}"></label><label>API token<input data-c="jira_token" type="password"></label>
+        <button class="btn primary" data-save-jira>Kiểm tra & lưu</button></div></div>
+    <div class="rule"><div class="h"><b>Bitbucket Cloud</b>${status(c.bitbucket.configured, c.bitbucket.configured ? `workspace ${c.bitbucket.workspace}` : "chưa kết nối")}</div>
+      <div class="b">Dùng để AI tạo PR và đọc review. Không có cũng được: AI sẽ nhờ Dev tạo PR.</div>
+      <div class="form"><label>Email<input data-c="bb_email"></label><label>API token<input data-c="bb_token" type="password"></label>
+        <label>Workspace<input data-c="bb_workspace" value="${esc(c.bitbucket.workspace || "")}"></label><button class="btn primary" data-save-bitbucket>Kiểm tra & lưu</button></div></div>`);
+}
+
+function projectForm(p, teamOpts) {
+  const k = esc(p.id || "new");
+  return `<div class="rule" data-proj="${k}"><div class="h"><b>${p.id ? esc(p.name) : "Thêm repo mới"}</b>${p.path ? `<span class="chip">${esc(p.path)}</span>` : ""}</div>
+    <div class="form">
+      <label>Tên<input data-pf="name" value="${esc(p.name)}" placeholder="vd. billing"></label>
+      <label>Thư mục repo<input data-pf="path" value="${esc(p.path || "")}" placeholder="vd. F:/code/billing"></label>
+      <label>Team<select data-pf="team_id">${teamOpts(p.team_id)}</select></label>
+      <label>Repo trên Bitbucket<input data-pf="repo_url" value="${esc(p.repo_url || "")}" placeholder="vd. acme/billing"></label>
+      <label>Lệnh test<input data-pf="test" value="${esc(p.test)}" placeholder="vd. mvn -q test"></label>
+      <label>Lệnh build<input data-pf="build" value="${esc(p.build)}" placeholder="vd. mvn -q package -DskipTests"></label>
+      <label>Lệnh lint<input data-pf="lint" value="${esc(p.lint)}"></label>
+      <button class="btn primary" data-save-project="${k}">${p.id ? "Lưu" : "Thêm"}</button>
+    </div></div>`;
+}
+
 // ---- events --------------------------------------------------------------------------------------------------
 
 function openTicket(key) {
@@ -413,9 +491,21 @@ document.addEventListener("click", (e) => {
   if (ds.split !== undefined) { state.split = !state.split; save(); renderTabs(); renderPanes(); return; }
   if (ds.side) { state.side = state.side === ds.side ? "" : ds.side; save(); renderTabs(); renderSide(); return; }
   if (t.hasAttribute("data-group")) { t.classList.toggle("open"); return; }
-  if (ds.closeSheet !== undefined) { $("#overlay").hidden = true; return; }
+  if (ds.closeSheet !== undefined) { closeSheet(); return; }
   if (ds.new !== undefined) return act(pageNewTask);
-  if (ds.page) return act({ inbox: pageInbox, rules: pageRules, kb: pageKb, people: pagePeople }[ds.page]);
+  if (ds.page) return act({ inbox: pageInbox, rules: pageRules, kb: pageKb, people: pagePeople, setup: pageSetup }[ds.page]);
+  if (ds.saveAi !== undefined) return act(async () => { await api("/api/setup/ai", { method: "POST", body: { model: $('[data-ai="model"]').value } }); toast("Đã lưu model"); });
+  if (ds.saveProject) return act(async () => {
+    const box = t.closest("[data-proj]");
+    const v = (n) => ($(`[data-pf="${n}"]`, box).value || "").trim();
+    const r = await api("/api/setup/project", { method: "POST", body: { id: ds.saveProject === "new" ? null : ds.saveProject, name: v("name"), path: v("path"), team_id: v("team_id") || null, repo_url: v("repo_url") || null, test: v("test"), build: v("build"), lint: v("lint") } });
+    toast(r.imported_rules.length ? `Đã lưu · nhập ${r.imported_rules.length} quy ước từ repo` : "Đã lưu");
+    await pageSetup();
+  });
+  const conn = (n) => ($(`[data-c="${n}"]`)?.value || "").trim();
+  if (ds.saveTelegram !== undefined) return act(async () => { const r = await api("/api/setup/telegram", { method: "POST", body: { token: conn("tg_token") } }); toast(`Đã nối bot @${r.bot}. ${r.next}`); await pageSetup(); });
+  if (ds.saveJira !== undefined) return act(async () => { const r = await api("/api/setup/jira", { method: "POST", body: { base_url: conn("jira_url"), email: conn("jira_email"), token: conn("jira_token") } }); toast(`Jira OK: ${r.user || ""}`); await pageSetup(); });
+  if (ds.saveBitbucket !== undefined) return act(async () => { await api("/api/setup/bitbucket", { method: "POST", body: { email: conn("bb_email"), token: conn("bb_token"), workspace: conn("bb_workspace") } }); toast("Bitbucket OK"); await pageSetup(); });
   const pane = t.closest("[data-pane]");
   const key = pane?.dataset.pane;
   if (ds.cmd && key) return act(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: ds.cmd } }); await refresh(key); });
@@ -436,7 +526,7 @@ document.addEventListener("click", (e) => {
   if (ds.revoke) return act(async () => { await api(`/api/grants/${ds.revoke}/revoke`, { method: "POST" }); renderSide(); });
   if (ds.createTask !== undefined) return act(async () => {
     const f = (n) => ($(`[data-f="${n}"]`).value || "").trim();
-    const ticket = await api("/api/tasks", { method: "POST", body: { title: f("title"), description: f("description"), template: f("template"), team_id: f("team_id") || null, owner_user_id: f("owner_user_id") || null, mode: f("mode") } });
+    const ticket = await api("/api/tasks", { method: "POST", body: { title: f("title"), description: f("description"), template: f("template"), team_id: f("team_id") || null, project_id: f("project_id") || null, owner_user_id: f("owner_user_id") || null, mode: f("mode") } });
     $("#overlay").hidden = true;
     await loadBoard();
     openTicket(ticket.key);
@@ -473,7 +563,7 @@ document.addEventListener("click", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && e.target.matches("[data-steer]")) $("[data-send]", e.target.closest("[data-pane]"))?.click();
-  if (e.key === "Escape") $("#overlay").hidden = true;
+  if (e.key === "Escape" && !$("#overlay").hidden) closeSheet();
 });
 
 async function refresh(key) {

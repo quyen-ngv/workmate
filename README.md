@@ -27,6 +27,18 @@ One AI engineer ("Copilot") works with people who hold roles (BA, Dev, QE, Lead,
 stages with gates people pass: **understand → [BA approves] → plan → [Dev approves] → build → pr → [merge] →
 close → [people confirm the knowledge]**. Design: [docs/plans/2026-10-31-team-copilot-design.md](docs/plans/2026-10-31-team-copilot-design.md).
 
+**Run it:** double-click `run.bat` (Windows) or run `./run.sh` (macOS, Linux, WSL). It installs what is
+needed and opens the web page. Everything else is done on the web, under **Cài đặt** and **Người**:
+
+1. Add people and teams, with their roles and Telegram ids.
+2. Add a repo: its folder on this machine, its team, and its test/build/lint commands. The repo's
+   `CLAUDE.md`, `AGENTS.md` and `.kiro/steering` are imported as rules.
+3. Optionally connect Telegram, Jira + Confluence and Bitbucket. Each one is verified before it is saved.
+4. Press **+** to give the AI a task.
+
+You need Python 3.12, [uv](https://docs.astral.sh/uv/), git and a logged-in Claude Code. The same steps can be
+scripted from the terminal:
+
 ```sh
 uv run actoroffice init                                   # creates the AI engineer, checks this machine (doctor)
 uv run actoroffice user add Lan --telegram 111 && uv run actoroffice user add Minh --telegram 222

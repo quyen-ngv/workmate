@@ -220,3 +220,15 @@ table.list th { color: var(--faint); font-weight: 500; }
 .composer.inline { border: 0; padding: 0; }
 .sheet-body > label { display: grid; gap: 4px; font-size: var(--fs-xs); color: var(--muted); }
 .sheet-body textarea, .sheet-body > label input { width: 100%; }
+
+.sheet-body h3 { margin: var(--gap-3) 0 var(--gap-1); font-size: var(--fs-sm); color: var(--muted); text-transform: uppercase; }
+.hint { color: var(--faint); font-size: var(--fs-sm); margin: 0 0 var(--gap-2); }
+.welcome { display: flex; flex: 1; align-items: center; justify-content: center; }
+.checklist { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--gap-4); min-width: 420px; background: var(--panel); }
+.checklist h2 { margin: 0 0 var(--gap-3); }
+.checklist .step { display: flex; align-items: center; gap: var(--gap-2); padding: var(--gap-1) 0; }
+.checklist .step .name { flex: 1; }
+.checklist .step.ok .name { color: var(--faint); text-decoration: line-through; }
+.checklist .step .tick { width: 1.2em; color: var(--muted); }
+.checklist .step.ok .tick { color: var(--ok); }
+.checklist .hint { margin-top: var(--gap-3); }

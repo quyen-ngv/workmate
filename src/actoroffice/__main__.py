@@ -254,6 +254,7 @@ async def cmd_serve(office: Office, args: argparse.Namespace) -> None:
     if added:
         out("Vị trí mới: " + ", ".join(p.title for p in added))
     token = load_or_create_token(settings)
+    await office.ensure_ai()  # the AI engineer exists from the first start (no separate init needed)
     await office.start(schedule=not args.view_only)  # --view-only: look around without the AI running
     if args.view_only:
         out("Chế độ chỉ xem: AI không chạy việc nào.")

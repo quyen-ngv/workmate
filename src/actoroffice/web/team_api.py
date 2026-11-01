@@ -316,3 +316,183 @@ def register_rules(app: FastAPI, office: Office) -> None:
         project = await office.projects.get(ticket.project_id) if ticket.project_id else None
         compiled = await rules.compile(ticket=ticket, project=project, stage=ticket.stage or "any")
         return compiled.model_dump()
+
+
+# ---- setup from the web (projects, connections, AI model) ----------------------------------------------
+
+
+class SetupProject(BaseModel):
+    id: str | None = None
+    name: str
+    path: str
+    team_id: str | None = None
+    repo_url: str | None = None
+    test: str = ""
+    build: str = ""
+    lint: str = ""
+
+
+class JiraBody(BaseModel):
+    base_url: str
+    email: str
+    token: str
+
+
+class BitbucketBody(BaseModel):
+    email: str
+    token: str
+    workspace: str
+
+
+class TelegramBody(BaseModel):
+    token: str
+
+
+class AiBody(BaseModel):
+    model: str
+
+
+def _argv(text: str) -> list[str] | None:
+    import shlex
+
+    text = text.strip()
+    return shlex.split(text, posix=True) if text else None
+
+
+def _cmd(profile: dict[str, Any], key: str) -> str:
+    import shlex
+
+    value = profile.get(key)
+    if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
+        return shlex.join(value)
+    return ""
+
+
+SETUP_TRANSPORT: Any = None  # tests plug an httpx.MockTransport here to fake Jira/Bitbucket/Telegram
+
+
+def register_setup(app: FastAPI, office: Office) -> None:
+    from actoroffice.domain.work import ProjectAccess
+
+    @app.get("/api/setup")
+    async def setup() -> dict[str, Any]:
+        from actoroffice.channels.telegram import load_token
+        from actoroffice.services.atlassian import load_bitbucket
+        from actoroffice.services.jira import load_credentials
+
+        jira = load_credentials(office.settings.data_dir)
+        bitbucket = load_bitbucket(office.settings.data_dir)
+        projects = [p for p in await office.projects.list() if not p.is_default]
+        return {
+            "ai": {"name": office.settings.ai_name, "model": office.settings.ai_model or office.settings.default_model},
+            "projects": [
+                {**p.model_dump(), "test": _cmd(p.profile, "test"), "build": _cmd(p.profile, "build"), "lint": _cmd(p.profile, "lint")}
+                for p in projects
+            ],
+            "teams": [t.model_dump() for t in await office.teams.list_teams()],
+            "people": len([u for u in await office.teams.list_users() if u.id != LOCAL_OWNER_ID]),
+            "connections": {
+                "telegram": {"configured": bool(load_token(office.settings)), "running": office.telegram is not None, "bound": bool(office.telegram and office.telegram.chat_id)},
+                "jira": {"configured": bool(jira), "base_url": (jira or {}).get("base_url"), "email": (jira or {}).get("email")},
+                "bitbucket": {"configured": bool(bitbucket), "workspace": (bitbucket or {}).get("workspace")},
+            },
+        }
+
+    @app.post("/api/setup/project")
+    async def setup_project(body: SetupProject) -> dict[str, Any]:
+        if body.id:
+            current = await office.projects.get(body.id)
+            project = await office.projects.update(
+                body.id, name=body.name, path=body.path, access=current.access if current.path == body.path else ProjectAccess.WORKTREE, description=current.description
+            )
+        else:
+            project = await office.projects.create(body.name, path=body.path, access=ProjectAccess.WORKTREE)
+        profile = dict(project.profile)
+        for key in ("test", "build", "lint"):
+            value = _argv(getattr(body, key))
+            if value:
+                profile[key] = value
+            else:
+                profile.pop(key, None)
+        project = await office.projects.configure(project.id, team_id=body.team_id or None, repo_url=body.repo_url or None, profile=profile)
+        imported = await office.rules.import_conventions(project, by=LOCAL_OWNER_ID)
+        return {"project": project.model_dump(), "imported_rules": [r.id for r in imported]}
+
+    @app.post("/api/setup/jira")
+    async def setup_jira(body: JiraBody) -> dict[str, Any]:
+        from actoroffice.services.jira import JiraClient, JiraError, save_credentials
+
+        if not (body.base_url.strip() and body.email.strip() and body.token.strip()):
+            raise HTTPException(422, "Cần đủ URL, email và API token")
+        if not body.base_url.strip().startswith("https://"):
+            raise HTTPException(422, "URL phải là https://<site>.atlassian.net")
+        client = JiraClient(body.base_url.strip(), body.email.strip(), body.token.strip(), transport=SETUP_TRANSPORT)
+        try:
+            me = await client._call("GET", "/rest/api/3/myself")
+        except JiraError as exc:
+            raise HTTPException(422, f"Jira từ chối: {exc}") from exc
+        finally:
+            await client.close()
+        save_credentials(office.settings.data_dir, body.base_url.strip(), body.email.strip(), body.token.strip())
+        await office.jira.close()
+        office.jira.client = None
+        office.atlassian._wiki = None
+        if office.jira.ready() and not any(t.get_name() == "jira" for t in office._tasks):
+            import asyncio
+
+            office._tasks.append(asyncio.create_task(office.jira.run_forever(), name="jira"))
+        return {"ok": True, "user": me.get("displayName")}
+
+    @app.post("/api/setup/bitbucket")
+    async def setup_bitbucket(body: BitbucketBody) -> dict[str, Any]:
+        from actoroffice.services.atlassian import AtlassianError, BitbucketCloud, _call, save_bitbucket
+
+        if not (body.email.strip() and body.token.strip() and body.workspace.strip()):
+            raise HTTPException(422, "Cần đủ email, API token và workspace")
+        client = BitbucketCloud(body.email.strip(), body.token.strip(), body.workspace.strip(), transport=SETUP_TRANSPORT)
+        try:
+            await _call(client.http, "GET", f"/workspaces/{body.workspace}")
+        except AtlassianError as exc:
+            raise HTTPException(422, f"Bitbucket từ chối: {exc}") from exc
+        finally:
+            await client.close()
+        save_bitbucket(office.settings.data_dir, body.email.strip(), body.token.strip(), body.workspace.strip())
+        office.atlassian._code = None
+        return {"ok": True}
+
+    @app.post("/api/setup/telegram")
+    async def setup_telegram(body: TelegramBody) -> dict[str, Any]:
+        from actoroffice.channels.telegram import TOKEN_RE, BotApi, TelegramError, token_path
+
+        token = body.token.strip()
+        if not TOKEN_RE.match(token):
+            raise HTTPException(422, "Token không đúng dạng 123456789:AA… (lấy từ @BotFather)")
+        import httpx
+
+        api = BotApi(token, client=httpx.AsyncClient(transport=SETUP_TRANSPORT) if SETUP_TRANSPORT else None)
+        try:
+            me = await api.call("getMe")
+        except TelegramError as exc:
+            raise HTTPException(422, f"Telegram từ chối token: {exc}") from exc
+        finally:
+            await api.close()
+        path = token_path(office.settings)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(token, encoding="utf-8")
+        if office.telegram is None and SETUP_TRANSPORT is None:
+            await office.start_telegram(token)
+        return {"ok": True, "bot": me.get("username"), "next": "Tạo group Telegram, bật Topics, thêm bot làm admin rồi nhắn /start trong group."}
+
+    @app.post("/api/setup/ai")
+    async def setup_ai(body: AiBody) -> dict[str, Any]:
+        import yaml
+
+        model = body.model.strip()
+        if not model:
+            raise HTTPException(422, "Chọn model")
+        office.settings.ai_model = model
+        path = office.settings.config_path
+        data = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.exists() else {}
+        data["ai_model"] = model
+        path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        return {"ok": True, "model": model}

@@ -3,7 +3,9 @@ redirects, respecting quotes. Each command gets a class:
 
 - read       only reads (ls, cat, grep, git log …) — never needs a click
 - workspace  changes files, but only inside the ticket's workspace (rm a file, mkdir, git commit …)
-- network    talks to another machine (git push, curl …)
+- local      runs any program, or deletes / resets, with every path it names inside the workspace
+             (uvx ruff check src, node build.js, rm -r build, git reset --hard)
+- network    talks to another machine (git push, curl, installing packages …)
 - unknown    a program we know nothing about (or one used in a risky way)
 
 The policy turns the classes into allow / ask according to the project's permission mode (security/policy.py).
@@ -23,11 +25,33 @@ from pathlib import Path
 class Kind(StrEnum):
     READ = "read"
     WORKSPACE = "workspace"
+    LOCAL = "local"
     NETWORK = "network"
     UNKNOWN = "unknown"
 
 
-ORDER = {Kind.READ: 0, Kind.WORKSPACE: 1, Kind.NETWORK: 2, Kind.UNKNOWN: 3}
+ORDER = {Kind.READ: 0, Kind.WORKSPACE: 1, Kind.LOCAL: 2, Kind.NETWORK: 3, Kind.UNKNOWN: 4}
+
+# Programs whose job is to talk to other machines.
+NETWORK_PROGRAMS = {
+    "curl", "wget", "ssh", "scp", "sftp", "rsync", "ftp", "nc", "ncat", "telnet", "ping", "gh", "az", "aws",
+    "gcloud", "kubectl", "helm", "terraform", "docker", "podman", "invoke-webrequest", "iwr", "irm",
+    "invoke-restmethod", "pip", "pip3", "choco", "winget", "brew", "apt", "apt-get", "yum", "dnf", "scoop", "gem",
+}
+# Package managers: installing or publishing downloads (or uploads) and writes outside the folder.
+INSTALLS = {
+    "npm": {"install", "i", "add", "ci", "update", "upgrade", "publish", "login", "link"},
+    "pnpm": {"install", "i", "add", "update", "up", "publish", "login", "link"},
+    "yarn": {"add", "install", "upgrade", "publish", "login", "link"},
+    "bun": {"install", "i", "add", "update", "publish", "link"},
+    "cargo": {"install", "publish", "login"},
+    "go": {"install", "get"},
+    "composer": {"install", "require", "update"},
+    "poetry": {"add", "install", "update", "publish"},
+    "uv": {"add", "pip", "tool", "publish"},
+    "dotnet": {"add", "tool", "nuget"},
+    "python": {"-m pip"}, "py": {"-m pip"}, "python3": {"-m pip"},
+}
 
 # Programs that only read (when their path arguments stay readable). sed and find have their own checks.
 READ_PROGRAMS = {
@@ -151,21 +175,22 @@ def classify(cmd: Command, place: Place, cwd: Path | None) -> tuple[Kind, str]:
     if program in WRAPPERS:
         rest = _after_wrapper(program, argv)
         if program == "xargs":
-            return Kind.UNKNOWN, "xargs runs what comes on its input"
+            return _worst(base, _local(rest or ["xargs"], place, cwd))
         return _worst(base, classify(Command(rest), place, cwd)) if rest else base
     if program == "git":
         return _worst(base, _git(argv[1:], place, cwd))
     if program == "sed":
         flags = [a for a in argv[1:] if a.startswith("-")]
+        files = [a for a in argv[1:] if not a.startswith("-")][1:]
         if any(f == "--in-place" or (not f.startswith("--") and "i" in f) for f in flags):
-            return Kind.UNKNOWN, "sed -i edits files"
+            return _worst(base, _paths(files, place, cwd, Kind.LOCAL, why="sed -i edits files"))
         if not any(f.startswith("-n") for f in flags):
-            return Kind.UNKNOWN, "sed without -n"
+            return _worst(base, _paths(files, place, cwd, Kind.LOCAL, why="sed script may write (no -n)"))
         return _worst(base, _paths([a for a in argv[1:] if not a.startswith("-")][1:], place, cwd, Kind.READ))
     if program == "find":
+        roots = [a for a in argv[1:] if not a.startswith(("-", "(", "!"))][:1] or ["."]
         if any(a in ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls") for a in argv[1:]):
-            return Kind.UNKNOWN, "find runs or deletes"
-        roots = [a for a in argv[1:] if not a.startswith(("-", "(", "!"))][:1]
+            return _worst(base, _paths(roots, place, cwd, Kind.LOCAL, why="find runs or deletes"))
         return _worst(base, _paths(roots, place, cwd, Kind.READ))
     if program == "cd":
         return _paths(argv[1:2] or ["~"], place, cwd, Kind.READ)
@@ -180,13 +205,36 @@ def classify(cmd: Command, place: Place, cwd: Path | None) -> tuple[Kind, str]:
         return _worst(base, _paths(positional, place, cwd, Kind.READ))
     if program in FILE_PROGRAMS:
         flags = [a for a in argv[1:] if a.startswith("-")]
-        if program in ("rm", "rmdir") and any(f == "--recursive" or (not f.startswith("--") and "r" in f.lower()) for f in flags):
-            return Kind.UNKNOWN, "recursive delete"
+        recursive = program in ("rm", "rmdir") and any(f == "--recursive" or (not f.startswith("--") and "r" in f.lower()) for f in flags)
         targets = [a for a in argv[1:] if not a.startswith("-") and not (program == "chmod" and re.fullmatch(r"[0-7]{3,4}|[ugoa]*[+=-][rwxX]+", a))]
         if not targets:
             return Kind.UNKNOWN, program
+        if recursive:
+            return _paths(targets, place, cwd, Kind.LOCAL, why="recursive delete")
         return _paths(targets, place, cwd, Kind.WORKSPACE)
-    return Kind.UNKNOWN, program
+    return _worst(base, _local(argv, place, cwd))
+
+
+def _local(argv: list[str], place: Place, cwd: Path | None) -> tuple[Kind, str]:
+    """Any other program: local when every path it names stays in the workspace; network when that is its job."""
+    program = program_name(argv[0])
+    if "$" in argv[0] or "%" in argv[0]:
+        return Kind.UNKNOWN, f"the program name {argv[0]} is a variable"
+    if program in NETWORK_PROGRAMS:
+        return Kind.NETWORK, program
+    subs = INSTALLS.get(program, set())
+    if argv[1:2] and (argv[1] in subs or " ".join(argv[1:3]) in subs):
+        return Kind.NETWORK, f"{program} {argv[1]} downloads packages"
+    for arg in argv[1:]:
+        value = arg.split("=", 1)[1] if arg.startswith("-") and "=" in arg else arg
+        if "://" in value:
+            return Kind.NETWORK, f"{program} {value[:60]}"
+        if value.startswith("-") or not re.search(r"[/\\]|^~|^\.\.?$", value):
+            continue  # flags and plain words
+        where = _where(value, place, cwd)
+        if where != "workspace":
+            return Kind.UNKNOWN, f"{value} is outside the workspace"
+    return Kind.LOCAL, f"{program} runs a program"
 
 
 def unwrap(cmd: Command) -> Command:
@@ -222,7 +270,7 @@ def _git(args: list[str], place: Place, cwd: Path | None) -> tuple[Kind, str]:
     if not args:
         return Kind.READ, "git"
     kind, why = _git_kind(args[0], args[1:])
-    if repo is not None and kind != Kind.NETWORK:
+    if repo is not None and kind not in (Kind.NETWORK,):
         where = _where(repo, place, cwd)
         if where != "workspace" and not (where == "readable" and kind == Kind.READ):
             return Kind.UNKNOWN, f"git in {repo}"
@@ -245,15 +293,17 @@ def _git_kind(sub: str, rest: list[str]) -> tuple[Kind, str]:
     if sub == "config" and any(a in ("--global", "--system") for a in rest):
         return Kind.UNKNOWN, "git config outside the repo"
     if sub == "reset" and "--hard" in rest:
-        return Kind.UNKNOWN, "git reset --hard drops uncommitted work"
+        return Kind.LOCAL, "git reset --hard drops uncommitted work"
     if sub in ("checkout", "restore") and ("--" in rest or "." in rest) and "--staged" not in rest and "-b" not in rest:
-        return Kind.UNKNOWN, f"git {sub} drops uncommitted changes"
+        return Kind.LOCAL, f"git {sub} drops uncommitted changes"
+    if sub == "clean":
+        return Kind.LOCAL, "git clean deletes untracked files"
     if sub in GIT_LOCAL:
         return Kind.WORKSPACE, f"git {sub}"
-    return Kind.UNKNOWN, f"git {sub}"
+    return Kind.LOCAL, f"git {sub}"
 
 
-def _paths(args: list[str], place: Place, cwd: Path | None, inside: Kind) -> tuple[Kind, str]:
+def _paths(args: list[str], place: Place, cwd: Path | None, inside: Kind, why: str = "") -> tuple[Kind, str]:
     """`inside` when every path stays in the workspace (or a readable folder, for reads)."""
     for arg in args:
         if not arg or RANGE.fullmatch(arg):
@@ -264,7 +314,7 @@ def _paths(args: list[str], place: Place, cwd: Path | None, inside: Kind) -> tup
         if where == "protected":
             return Kind.UNKNOWN, f"{arg} is a protected location"
         return Kind.UNKNOWN, f"{arg} is outside the workspace"
-    return inside, ""
+    return inside, why
 
 
 def resolve(raw: str, place: Place, cwd: Path | None) -> Path | None:

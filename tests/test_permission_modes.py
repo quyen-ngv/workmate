@@ -161,3 +161,55 @@ def test_remembered_prefixes_never_cover_a_whole_interpreter():
     assert command_prefix("node build.js --prod".split()) == "node build.js"
     assert command_prefix("kiro-cli whoami".split()) == "kiro-cli whoami"
     assert command_prefix(["py"]) is None and command_prefix(["node"]) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "uvx ruff check src tests spikes",
+        "py -m ruff check src",
+        "node build.js --prod",
+        'py -c "print(1)"',
+        "kiro-cli --version",
+        "rm -r build",
+        "git reset --hard HEAD~1",
+        "git clean -fdx",
+        "find . -name '*.tmp' -delete",
+        "grep -l TODO -r src | xargs sed -i 's/TODO/DONE/'",
+        "./gradlew test --offline",
+        "make build",
+    ],
+)
+def test_folder_mode_runs_any_program_that_stays_in_the_folder(engine, ws, command):
+    verdict = engine.decide("Bash", {"command": command}, ctx(ws, "folder"))
+    # sed -i through the shell is steered to the Edit tool in every mode (a deny with guidance, not a question)
+    expected = Decision.DENY if "sed -i" in command else Decision.ALLOW
+    assert verdict.decision == expected, (command, verdict.reason)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin t/x",
+        "curl https://example.com",
+        "npm install left-pad",
+        "py -m pip install requests",
+        "node ../other/build.js",
+        "rm -r ../shared",
+        "cat ../../outside.txt",
+        '"$K" --version',
+        "ls $(pwd)",
+        "find / -name x -delete",
+        "uvx ruff check --config=/etc/ruff.toml src",
+        "docker run alpine",
+    ],
+)
+def test_folder_mode_still_asks_for_the_network_and_other_folders(engine, ws, command):
+    assert engine.decide("Bash", {"command": command}, ctx(ws, "folder")).decision == Decision.ASK, command
+
+
+def test_workspace_mode_offers_to_switch_to_folder_mode_when_only_local_programs_asked(engine, ws):
+    local = engine.decide("Bash", {"command": "uvx ruff check src && rm -r build"}, ctx(ws))
+    assert local.decision == Decision.ASK and local.suggestions[0] == {"scope": "mode", "rule": "mode:folder"}
+    network = engine.decide("Bash", {"command": "uvx ruff check src && git push origin t/x"}, ctx(ws))
+    assert all(s["scope"] != "mode" for s in network.suggestions)  # the folder mode would not cover the push

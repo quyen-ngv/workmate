@@ -28,7 +28,7 @@ from actoroffice.runtimes.claude_sdk import ClaudeSdkRuntime
 from actoroffice.runtimes.kiro_acp import KiroAcpRuntime
 from actoroffice.runtimes.router import RuntimeRouter
 from actoroffice.security.audit import AuditLog
-from actoroffice.security.policy import PolicyEngine
+from actoroffice.security.policy import FOLDER_MODE_RULE, PolicyEngine
 from actoroffice.security.redact import Redactor
 from actoroffice.services.automations import AutomationService
 from actoroffice.services.chat import ChatService
@@ -233,6 +233,13 @@ class Office:
             if rule not in offered:
                 raise PolicyDenied("Chỉ được ghi nhớ một trong các luật được đề xuất")
             resolved = await self.interactions.resolve(interaction_id, response, by=by)
+            if rule == FOLDER_MODE_RULE:
+                # "allow everything in the code folder": the project's mode, not a rule
+                ticket = await self.tickets.get(item.ticket_id) if item.ticket_id else None
+                if ticket and ticket.project_id:
+                    await self.projects.set_permissions(ticket.project_id, mode="folder")
+                    await self.audit.record("permission:project", "changed", actor_id=item.actor_id, target=ticket.project_id, detail={"by": by, "to": {"mode": "folder"}})
+                return resolved
             project = await self._project_of(item.ticket_id)
             if project is not None:
                 # Like Claude Code: "don't ask again for this command in this project".

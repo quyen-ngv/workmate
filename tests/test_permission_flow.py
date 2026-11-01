@@ -114,3 +114,22 @@ async def test_a_staged_ticket_that_stops_for_a_person_waits(office, runtime):
     status = await office.stages.status(current, viewer="user")
     assert status["status"] == "needs_you" and status["needs_viewer"]
     assert len(await office.runs.for_ticket(ticket.id)) == 1
+
+
+async def test_one_click_switches_the_project_to_the_folder_mode(office, runtime, tmp_path):
+    ai = await office.ensure_ai()
+    billing = await project(office, tmp_path, "billing")
+    seen: list[GateDecision] = []
+
+    async def work(ctx: TurnCtx) -> None:
+        seen.append(await ctx.tool("Bash", {"command": "node build.js"}))
+        seen.append(await ctx.tool("Bash", {"command": "uvx ruff check src && rm -r dist"}))  # no second click
+        await ctx.office("ticket_set_status", {"status": "done", "comment": "ok"})
+
+    runtime.scripts.append(work)
+    await office.tickets.create("build", assignee_actor_id=ai.id, project_id=billing.id)
+    task = asyncio.create_task(approve_first(office, scope="mode"))
+    await office.scheduler.wait_idle(timeout=15)
+    assert await task == "mode:folder"
+    assert seen == [GateDecision.ALLOW, GateDecision.ALLOW]
+    assert (await office.projects.get(billing.id)).permission_mode == "folder"

@@ -8,6 +8,8 @@ Order of evaluation (first match wins):
      - read_only: reads and read-only commands run; every change asks
      - workspace (default): reads, edits and commands that only change the ticket's workspace run; the network,
        other folders and unknown programs ask
+     - folder: everything whose paths stay in the workspace runs, any program included (no OS sandbox: a script
+       is trusted to keep to its folder); the network and other folders ask
      - full: everything runs except the hard denies and team policies
   5. "always allow" rules (per project, by command prefix) and the position's allow-list
   6. default: ask
@@ -58,11 +60,13 @@ class ToolCallContext:
     extra_read_dirs: list[Path] = field(default_factory=list)
     allow_rules: list[str] = field(default_factory=list)  # "always allow" rules (project's, then actor's)
     trust_all: bool = False  # actor in "allow everything" mode
-    mode: str = "workspace"  # the project's permission mode: read_only | workspace | full
+    mode: str = "workspace"  # the project's permission mode: read_only | workspace | folder | full
     project_commands: list[str] = field(default_factory=list)  # the project's own test/build/lint commands
 
 
-MODES = ("read_only", "workspace", "full")
+MODES = ("read_only", "workspace", "folder", "full")
+MODE_LIMIT = {"read_only": shell.Kind.READ, "workspace": shell.Kind.WORKSPACE, "folder": shell.Kind.LOCAL}
+FOLDER_MODE_RULE = "mode:folder"  # offered on a card: switch the project to the folder mode
 
 
 READ_TOOLS = {"Read", "Glob", "Grep", "LS", "NotebookRead"}
@@ -250,10 +254,10 @@ class PolicyEngine:
         if parts is None:
             return None
         place = shell.Place(ctx.workspace, self._read_dirs(ctx), self.protected)
-        limit = shell.Kind.READ if ctx.mode == "read_only" else shell.Kind.WORKSPACE
+        limit = MODE_LIMIT.get(ctx.mode, shell.Kind.WORKSPACE)
         allow_list = [] if ctx.mode == "read_only" else ctx.position.policy.bash_allow
         cwd: Path | None = None
-        blocking: list[tuple[shell.Command, str]] = []
+        blocking: list[tuple[shell.Command, str, shell.Kind]] = []
         worst = shell.Kind.READ
         for part in parts:
             hit = shell.touches_protected(part, place, cwd)
@@ -264,7 +268,7 @@ class PolicyEngine:
             if any(rule_matches(rule, "Bash", text) for rule in ctx.allow_rules):
                 continue
             kind, why = shell.classify(part, place, cwd)
-            if kind != shell.Kind.READ and limit == shell.Kind.WORKSPACE and (
+            if kind != shell.Kind.READ and limit != shell.Kind.READ and (
                 text in ctx.project_commands or any(fnmatch.fnmatchcase(text, pat) for pat in allow_list)
             ):
                 # the project's own commands and the position's allow-list run, if their redirects stay inside
@@ -275,15 +279,19 @@ class PolicyEngine:
                 cwd = shell.resolve(part.argv[1] if len(part.argv) > 1 else "~", place, cwd) or cwd
             worst = shell.worst([worst, kind])
             if shell.ORDER[kind] > shell.ORDER[limit]:
-                blocking.append((part, why))
+                blocking.append((part, why, kind))
         if not blocking:
             return Verdict(Decision.ALLOW, Risk.READ if worst == shell.Kind.READ else Risk.WRITE_LOCAL)
-        part, why = blocking[0]
+        part, why = blocking[0][0], blocking[0][1]
         risk = Risk.EXTERNAL if worst == shell.Kind.NETWORK else Risk.EXEC
         reason = f"`{part.text[:120]}`: {why or 'program not known to be safe'}"
         if ctx.mode == "read_only" and worst == shell.Kind.WORKSPACE:
             reason = f"`{part.text[:120]}` changes files (read-only mode)"
-        return Verdict(Decision.ASK, risk, reason, suggestions=chain_suggestions(cmd, [p for p, _ in blocking]))
+        suggestions = chain_suggestions(cmd, [p for p, _, _ in blocking])
+        if ctx.mode == "workspace" and all(k == shell.Kind.LOCAL for _, _, k in blocking):
+            # everything that asked stays in the folder: one click can allow all of that for the project
+            suggestions = [{"scope": "mode", "rule": FOLDER_MODE_RULE}, *suggestions][:4]
+        return Verdict(Decision.ASK, risk, reason, suggestions=suggestions)
 
     # ---- external ------------------------------------------------------------------------
 

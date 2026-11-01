@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -429,6 +430,10 @@ class StageService:
         nxt = tpl.next_after(ticket.stage)
         if nxt is None:
             await self._set_status(ticket.id, S.DONE, run_id=run_id, comment=f"Hoàn tất quy trình {tpl.name}.")
+            from actoroffice.engine.workspace import cleanup_ticket
+
+            root = await office.tickets.root_of(ticket.id)
+            asyncio.get_running_loop().create_task(cleanup_ticket(ticket, office.settings.workspaces_dir / root.key))
             await office.audit.record("stage:done", "done", ticket_id=ticket.id, target=ticket.key, detail={"by": by})
             return await self._publish(ticket.id)
         await office.db.execute("UPDATE tickets SET stage = ?, updated_at = ? WHERE id = ?", (nxt.id, utcnow(), ticket.id))

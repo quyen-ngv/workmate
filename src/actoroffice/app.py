@@ -36,6 +36,7 @@ from actoroffice.services.interactions import InteractionService
 from actoroffice.services.atlassian import Atlassian
 from actoroffice.services.jira import JiraMirror
 from actoroffice.services.prwatch import PullRequestWatcher
+from actoroffice.services.review import ReviewService
 from actoroffice.services.memory import MemoryService
 from actoroffice.services.merges import MergeService
 from actoroffice.services.notices import ChatNotifier
@@ -89,6 +90,7 @@ class Office:
         self.rules = RuleService(self, settings.data_dir / "rules")
         self.atlassian = Atlassian(settings.data_dir)
         self.prs = PullRequestWatcher(self)
+        self.review = ReviewService(self)
         self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),

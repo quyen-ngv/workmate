@@ -71,6 +71,62 @@ class WorkspaceManager:
             raise WorkspaceError(f"git worktree add failed: {out.strip()}")
 
 
+PORT_BASE = 20000
+PORTS_PER_TICKET = 10
+
+
+def ticket_env(ticket: Ticket, project: Project | None) -> dict[str, str]:
+    """Per-ticket names and ports so parallel tickets never collide: a compose project name and a block of ten
+    ports (AO_PORT_0..9, plus the names the project profile asks for, e.g. APP_PORT, DB_PORT)."""
+    base = PORT_BASE + (ticket.id % 2000) * PORTS_PER_TICKET
+    env = {"COMPOSE_PROJECT_NAME": f"ao-{ticket.key.lower()}", "AO_TICKET": ticket.key, "AO_PORT_BASE": str(base)}
+    for i in range(PORTS_PER_TICKET):
+        env[f"AO_PORT_{i}"] = str(base + i)
+    names = (project.profile.get("ports") if project else None) or []
+    for i, name in enumerate(names[:PORTS_PER_TICKET]):
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{1,40}", str(name)):
+            env[str(name)] = str(base + i)
+    return env
+
+
+async def cleanup_ticket(ticket: Ticket, workspace: Path) -> None:
+    """Stop the ticket's compose services (best effort) when its work is over."""
+    import shutil
+
+    if shutil.which("docker") is None or not workspace.is_dir():
+        return
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "compose", "-p", f"ao-{ticket.key.lower()}", "down", "-v", "--remove-orphans",
+        cwd=str(workspace), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        await asyncio.wait_for(proc.wait(), 120)
+    except TimeoutError:
+        proc.kill()
+
+
+async def changes(workspace: Path, base: str) -> dict:
+    """What the ticket changed so far (Files / Changes panel): files with +/- counts and the diff."""
+    if not (workspace / ".git").exists():
+        return {"git": False, "files": [], "diff": ""}
+    code, merge_base = await _git(workspace, "merge-base", "HEAD", base, check=False)
+    start = merge_base.strip() if code == 0 and merge_base.strip() else "HEAD"
+    _code, branch = await _git(workspace, "rev-parse", "--abbrev-ref", "HEAD", check=False)
+    _code, numstat = await _git(workspace, "diff", "--numstat", start, check=False)
+    files = []
+    for line in numstat.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3:
+            added, removed, path = parts
+            files.append({"path": path, "added": int(added) if added.isdigit() else 0, "removed": int(removed) if removed.isdigit() else 0})
+    _code, untracked = await _git(workspace, "ls-files", "--others", "--exclude-standard", check=False)
+    for path in untracked.splitlines():
+        if path.strip():
+            files.append({"path": path.strip(), "added": 0, "removed": 0, "untracked": True})
+    _code, diff = await _git(workspace, "diff", "--no-color", start, check=False)
+    return {"git": True, "branch": branch.strip(), "base": base, "files": files, "diff": diff[:200_000], "truncated": len(diff) > 200_000}
+
+
 def branch_name(root: Ticket) -> str:
     return f"t/{root.key.lower()}-{_slug(root.title)}"
 

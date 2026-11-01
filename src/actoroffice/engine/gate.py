@@ -40,6 +40,7 @@ class OfficeGate:
     seen_change_id: int = 0  # requirement changes already shown to this run
     seen_steer_id: int = 0  # directions from people already shown to this run
     policies: list[Any] = field(default_factory=list)  # team policy rules in effect (services/rules.py)
+    watchdog: Any = None  # engine/watchdog.py: a detected loop stops the next call
     stats: RunStats = field(default_factory=RunStats)
 
     async def before_tool(self, tool: str, args: dict[str, Any], tool_use_id: str | None) -> GateResult:
@@ -69,6 +70,11 @@ class OfficeGate:
                     f"{notes}\nRe-read the ticket and its documents (ticket_get, doc_get), adjust your plan and work "
                     "to the change, then continue. Mention the change in your final comment.",
                 )
+        if self.watchdog is not None and not tool.endswith(("ask_human", "dossier_update", "ticket_comment", "ticket_set_status")):
+            message = self.watchdog.stop_message()
+            if message:
+                await self._audit(tool, tool, Risk.READ, "interrupted", "watchdog loop")
+                return GateResult(GateDecision.DENY, message)
         if self.policies:
             from actoroffice.services.rules import policy_denial
 

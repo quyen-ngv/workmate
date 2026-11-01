@@ -23,6 +23,8 @@ from actoroffice.tools.stage_tools import STAGE_TOOLS
 from actoroffice.tools.work_tools import CHAT_WORK_TOOLS, WORK_TOOLS
 
 from . import context, prompt_pack
+from .watchdog import Watchdog
+from .workspace import ticket_env
 from .gate import OfficeGate
 
 if TYPE_CHECKING:
@@ -86,6 +88,9 @@ class Executor:
             new_comments = await self._new_comments(actor.id, actor.name, ticket.id, run_id)
             answered = await self._answered(wake)
             office.gates[run_id] = gate
+            if stage_run is not None:
+                gate.watchdog = Watchdog(office, run_id, office.settings.stall_after_s, office.settings.slow_command_s)
+                gate.watchdog.start()
             tools = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS
             mcp_servers: dict[str, Any] = {}
             if stage_run is not None:
@@ -140,7 +145,7 @@ class Executor:
                 add_dirs=read_dirs,
                 max_turns=position.policy.max_turns,
                 hook_timeout_s=office.settings.approval_wait_s + 60,
-                env=self._env(actor, position),
+                env={**self._env(actor, position), **ticket_env(ticket, project)},
                 mcp_servers=mcp_servers,
             )
             await office.runs.event(
@@ -172,6 +177,8 @@ class Executor:
             await self._fallback(ticket, run_id, "Lượt chạy bị dừng đột ngột; xem nhật ký ở mục Hoạt động.")
         finally:
             office.gates.pop(run_id, None)
+            if gate is not None and gate.watchdog is not None:
+                await gate.watchdog.stop()
             await office.tickets.release(ticket.id, run_id)
             await office.runs.finish(
                 run_id,
@@ -394,7 +401,9 @@ class Executor:
 
     async def _turn(self, spec: TurnSpec, gate: OfficeGate, *, extra_sink: Any = None) -> TurnResult:
         async def sink(kind: str, payload: dict[str, Any]) -> None:
-            await self.office.runs.event(spec.run_id, kind, payload)
+            activity = await self.office.runs.event(spec.run_id, kind, payload)
+            if gate.watchdog is not None:
+                await gate.watchdog.observe(activity)
             if kind == "rate_limit":
                 self.office.scheduler.observe_rate_limit(payload)
             if extra_sink is not None:

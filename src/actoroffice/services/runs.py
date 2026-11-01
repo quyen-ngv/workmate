@@ -199,7 +199,7 @@ class RunService:
         )
         return row["started_at"] if row else None
 
-    async def event(self, run_id: str, kind: str, payload: dict[str, Any]) -> None:
+    async def event(self, run_id: str, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Store one run event with its per-run sequence number and its normalized activity line (if any)."""
         text = self.redact(json.dumps(payload, ensure_ascii=False, default=str))
         if len(text) > EVENT_TEXT_LIMIT:
@@ -217,9 +217,9 @@ class RunService:
                 "INSERT INTO run_events(run_id, kind, payload_json, seq, activity_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (run_id, kind, text, seq, act, now),
             )
-        self.bus.publish(
-            "run.event", run_id=run_id, seq=seq, kind=kind, payload=json.loads(text), activity=json.loads(act) if act else None, at=now
-        )
+        activity_data = json.loads(act) if act else None
+        self.bus.publish("run.event", run_id=run_id, seq=seq, kind=kind, payload=json.loads(text), activity=activity_data, at=now)
+        return activity_data
 
     async def events(self, run_id: str, *, since_seq: int = 0) -> list[dict[str, Any]]:
         rows = await self.db.fetchall(

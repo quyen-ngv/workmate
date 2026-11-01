@@ -175,6 +175,21 @@ def register(app: FastAPI, office: Office) -> None:
             "participants": [m.model_dump() for m in await teams.participants(ticket.id)],
         }
 
+    @app.get("/api/tickets/{key}/changes")
+    async def ticket_changes(key: str) -> dict[str, Any]:
+        """Files / Changes panel: what the ticket's branch changed so far (live, from git)."""
+        from actoroffice.engine.workspace import changes
+
+        ticket = await office.tickets.get(key)
+        root = await office.tickets.root_of(ticket.id)
+        project = await office.projects.get(ticket.project_id) if ticket.project_id else None
+        return await changes(office.settings.workspaces_dir / root.key, project.main_branch if project else "main")
+
+    @app.get("/api/tickets/{key}/artifacts")
+    async def ticket_artifacts(key: str) -> list[dict[str, Any]]:
+        ticket = await office.tickets.get(key)
+        return [p for p in await office.tickets.work_products(ticket.id) if p["kind"] in ("screenshot", "video", "trace", "report", "file")]
+
     @app.post("/api/tickets/{key}/participants")
     async def set_participant(key: str, body: ParticipantBody) -> dict[str, Any]:
         ticket = await office.tickets.get(key)

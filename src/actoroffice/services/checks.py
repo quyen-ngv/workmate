@@ -342,3 +342,222 @@ BUILTIN = {
     "pr_linked": check_pr_linked,
     "automation_saved": check_automation_saved,
 }
+
+
+# ---- diff-based checks -------------------------------------------------------------------------------------
+
+SECRET_PATTERNS = [
+    (re.compile(r"-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"), "private key"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AWS access key"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"), "GitHub token"),
+    (re.compile(r"\bxox[abpr]-[A-Za-z0-9-]{10,}\b"), "Slack token"),
+    (re.compile(r"\bAIza[0-9A-Za-z_\-]{30,}\b"), "Google API key"),
+    (re.compile(r"\bATATT[0-9A-Za-z_\-=]{20,}\b"), "Atlassian API token"),
+    (re.compile(r"\bsk-(ant-)?[A-Za-z0-9_\-]{20,}\b"), "API key"),
+    (re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|token)\b\s*[:=]\s*[\"'][^\"'\s]{6,}[\"']"), "hard-coded credential"),
+]
+LOG_SMELLS = [
+    (re.compile(r"\bSystem\.(out|err)\.print"), "System.out/err thay vì logger"),
+    (re.compile(r"\bconsole\.log\("), "console.log còn sót"),
+    (re.compile(r"\b(log|logger|LOG|LOGGER)\.(trace|debug|info|warn|warning|error)\(\s*f?[\"'][^\"']*[\"']\s*\+"), "nối chuỗi trong log (dùng tham số)"),
+    (re.compile(r"(?i)\b(log|logger)\.\w+\(.*\b(password|passwd|token|secret)\b"), "log có thể lộ thông tin nhạy cảm"),
+    (re.compile(r"\be\.printStackTrace\(\)"), "printStackTrace thay vì log có ngữ cảnh"),
+]
+PY_PRINT = re.compile(r"^\s*print\(")
+
+
+async def merge_base(workspace: Path, base: str) -> str | None:
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(workspace), "merge-base", "HEAD", base, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+    )
+    out, _ = await proc.communicate()
+    return out.decode().strip() or None if proc.returncode == 0 else None
+
+
+async def added_lines(workspace: Path, base: str) -> dict[str, list[tuple[int, str]]]:
+    """file → [(line number, text)] added since the merge base (committed, uncommitted and untracked)."""
+    start = await merge_base(workspace, base) or "HEAD"
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(workspace), "diff", "-U0", "--no-color", "--no-ext-diff", start,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    result: dict[str, list[tuple[int, str]]] = {}
+    current: str | None = None
+    line_no = 0
+    for raw in out.decode("utf-8", "replace").splitlines():
+        if raw.startswith("+++ "):
+            path = raw[4:].strip()
+            current = None if path == "/dev/null" else path.removeprefix("b/")
+            continue
+        if raw.startswith("@@"):
+            m = re.search(r"\+(\d+)(?:,(\d+))?", raw)
+            line_no = int(m.group(1)) if m else 0
+            continue
+        if current and raw.startswith("+") and not raw.startswith("+++"):
+            result.setdefault(current, []).append((line_no, raw[1:]))
+            line_no += 1
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(workspace), "ls-files", "--others", "--exclude-standard", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+    )
+    out, _ = await proc.communicate()
+    for path in out.decode("utf-8", "replace").splitlines():
+        file = workspace / path
+        if file.is_file() and file.stat().st_size < 2_000_000:
+            text = file.read_text(encoding="utf-8", errors="replace")
+            result[path] = list(enumerate(text.splitlines(), 1))
+    return result
+
+
+def _git_ctx(ctx: CheckContext) -> tuple[Path, str] | None:
+    if ctx.workspace is None or not (ctx.workspace / ".git").exists():
+        return None
+    return ctx.workspace, (ctx.project.main_branch if ctx.project else "main")
+
+
+async def check_ac_coverage(ctx: CheckContext) -> CheckResult:
+    acs = list(ac_blocks(ctx.docs.get("requirements", "")))
+    if not acs:
+        return CheckResult(id="ac_coverage", status="skipped", summary="requirements không có AC đánh số")
+    git = _git_ctx(ctx)
+    if git is None:
+        return CheckResult(id="ac_coverage", status="skipped", summary="không phải git worktree")
+    globs = (ctx.project.profile.get("test_glob") if ctx.project else None) or DEFAULT_TEST_GLOBS
+    added = await added_lines(*git)
+    text = "\n".join(line for f, lines in added.items() if is_test(f, globs) for _, line in lines)
+    # "AC-1", "ac1" in test_ac1_total, @DisplayName("AC 1 …"): any non-letter may precede it
+    missing = [a for a in acs if not re.search(rf"(?i)(?<![a-z])AC[-_\s]?{a.split('-')[1]}(?!\d)", text)]
+    if missing:
+        return CheckResult(id="ac_coverage", status="failed", summary=f"chưa có test gắn với: {', '.join(missing)} (đặt AC id trong tên/annotation test)", data={"missing": missing})
+    return CheckResult(id="ac_coverage", status="passed", summary=f"{len(acs)}/{len(acs)} AC có test")
+
+
+async def check_no_secrets(ctx: CheckContext) -> CheckResult:
+    git = _git_ctx(ctx)
+    if git is None:
+        return CheckResult(id="no_secrets", status="skipped", summary="không phải git worktree")
+    found = []
+    for path, lines in (await added_lines(*git)).items():
+        for no, line in lines:
+            for pattern, label in SECRET_PATTERNS:
+                if pattern.search(line):
+                    found.append(f"{path}:{no} {label}")
+    if found:
+        return CheckResult(id="no_secrets", status="failed", summary=f"{len(found)} chỗ giống secret: {found[0]}", data={"found": found[:30]})
+    return CheckResult(id="no_secrets", status="passed", summary="không thấy secret trong phần thay đổi")
+
+
+async def check_log_lint(ctx: CheckContext) -> CheckResult:
+    git = _git_ctx(ctx)
+    if git is None:
+        return CheckResult(id="log_lint", status="skipped", summary="không phải git worktree")
+    globs = (ctx.project.profile.get("test_glob") if ctx.project else None) or DEFAULT_TEST_GLOBS
+    found = []
+    for path, lines in (await added_lines(*git)).items():
+        if is_test(path, globs):
+            continue
+        for no, line in lines:
+            for pattern, label in LOG_SMELLS:
+                if pattern.search(line):
+                    found.append(f"{path}:{no} {label}")
+            if path.endswith(".py") and PY_PRINT.match(line) and "/scripts/" not in f"/{path}":
+                found.append(f"{path}:{no} print() thay vì logging")
+    if found:
+        return CheckResult(id="log_lint", status="failed", summary=f"{len(found)} chỗ log chưa chuẩn: {found[0]}", data={"found": found[:30]})
+    return CheckResult(id="log_lint", status="passed", summary="log trong phần thay đổi đạt chuẩn")
+
+
+def parse_coverage(kind: str, text: str, root: Path) -> dict[str, dict[int, bool]]:
+    """file (relative, posix) → {line: covered} from an lcov, cobertura or jacoco report."""
+    out: dict[str, dict[int, bool]] = {}
+    if kind == "lcov":
+        current = None
+        for line in text.splitlines():
+            if line.startswith("SF:"):
+                path = Path(line[3:].strip())
+                with contextlib.suppress(ValueError):
+                    path = path.resolve().relative_to(root.resolve()) if path.is_absolute() else path
+                current = path.as_posix()
+                out.setdefault(current, {})
+            elif line.startswith("DA:") and current:
+                no, hits = line[3:].split(",")[:2]
+                out[current][int(no)] = int(hits) > 0
+        return out
+    import xml.etree.ElementTree as ET
+
+    tree = ET.fromstring(text)
+    if kind == "jacoco":
+        for package in tree.iter("package"):
+            pkg = package.get("name", "")
+            for source in package.iter("sourcefile"):
+                name = f"{pkg}/{source.get('name')}".strip("/")
+                out[name] = {int(ln.get("nr", 0)): int(ln.get("ci", 0)) > 0 for ln in source.iter("line")}
+        return out
+    for cls in tree.iter("class"):  # cobertura
+        name = cls.get("filename", "")
+        lines = out.setdefault(name, {})
+        for ln in cls.iter("line"):
+            lines[int(ln.get("number", 0))] = int(ln.get("hits", 0)) > 0
+    return out
+
+
+async def check_coverage_changed_lines(ctx: CheckContext) -> CheckResult:
+    git = _git_ctx(ctx)
+    spec = (ctx.project.profile.get("coverage") if ctx.project else None) or {}
+    if git is None or not spec.get("path"):
+        return CheckResult(id="coverage_changed_lines", status="skipped", summary="project chưa khai báo coverage report (profile.coverage)")
+    report = git[0] / spec["path"]
+    if not report.is_file():
+        return CheckResult(id="coverage_changed_lines", status="failed", summary=f"không thấy báo cáo coverage {spec['path']} (chạy test có coverage trước)")
+    coverage = parse_coverage(str(spec.get("kind") or "lcov"), report.read_text(encoding="utf-8", errors="replace"), git[0])
+    minimum = float(spec.get("min") or 80)
+    total = covered = 0
+    for path, lines in (await added_lines(*git)).items():
+        known = next((v for k, v in coverage.items() if path.endswith(k) or k.endswith(path)), None)
+        if not known:
+            continue
+        for no, _ in lines:
+            if no in known:
+                total += 1
+                covered += known[no]
+    if total == 0:
+        return CheckResult(id="coverage_changed_lines", status="skipped", summary="không có dòng code thay đổi nằm trong báo cáo coverage")
+    pct = 100.0 * covered / total
+    status = "passed" if pct >= minimum else "failed"
+    return CheckResult(id="coverage_changed_lines", status=status, summary=f"{pct:.0f}% dòng thay đổi được test ({covered}/{total}, cần ≥ {minimum:.0f}%)", data={"pct": pct})
+
+
+async def check_flaky_rerun(ctx: CheckContext) -> CheckResult:
+    argv_list = command_list(ctx.project.profile if ctx.project else {}, "test")
+    if not argv_list or ctx.workspace is None:
+        return CheckResult(id="flaky_rerun", status="skipped", summary="project chưa khai báo lệnh test")
+    runner = ctx.office.stages.checks
+    codes = []
+    for _ in range(2):
+        code = 0
+        for argv in argv_list:
+            code, _out, _secs = await run_argv(argv, ctx.workspace, timeout=1800, env=runner._env(ctx))
+            if code:
+                break
+        codes.append(code)
+    if codes[0] != codes[1]:
+        return CheckResult(id="flaky_rerun", status="failed", summary=f"test cho kết quả khác nhau giữa 2 lần chạy (exit {codes[0]} rồi {codes[1]}): có test flaky")
+    if codes[0] != 0:
+        return CheckResult(id="flaky_rerun", status="failed", summary=f"test lỗi cả 2 lần (exit {codes[0]})")
+    return CheckResult(id="flaky_rerun", status="passed", summary="test ổn định qua 2 lần chạy")
+
+
+async def check_review_clean(ctx: CheckContext) -> CheckResult:
+    return await ctx.office.review.review(ctx)
+
+
+BUILTIN.update(
+    {
+        "ac_coverage": check_ac_coverage,
+        "no_secrets": check_no_secrets,
+        "log_lint": check_log_lint,
+        "coverage_changed_lines": check_coverage_changed_lines,
+        "flaky_rerun": check_flaky_rerun,
+        "review_clean": check_review_clean,
+    }
+)

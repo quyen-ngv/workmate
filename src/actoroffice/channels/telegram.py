@@ -223,6 +223,8 @@ class TelegramBridge:
             await self.progress.event(str(data.get("run_id")), str(data.get("kind")), data.get("payload") or {}, data.get("activity"))
         elif kind == "ticket.steps":
             await self.progress.steps_changed(int(data.get("ticket_id") or 0))
+        elif kind == "ticket.artifact":
+            await self._on_artifact(data)
         elif kind == "run.started":
             run = data.get("run") or {}
             if run.get("conversation_id"):
@@ -330,6 +332,21 @@ class TelegramBridge:
             if inside and path.is_file() and 0 < path.stat().st_size <= MAX_FILE:
                 return path
         return None
+
+    async def _on_artifact(self, data: dict[str, Any]) -> None:
+        """A screenshot, video or report the AI attached as evidence: shown in the ticket's topic right away."""
+        try:
+            ticket = await self.office.tickets.get(int(data["ticket_id"]))
+        except (OfficeError, KeyError, ValueError):
+            return
+        conv = ticket.origin_conversation_id
+        thread = await self.topic_for(conv) if conv else None
+        path = Path(str(data.get("path") or ""))
+        artifacts = (self.office.settings.data_dir / "artifacts").resolve()
+        if thread is None or not path.is_file() or not path.resolve().is_relative_to(artifacts):
+            return
+        caption = f"{ticket.key} · {data.get('kind')}" + (f" — {data['caption']}" if data.get("caption") else "")
+        await self.api.send_document(self.chat_id or 0, thread, path, caption=caption[:1000])
 
     async def _on_run_finished(self, data: dict[str, Any]) -> None:
         entry = self._runs.pop(str(data.get("run_id")), None)

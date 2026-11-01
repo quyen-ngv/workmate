@@ -391,3 +391,61 @@ STAGE_TOOLS += [
         rule_propose,
     ),
 ]
+
+
+# ---- artifacts ---------------------------------------------------------------------------------------------
+
+ARTIFACT_KINDS = {"screenshot", "video", "trace", "report", "file"}
+ARTIFACT_MAX = 45 * 1024 * 1024
+
+
+async def artifact_add(args: dict[str, Any], ctx: ToolCtx) -> str:
+    """A file people should see (UI screenshot per AC, test video/trace, report): kept with the ticket, shown on
+    Telegram and the web, linked from the PR description."""
+    import shutil
+    from pathlib import Path
+
+    office = ctx.office
+    if ctx.ticket_id is None or ctx.workspace is None:
+        raise ToolError("artifact_add works inside a ticket.")
+    kind = str(args.get("kind") or "file")
+    if kind not in ARTIFACT_KINDS:
+        raise ToolError(f"kind: {', '.join(sorted(ARTIFACT_KINDS))}")
+    source = Path(str(args.get("path") or ""))
+    source = (ctx.workspace / source).resolve() if not source.is_absolute() else source.resolve()
+    if not source.is_relative_to(ctx.workspace.resolve()) or not source.is_file():
+        raise ToolError("path must be a file inside your working directory")
+    if source.stat().st_size > ARTIFACT_MAX:
+        raise ToolError("file too large (max 45 MB)")
+    ticket = await office.tickets.get(ctx.ticket_id)
+    folder = office.settings.data_dir / "artifacts" / ticket.key
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / source.name
+    n = 1
+    while target.exists():
+        target = folder / f"{source.stem}-{n}{source.suffix}"
+        n += 1
+    shutil.copy2(source, target)
+    caption = str(args.get("caption") or "").strip()[:300]
+    await office.tickets.add_work_product(ticket.id, kind, str(target), {"note": caption, "ac": args.get("ac")})
+    office.bus.publish("ticket.artifact", ticket_id=ticket.id, path=str(target), kind=kind, caption=caption)
+    return f"Saved {kind} {target.name} with {ticket.key} (people see it in the ticket topic)."
+
+
+STAGE_TOOLS.append(
+    ToolDef(
+        "artifact_add",
+        "Attach a file people should see: a UI screenshot or video per acceptance criterion (Playwright), a test "
+        "trace or report. Give the AC id it proves when there is one.",
+        schema(
+            {
+                "path": {"type": "string"},
+                "kind": {"type": "string", "enum": sorted(ARTIFACT_KINDS)},
+                "caption": {"type": "string"},
+                "ac": {"type": "string"},
+            },
+            required=["path", "kind"],
+        ),
+        artifact_add,
+    )
+)

@@ -40,6 +40,33 @@ def test_people_teams_tasks_board_and_controls(client):  # noqa: F811
     assert client.get("/api/runs/run_x/refs/check-repo-test.txt").status_code == 404
 
 
+def test_model_api_create_switch_and_cancel(client):  # noqa: F811
+    login(client)
+    bad = client.post("/api/tasks", json={"title": "Sai model", "model": "gpt-5"}, headers=HEADERS)
+    assert bad.status_code == 422 and "không hợp lệ" in bad.json()["detail"]
+    assert client.get("/api/board").json()["tickets"] == []  # nothing was stored
+
+    task = client.post("/api/tasks", json={"title": "Có model", "model": " opus "}, headers=HEADERS).json()
+    key = task["key"]
+    assert task["model"] == "opus"
+    assert client.get(f"/api/tickets/{key}/model").json()["current"] == "opus"
+
+    r = client.post(f"/api/tickets/{key}/model", json={"model": "haiku", "when": "stage"}, headers=HEADERS).json()
+    assert r["current"] == "opus" and r["pending"]["model"] == "haiku" and r["pending"]["scope"] == "stage"
+    assert client.get(f"/api/tickets/{key}/stage").json()["status"]["model"]["pending"]["model"] == "haiku"
+
+    r = client.post(f"/api/tickets/{key}/model", json={"cancel": True}, headers=HEADERS).json()
+    assert r["pending"] is None and r["current"] == "opus"
+    assert client.post(f"/api/tickets/{key}/model", json={"cancel": True}, headers=HEADERS).status_code == 422
+
+    r = client.post(f"/api/tickets/{key}/model", json={"model": "sonnet", "when": "set", "stage": "plan"}, headers=HEADERS).json()
+    assert r["stages"] == {"plan": "sonnet"}
+    assert client.post(f"/api/tickets/{key}/model", json={"model": "sonnet", "when": "set", "stage": "nope"}, headers=HEADERS).status_code == 422
+    r = client.post(f"/api/tickets/{key}/model", json={"model": None, "when": "set", "stage": "plan"}, headers=HEADERS).json()
+    assert r["stages"] == {}
+    assert client.post(f"/api/tickets/{key}/model", json={"model": "", "when": "turn"}, headers=HEADERS).status_code == 422
+
+
 def test_team_page_and_knowledge_api(client):  # noqa: F811
     login(client)
     page = client.get("/team")

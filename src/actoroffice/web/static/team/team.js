@@ -252,6 +252,25 @@ function card(item) {
   return `<div class="card"><div class="who">${esc(item.kind)}</div></div>`;
 }
 
+const MODEL_CHOICES = [["haiku", "haiku (rẻ, nhanh)"], ["sonnet", "sonnet"], ["opus", "opus (mạnh nhất)"], ["kiro", "Kiro CLI"]];
+
+function modelOptions(selected) {
+  return MODEL_CHOICES.map(([v, t]) => `<option value="${v}"${v === selected ? " selected" : ""}>${esc(t)}</option>`).join("");
+}
+
+// Current model, the switch waiting for a boundary (with cancel) and a form to ask for another one.
+function modelBar(m) {
+  if (!m) return "";
+  const p = m.pending;
+  return `<div class="model-bar">
+    <span>Model: <b>${esc(m.current || "-")}</b></span>
+    ${p ? `<span class="chip">đang chờ: ${esc(p.model)} (${esc(p.scope_label)}) <button class="btn small" data-cancel-model>Huỷ</button></span>` : ""}
+    <select data-m="model">${modelOptions(m.current)}</select>
+    <select data-m="when"><option value="turn">từ lượt chạy kế tiếp</option><option value="stage">từ giai đoạn kế tiếp</option></select>
+    <button class="btn small" data-switch-model title="Việc đang chạy không bị ngắt">Đổi model</button>
+  </div>`;
+}
+
 function renderPane(key) {
   const el = $(`.pane[data-pane="${CSS.escape(key)}"]`);
   const d = state.details[key];
@@ -285,6 +304,7 @@ function renderPane(key) {
       </div>
       ${(st.waivers || []).length ? `<div class="pane-meta">${st.waivers.map((w) => `<span class="chip waived" title="${esc(w.reason)}">⚠️ waived ${esc(w.check)} · ${esc(w.by_name)} · ${esc(w.at)} · ${esc(w.reason)}</span>`).join("")}</div>` : ""}
     </div>
+    ${modelBar(st.model)}
     ${steps.length ? `<div class="steps">${steps.map((s, i) => `<div class="s ${s.done ? "done" : i === cur ? "cur" : ""}">${s.done ? "☑" : i === cur ? "▶" : "☐"} ${esc(s.text)}</div>`).join("")}</div>` : ""}
     <div class="timeline">${renderTimeline(timeline(key)) || `<div class="empty">Chưa có hoạt động.</div>`}</div>
     ${pending.length ? `<div class="cards">${pending.map(card).join("")}</div>` : ""}
@@ -375,6 +395,7 @@ async function pageNewTask() {
       <label>Repo / dự án<select data-f="project_id"><option value="">— (không có repo)</option>${setup.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
       <label>Team<select data-f="team_id"><option value="">—</option>${people.teams.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</select></label>
       <label>Người yêu cầu<select data-f="owner_user_id"><option value="">—</option>${people.users.filter((u) => u.id !== "user").map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join("")}</select></label>
+      <label>Model AI<select data-f="model"><option value="">Theo cấu hình mặc định</option>${modelOptions("")}</select></label>
       <label>Khi người chưa trả lời<select data-f="mode"><option value="wait">Chờ</option><option value="assume">Làm theo giả định</option></select></label>
     </div>
     <label>Mô tả<textarea data-f="description" rows="6" placeholder="Bối cảnh, mong muốn, link Jira/Confluence…"></textarea></label>
@@ -543,6 +564,11 @@ document.addEventListener("click", (e) => {
     await refresh(key);
   });
   if (ds.cmd && key) return act(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: ds.cmd } }); await refresh(key); });
+  if (ds.switchModel !== undefined && key) {
+    const m = (n) => $(`[data-m="${n}"]`, pane).value;
+    return act(async () => { await api(`/api/tickets/${key}/model`, { method: "POST", body: { model: m("model"), when: m("when") } }); toast("Đã ghi nhận; việc đang chạy không bị ngắt"); await refresh(key); });
+  }
+  if (ds.cancelModel !== undefined && key) return act(async () => { await api(`/api/tickets/${key}/model`, { method: "POST", body: { cancel: true } }); toast("Đã huỷ yêu cầu đổi model"); await refresh(key); });
   if (ds.send !== undefined && key) {
     const box = $("[data-steer]", pane);
     const text = box.value.trim();
@@ -560,7 +586,7 @@ document.addEventListener("click", (e) => {
   if (ds.revoke) return act(async () => { await api(`/api/grants/${ds.revoke}/revoke`, { method: "POST" }); renderSide(); });
   if (ds.createTask !== undefined) return act(async () => {
     const f = (n) => ($(`[data-f="${n}"]`).value || "").trim();
-    const ticket = await api("/api/tasks", { method: "POST", body: { title: f("title"), description: f("description"), template: f("template"), team_id: f("team_id") || null, project_id: f("project_id") || null, owner_user_id: f("owner_user_id") || null, mode: f("mode") } });
+    const ticket = await api("/api/tasks", { method: "POST", body: { title: f("title"), description: f("description"), template: f("template"), team_id: f("team_id") || null, project_id: f("project_id") || null, owner_user_id: f("owner_user_id") || null, mode: f("mode"), model: f("model") || null } });
     $("#overlay").hidden = true;
     await loadBoard();
     openTicket(ticket.key);

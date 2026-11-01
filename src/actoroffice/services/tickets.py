@@ -20,6 +20,7 @@ from actoroffice.domain.work import (
 )
 from actoroffice.store import Database, Tx
 
+from .models import validate_model
 from .wakes import WakeService
 
 S = TicketStatus
@@ -50,7 +51,10 @@ class TicketService:
         blocked_by: list[int] | None = None,
         origin_conversation_id: str | None = None,
         due_at: str | None = None,
+        model: str | None = None,
     ) -> Ticket:
+        if model is not None:
+            model = validate_model(model)  # refused before anything is stored
         now = utcnow()
         async with self.db.tx() as tx:
             if parent_id is not None:
@@ -63,8 +67,8 @@ class TicketService:
                 project_id = conv["project_id"] if conv else None
             cur = await tx.execute(
                 "INSERT INTO tickets(key, project_id, type, title, description, status, priority, "
-                "assignee_actor_id, parent_id, created_by, origin_conversation_id, due_at, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "assignee_actor_id, parent_id, created_by, origin_conversation_id, due_at, model, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id("tmp"),
                     project_id,
@@ -78,6 +82,7 @@ class TicketService:
                     created_by,
                     origin_conversation_id,
                     due_at,
+                    model,
                     now,
                     now,
                 ),

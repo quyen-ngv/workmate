@@ -148,6 +148,7 @@ code, pre { font-family: var(--mono); font-size: var(--fs-sm); }
 .stepper span.cur { color: var(--text); background: var(--accent-bg); }
 .stepper span.past { color: var(--ok); }
 .stepper .gate { color: var(--warn); }
+.model-bar { display: flex; gap: var(--gap-3); align-items: center; flex-wrap: wrap; padding: 4px 0; font-size: var(--fs-xs); color: var(--faint); }
 .pane-meta { display: flex; gap: var(--gap-3); font-size: var(--fs-xs); color: var(--faint); align-items: center; flex-wrap: wrap; }
 .pane-controls { margin-left: auto; display: flex; gap: var(--gap-1); }
 .steps { padding: var(--gap-2) var(--gap-3); border-bottom: 1px solid var(--line); font-size: var(--fs-sm); display: grid; gap: 2px; }

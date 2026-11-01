@@ -123,6 +123,30 @@ async def cmd_jira(office: Office, args: argparse.Namespace) -> None:
         out(f"Đã đồng bộ: {len(created)} ticket mới" + (f" ({', '.join(created)})" if created else ""))
 
 
+async def cmd_rules(office: Office, args: argparse.Namespace) -> None:
+    rules = office.rules
+    if args.action == "add":
+        import json as _json
+
+        spec = _json.loads(args.spec) if args.spec else {}
+        rule = await rules.propose(
+            title=args.title or "", body=args.body or "", kind=args.kind, scope=args.scope, stage=args.stage, spec=spec, by=LOCAL_OWNER_ID, activate=True
+        )
+        out(f"{rule.id} [{rule.kind.value} · {rule.scope} · {rule.status.value}] {rule.title}")
+    elif args.action in ("approve", "disable"):
+        rule = await (rules.approve if args.action == "approve" else rules.disable)(args.title or "", by=LOCAL_OWNER_ID)
+        out(f"{rule.id}: {rule.status.value}")
+    elif args.action == "import":
+        project = next((p for p in await office.projects.list() if p.name == args.title or p.id == args.title), None)
+        if project is None:
+            raise OfficeError(f"Không có project '{args.title}'")
+        for rule in await rules.import_conventions(project, by=LOCAL_OWNER_ID):
+            out(f"{rule.id} ← {rule.source}")
+    else:
+        for rule in await rules.list(scope=args.scope if args.scope != "global" or args.only_global else None):
+            out(f"{rule.id:6} {rule.status.value:8} {rule.kind.value:9} {rule.scope:24} {rule.stage:10} {rule.title}")
+
+
 # ---- environment ------------------------------------------------------------------------------------------
 
 
@@ -260,6 +284,17 @@ def register(sub: Any) -> None:
     p.add_argument("email", nargs="?")
     p.add_argument("token", nargs="?")
     p.set_defaults(fn=cmd_jira)
+
+    p = sub.add_parser("rules", help="rules: list | add --kind guideline --scope team:<id> --title … --body … | approve R-1 | disable R-1 | import <project>")
+    p.add_argument("action", nargs="?", default="list", choices=["list", "add", "approve", "disable", "import"])
+    p.add_argument("title", nargs="?", help="rule title (add), rule id (approve/disable) or project (import)")
+    p.add_argument("--body")
+    p.add_argument("--kind", default="guideline", choices=["guideline", "check", "policy", "gate"])
+    p.add_argument("--scope", default="global")
+    p.add_argument("--stage", default="any")
+    p.add_argument("--spec", help='JSON, e.g. {"cmd": ["mvn", "-q", "verify"]} or {"deny_patterns": ["--force"]}')
+    p.add_argument("--only-global", action="store_true")
+    p.set_defaults(fn=cmd_rules)
 
     sub.add_parser("doctor", help="check what this machine can run (OS, WSL, git, bash, docker, kiro, claude)").set_defaults(fn=cmd_doctor)
 

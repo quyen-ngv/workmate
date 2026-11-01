@@ -38,6 +38,7 @@ from actoroffice.services.memory import MemoryService
 from actoroffice.services.merges import MergeService
 from actoroffice.services.notices import ChatNotifier
 from actoroffice.services.projects import ProjectService
+from actoroffice.services.rules import RuleService
 from actoroffice.domain.knowledge import SkillRef, SkillScope
 from actoroffice.services.skills import SkillService, split_front_matter
 from actoroffice.services.stages import StageService
@@ -65,6 +66,7 @@ class Office:
                 settings.data_dir / "secrets",
                 settings.data_dir / "skills",  # edited only through skill tools (versioned), never directly
                 settings.data_dir / "automations",  # changed only through automation_save (reviewed by the user)
+                settings.data_dir / "rules",  # team rules: changed only through the rules service (owners approve)
             ]
         )
         self.org = OrgService(self.db)
@@ -82,6 +84,7 @@ class Office:
         self.teams = TeamService(self.db, self.bus)
         self.stages = StageService(self)
         self.jira = JiraMirror(self)
+        self.rules = RuleService(self, settings.data_dir / "rules")
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),
             KiroAcpRuntime(cli_path=settings.kiro_cli_path, engine=settings.kiro_engine),
@@ -240,10 +243,7 @@ class Office:
 
     async def guidelines_for(self, ticket: Any, project: Any, stage: str) -> list[str]:
         """Team guidelines in effect for a stage (rules service, P2). Empty until rules exist."""
-        rules = getattr(self, "rules", None)
-        if rules is None:
-            return []
-        compiled = await rules.compile(ticket=ticket, project=project, stage=stage)
+        compiled = await self.rules.compile(ticket=ticket, project=project, stage=stage)
         return compiled.guideline_lines()
 
     async def ensure_ai(self) -> Actor:

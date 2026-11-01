@@ -90,6 +90,8 @@ class CheckRunner:
     async def _one(self, check_id: str, ctx: CheckContext) -> CheckResult:
         if check_id.startswith("repo:"):
             return await self._repo(check_id, ctx)
+        if check_id.startswith("rule:"):
+            return await self._rule(check_id, ctx)
         fn = BUILTIN.get(check_id)
         if fn is None:
             return CheckResult(id=check_id, status="skipped", summary="chưa hỗ trợ check này")
@@ -114,11 +116,35 @@ class CheckRunner:
         ref = self._save(ctx, check_id, "\n\n".join(outputs))
         return CheckResult(id=check_id, status="passed", summary=f"{len(argv_list)} lệnh chạy thành công", output_ref=ref)
 
+    async def _rule(self, check_id: str, ctx: CheckContext) -> CheckResult:
+        rule = await self.office.rules.get(check_id.split(":", 1)[1])
+        builtin = rule.spec.get("builtin")
+        if builtin:
+            fn = BUILTIN.get(str(builtin))
+            if fn is None:
+                return CheckResult(id=check_id, status="skipped", summary=f"{rule.id}: chưa hỗ trợ check {builtin}")
+            result = await fn(ctx)
+            return result.model_copy(update={"id": check_id, "summary": f"{rule.id} {rule.title}: {result.summary}"})
+        if ctx.workspace is None:
+            return CheckResult(id=check_id, status="skipped", summary="không có workspace")
+        argv_list = command_list({"cmd": rule.spec.get("cmd")}, "cmd")
+        outputs = []
+        for argv in argv_list:
+            code, out, secs = await run_argv(argv, ctx.workspace, timeout=float(rule.spec.get("timeout_s") or 900), env=self._env(ctx))
+            outputs.append(f"$ {' '.join(argv)}\n{out}\n(exit {code}, {secs:.0f}s)")
+            if code != 0:
+                ref = self._save(ctx, check_id, "\n\n".join(outputs))
+                return CheckResult(id=check_id, status="failed", summary=f"{rule.id} {rule.title}: exit {code}", output_ref=ref)
+        ref = self._save(ctx, check_id, "\n\n".join(outputs))
+        return CheckResult(id=check_id, status="passed", summary=f"{rule.id} {rule.title}", output_ref=ref)
+
     def _env(self, ctx: CheckContext) -> dict[str, str]:
         keep = ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "LANG", "JAVA_HOME", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA")
         env = {k: v for k, v in os.environ.items() if k in keep}
         env["GIT_CEILING_DIRECTORIES"] = str(self.office.settings.workspaces_dir.resolve())
         env["CI"] = "1"
+        env["PYTHONUTF8"] = "1"  # Windows pipes default to the ANSI code page; tools printing Vietnamese would crash
+        env["PYTHONIOENCODING"] = "utf-8"
         return env
 
     def _save(self, ctx: CheckContext, check_id: str, text: str) -> str | None:

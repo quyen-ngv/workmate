@@ -82,6 +82,16 @@ class ActivityTracker:
             current = next((s.get("text") for s in steps if not s.get("done")), None)
             title = f"Các bước {done}/{len(steps)}" + (f" · tiếp: {current}" if current else " · xong hết")
             return Activity(kind="step", title=title, fields={"done": done, "total": len(steps)})
+        if kind == "rule":
+            return Activity(
+                kind="rule",
+                title=f"Rule {payload.get('id')} chặn {payload.get('tool')}: {_one_line(str(payload.get('title', '')), 100)}",
+                status="error",
+                fields=payload,
+            )
+        if kind == "rules":
+            refs = payload.get("refs") or []
+            return Activity(kind="rule", title=f"Áp dụng {len(refs)} rule: {', '.join(refs[:8])}", fields={"refs": refs})
         if kind == "deviation":
             return Activity(kind="deviation", title=f"Lệch plan: {_one_line(str(payload.get('what', '')), 160)}", fields=payload)
         if kind == "stage":

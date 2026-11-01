@@ -209,7 +209,10 @@ class StageService:
         ticket = await office.tickets.get(ticket_id)
         stage = await self.stage_def(ticket)
         srun = await self.ensure_run(ticket)
-        results = await self.checks.run(ticket, stage, srun, workspace=workspace, run_id=run_id)
+        project = await office.projects.get(ticket.project_id) if ticket.project_id else None
+        compiled = await office.rules.compile(ticket=ticket, project=project, stage=stage.id)
+        check_ids = list(stage.checks) + [f"rule:{r.id}" for r in compiled.checks]
+        results = await self.checks.run(ticket, stage, srun, workspace=workspace, run_id=run_id, only=check_ids)
         await office.db.execute(
             "UPDATE stage_runs SET checks_json = ? WHERE id = ?", (json.dumps([r.model_dump() for r in results], ensure_ascii=False), srun.id)
         )
@@ -224,13 +227,19 @@ class StageService:
         await office.tickets.add_comment(
             ticket.id, f"✅ Xong giai đoạn {stage_title(stage.id)}: {summary.strip()[:1500]}", author_kind="actor", author_id=office.settings.ai_name
         )
+        extra = await self._gate_rules(compiled.gates, workspace, project)
+        if extra and not stage.gate:
+            item = await self._open_gate(ticket, stage, "rules", summary, results, run_id=run_id, extra=extra)
+            await self._set_status(ticket.id, S.IN_REVIEW, run_id=run_id, comment=None)
+            await self._publish(ticket.id)
+            return {"ok": True, "gate": "rules", "interaction_id": item.id, "approvers": item.payload.get("approver_names"), "checks": [r.model_dump() for r in results]}
         if stage.gate:
             policy = await office.teams.gate_policy(ticket, stage.gate)
             if policy.external:
                 await self._set_status(ticket.id, S.IN_REVIEW, run_id=run_id, comment=self._external_note(stage.gate))
                 await self._publish(ticket.id)
                 return {"ok": True, "gate": stage.gate, "external": True, "checks": [r.model_dump() for r in results]}
-            item = await self._open_gate(ticket, stage, stage.gate, summary, results, run_id=run_id)
+            item = await self._open_gate(ticket, stage, stage.gate, summary, results, run_id=run_id, extra=extra)
             await self._set_status(ticket.id, S.IN_REVIEW, run_id=run_id, comment=None)
             await self._publish(ticket.id)
             return {"ok": True, "gate": stage.gate, "interaction_id": item.id, "approvers": item.payload.get("approver_names"), "checks": [r.model_dump() for r in results]}
@@ -243,11 +252,33 @@ class StageService:
             "script": "Chờ người duyệt automation (thẻ duyệt script). Khi được duyệt, quy trình tự sang bước tiếp theo.",
         }.get(gate, f"Chờ cổng '{gate}' bên ngoài.")
 
+    async def _gate_rules(self, gates: list[Any], workspace: Path | None, project: Any) -> list[Any]:
+        """Gate rules whose paths were changed in this ticket's workspace."""
+        if not gates or workspace is None or not (workspace / ".git").exists():
+            return []
+        from .checks import changed_files
+        from .rules import gate_rules_hit
+
+        return gate_rules_hit(gates, await changed_files(workspace, project.main_branch if project else "main"))
+
     async def _open_gate(
-        self, ticket: Ticket, stage: StageDef, gate: str, summary: str, results: list[CheckResult], *, run_id: str | None
+        self,
+        ticket: Ticket,
+        stage: StageDef,
+        gate: str,
+        summary: str,
+        results: list[CheckResult],
+        *,
+        run_id: str | None,
+        extra: list[Any] | None = None,
     ) -> Interaction:
         office = self.office
-        policy = await office.teams.gate_policy(ticket, gate)
+        from actoroffice.domain.stage import GatePolicy
+
+        policy = await office.teams.gate_policy(ticket, gate) if gate != "rules" else GatePolicy(roles=[], fallback="owner")
+        for rule in extra or []:  # e.g. migrations changed → a lead must approve too
+            roles = [r for r in rule.spec.get("roles") or [] if r not in policy.roles]
+            policy = policy.model_copy(update={"roles": policy.roles + roles, "min": max(policy.min, int(rule.spec.get("min") or 1))})
         approvers = await office.teams.approvers(ticket, policy)
         docs = []
         for key in [o for out in stage.outputs for o in out.split("|")]:
@@ -269,6 +300,7 @@ class StageService:
             "docs": docs,
             "checks": [{"id": r.id, "status": r.status, "summary": r.summary} for r in results],
             "approvals": [],
+            "rules": [{"id": r.id, "title": r.title, "roles": r.spec.get("roles")} for r in extra or []],
         }
         return await office.interactions.create(InteractionKind.APPROVE_STAGE, payload, ticket_id=ticket.id, run_id=run_id)
 

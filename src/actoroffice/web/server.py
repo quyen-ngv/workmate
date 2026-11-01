@@ -201,6 +201,7 @@ def create_app(office: Office, token: str) -> FastAPI:
     app = FastAPI(title="actor-office", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     team_api.register(app, office)
+    team_api.register_rules(app, office)
 
     def authed(request: Request) -> bool:
         return secrets.compare_digest(request.cookies.get(COOKIE, ""), token)

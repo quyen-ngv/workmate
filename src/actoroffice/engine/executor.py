@@ -83,8 +83,14 @@ class Executor:
             answered = await self._answered(wake)
             tools = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS
             if stage_run is not None:
+                compiled = await office.rules.compile(ticket=ticket, project=project, stage=stage_run.stage)
+                gate.policies = compiled.policies
+                await office.stages.set_rules(stage_run.id, compiled.refs)
+                if compiled.refs:
+                    await office.runs.event(run_id, "rules", {"refs": compiled.refs, "titles": [r.title for r in compiled.guidelines + compiled.policies]})
                 pack = await self._stage_prompt(
-                    ticket, stage_run, actor, project, str(ws.path), wake, resume is not None, answered, new_comments, changes
+                    ticket, stage_run, actor, project, str(ws.path), wake, resume is not None, answered, new_comments, changes,
+                    guidelines=compiled.guideline_lines(),
                 )
                 system, prompt = pack.system, pack.turn
                 tools = tools + STAGE_TOOLS
@@ -190,6 +196,8 @@ class Executor:
         answered: list,
         new_comments: list,
         changes: list,
+        *,
+        guidelines: list[str],
     ) -> prompt_pack.StagePrompt:
         office = self.office
         template = await office.stages.template_of(ticket)
@@ -200,7 +208,6 @@ class Executor:
             people = await office.teams.members(team.id)
         dossier = await office.tickets.get_document(ticket.id, "dossier")
         position = await office.org.get_position(actor.position_id)
-        guidelines = await office.guidelines_for(ticket, project, stage.id)
         return prompt_pack.build(
             actor=actor,
             ticket=ticket,

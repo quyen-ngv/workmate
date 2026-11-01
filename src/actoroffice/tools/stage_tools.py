@@ -339,3 +339,55 @@ STAGE_TOOLS: list[ToolDef] = [
     ToolDef("pr_link", "Link the pull request you opened for this ticket.", schema({"url": {"type": "string"}}), pr_link),
     ToolDef("stage_info", "Show the ticket's stages, the current stage's required outputs, checks, gate and steps.", schema({}, required=[]), stage_info, read_only=True),
 ]
+
+
+# ---- rules ---------------------------------------------------------------------------------------------
+
+
+async def rule_search(args: dict[str, Any], ctx: ToolCtx) -> str:
+    rules = await ctx.office.rules.search(str(args.get("query") or ""), limit=int(args.get("limit") or 8))
+    if not rules:
+        return "No active rule matches."
+    return "\n\n".join(f"[{r.id} · {r.kind.value} · {r.scope} · stage {r.stage}] {r.title}\n{r.body[:1500]}" for r in rules)
+
+
+async def rule_propose(args: dict[str, Any], ctx: ToolCtx) -> str:
+    office = ctx.office
+    scope = str(args.get("scope") or "")
+    if not scope and ctx.ticket_id is not None:
+        ticket = await office.tickets.get(ctx.ticket_id)
+        scope = f"team:{ticket.team_id}" if ticket.team_id else "global"
+    try:
+        rule = await office.rules.propose(
+            title=str(args.get("title") or ""),
+            body=str(args.get("body") or ""),
+            kind="guideline",
+            scope=scope or "global",
+            stage=str(args.get("stage") or "any"),
+            by=ctx.actor.name,
+            ai=True,
+        )
+    except OfficeError as exc:
+        raise ToolError(str(exc)) from exc
+    return f"Proposed {rule.id} (draft). The scope's owner decides; it does not apply until approved."
+
+
+STAGE_TOOLS += [
+    ToolDef(
+        "rule_search",
+        "Search the team's active rules (guidelines, checks, policies, gates) by keywords.",
+        schema({"query": {"type": "string"}, "limit": {"type": "integer"}}, required=["query"]),
+        rule_search,
+        read_only=True,
+    ),
+    ToolDef(
+        "rule_propose",
+        "Propose a team guideline learned from this work (e.g. a convention reviewers keep asking for). It stays a "
+        "draft until the scope's owner approves it.",
+        schema(
+            {"title": {"type": "string"}, "body": {"type": "string"}, "stage": {"type": "string"}, "scope": {"type": "string"}},
+            required=["title", "body"],
+        ),
+        rule_propose,
+    ),
+]

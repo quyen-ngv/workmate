@@ -27,6 +27,9 @@ TEAM_COMMANDS = [
     ("resume", "Trong topic ticket: cho AI làm tiếp"),
     ("retry", "Trong topic ticket: làm lại giai đoạn hiện tại"),
     ("merged", "Trong topic ticket: báo PR đã merge"),
+    ("rules", "Rule của team bạn (đang áp dụng và chờ duyệt)"),
+    ("rule", "Đề xuất rule: /rule Tiêu đề: nội dung"),
+    ("approve", "Lead/admin: duyệt rule /approve R-12"),
     ("whoami", "Xem Telegram id và vai của bạn"),
     ("people", "Danh sách người và vai"),
     ("adduser", "Admin: reply tin của ai đó + /adduser Tên vai1 vai2"),
@@ -87,6 +90,8 @@ class TeamCommands:
                 await self._adduser(who, args, msg, thread)
             elif name == "task":
                 await self._task(who, args, thread)
+            elif name in ("rules", "rule", "approve"):
+                await self._rules(name, who, args, thread)
             else:
                 await self._ticket_command(name, who, args, thread)
         except OfficeError as exc:
@@ -175,6 +180,34 @@ class TeamCommands:
         if topic:
             await self.bridge.send(topic, f"🎫 <b>{fmt.esc(ticket.key)} · {fmt.esc(ticket.title)}</b>\nQuy trình: {fmt.esc(template)}. Nhắn ở đây là AI nghe.\n" + TEAM_HELP)
         self.office.scheduler.kick()
+
+    async def _rules(self, name: str, who: str, args: str, thread: int | None) -> None:
+        office = self.office
+        teams = await office.teams.teams_of(who) if who != LOCAL_OWNER_ID else await office.teams.list_teams()
+        scope = f"team:{teams[0].id}" if teams else "global"
+        if name == "approve":
+            rule = await office.rules.approve(args.strip().upper(), by=who)
+            await self.bridge.send(thread, f"✅ {fmt.esc(rule.id)} đang áp dụng: {fmt.esc(rule.title)}")
+            return
+        if name == "rule":
+            title, _, body = args.partition(":")
+            if not title.strip() or not body.strip():
+                raise OfficeError("Cách dùng: /rule Tiêu đề: nội dung (vd. /rule Test Java: dùng JUnit 5 + AssertJ)")
+            rule = await office.rules.propose(title=title, body=body, kind="guideline", scope=scope, by=who, activate=True)
+            state = "đang áp dụng" if rule.status.value == "active" else "chờ lead duyệt (/approve " + rule.id + ")"
+            await self.bridge.send(thread, f"📏 {fmt.esc(rule.id)} · {fmt.esc(rule.title)} — {fmt.esc(state)}")
+            return
+        scopes = ["global"] + [f"team:{t.id}" for t in teams]
+        lines = ["📏 <b>Rules</b>"]
+        for s in scopes:
+            for rule in await office.rules.list(scope=s):
+                if rule.status.value == "disabled":
+                    continue
+                mark = "✅" if rule.status.value == "active" else "📝"
+                lines.append(f"{mark} <b>{fmt.esc(rule.id)}</b> [{fmt.esc(rule.kind.value)} · {fmt.esc(s.split(':')[0])} · {fmt.esc(rule.stage)}] {fmt.esc(rule.title)}")
+        if len(lines) == 1:
+            lines.append("Chưa có rule. Đề xuất: /rule Tiêu đề: nội dung")
+        await self.bridge.send(thread, "\n".join(lines))
 
     async def ticket_of_thread(self, thread: int | None) -> Any:
         conv_id = await self.bridge._conversation_of(thread)

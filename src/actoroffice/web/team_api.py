@@ -220,3 +220,58 @@ def register(app: FastAPI, office: Office) -> None:
         if not path.is_relative_to(office.settings.runs_dir.resolve()) or not path.is_file():
             raise NotFound(f"{name} không tồn tại")
         return PlainTextResponse(office.redact(path.read_text(encoding="utf-8", errors="replace")))
+
+
+class RuleBody(BaseModel):
+    title: str
+    body: str = ""
+    kind: str = "guideline"
+    scope: str = "global"
+    stage: str = "any"
+    spec: dict[str, Any] = Field(default_factory=dict)
+    activate: bool = True
+
+
+def register_rules(app: FastAPI, office: Office) -> None:
+    rules = office.rules
+
+    @app.get("/api/rules")
+    async def list_rules(scope: str | None = None, status: str | None = None, kind: str | None = None, q: str | None = None) -> list[dict[str, Any]]:
+        found = await rules.search(q, limit=50, active_only=False) if q else await rules.list(scope=scope, status=status, kind=kind)
+        return [r.model_dump() for r in found]
+
+    @app.get("/api/rules/{rule_id}")
+    async def get_rule(rule_id: str) -> dict[str, Any]:
+        return {"rule": (await rules.get(rule_id)).model_dump(), "versions": await rules.versions(rule_id)}
+
+    @app.post("/api/rules")
+    async def add_rule(body: RuleBody) -> dict[str, Any]:
+        rule = await rules.propose(
+            title=body.title, body=body.body, kind=body.kind, scope=body.scope, stage=body.stage, spec=body.spec, by=LOCAL_OWNER_ID, activate=body.activate
+        )
+        return rule.model_dump()
+
+    @app.put("/api/rules/{rule_id}")
+    async def edit_rule(rule_id: str, body: RuleBody) -> dict[str, Any]:
+        return (await rules.update(rule_id, by=LOCAL_OWNER_ID, title=body.title, body=body.body, spec=body.spec, stage=body.stage)).model_dump()
+
+    @app.post("/api/rules/{rule_id}/approve")
+    async def approve_rule(rule_id: str) -> dict[str, Any]:
+        return (await rules.approve(rule_id, by=LOCAL_OWNER_ID)).model_dump()
+
+    @app.post("/api/rules/{rule_id}/disable")
+    async def disable_rule(rule_id: str) -> dict[str, Any]:
+        return (await rules.disable(rule_id, by=LOCAL_OWNER_ID)).model_dump()
+
+    @app.post("/api/projects/{project_id}/import-conventions")
+    async def import_conventions(project_id: str) -> list[dict[str, Any]]:
+        project = await office.projects.get(project_id)
+        return [r.model_dump() for r in await rules.import_conventions(project, by=LOCAL_OWNER_ID)]
+
+    @app.get("/api/tickets/{key}/rules")
+    async def ticket_rules(key: str) -> dict[str, Any]:
+        """Rules in effect for the ticket's current stage."""
+        ticket = await office.tickets.get(key)
+        project = await office.projects.get(ticket.project_id) if ticket.project_id else None
+        compiled = await rules.compile(ticket=ticket, project=project, stage=ticket.stage or "any")
+        return compiled.model_dump()

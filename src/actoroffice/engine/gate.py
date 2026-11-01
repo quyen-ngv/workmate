@@ -36,6 +36,7 @@ class OfficeGate:
     asked: list[str] = field(default_factory=list)
     seen_change_id: int = 0  # requirement changes already shown to this run
     seen_steer_id: int = 0  # directions from people already shown to this run
+    policies: list[Any] = field(default_factory=list)  # team policy rules in effect (services/rules.py)
     stats: RunStats = field(default_factory=RunStats)
 
     async def before_tool(self, tool: str, args: dict[str, Any], tool_use_id: str | None) -> GateResult:
@@ -64,6 +65,17 @@ class OfficeGate:
                     "REQUIREMENTS CHANGED while you were working. This tool call was NOT run.\n"
                     f"{notes}\nRe-read the ticket and its documents (ticket_get, doc_get), adjust your plan and work "
                     "to the change, then continue. Mention the change in your final comment.",
+                )
+        if self.policies:
+            from actoroffice.services.rules import policy_denial
+
+            rule = policy_denial(self.policies, tool, args)
+            if rule is not None:
+                await self._audit(tool, target_of(tool, args) or tool, Risk.READ, "denied", f"rule {rule.ref}")
+                await office.runs.event(self.run_id, "rule", {"id": rule.id, "ref": rule.ref, "title": rule.title, "tool": tool, "effect": "deny"})
+                return GateResult(
+                    GateDecision.DENY,
+                    f"Team rule {rule.id} ({rule.title}) forbids this action. {rule.body[:400]}\nDo it another way, or ask a person (ask_human).",
                 )
         # Re-read the actor: an "always allow" chosen on a previous card applies right away.
         actor = await office.org.get_actor(self.actor.id)

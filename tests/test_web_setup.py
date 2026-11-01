@@ -188,6 +188,18 @@ def test_ac1_setup_reports_bound_for_switch_button(client, bound):  # noqa: F811
     assert tg_status(c) == {"running": True, "bound": False}  # waiting for /start: no button
 
 
+def test_ac2_switch_button_asks_before_calling_the_api():
+    """No JS test harness in the repo: guard the page's source (button only when bound, confirm before the request)."""
+    from pathlib import Path
+
+    js = (Path(team_api.__file__).parent / "static" / "team" / "team.js").read_text(encoding="utf-8")
+    assert '${c.telegram.running && c.telegram.bound ? `<button class="btn" data-telegram-unbind>Chuyển sang group mới</button>` : ""}' in js
+    handler = js[js.index("ds.telegramUnbind !== undefined") :]
+    handler = handler[: handler.index("pageSetup()")]
+    assert handler.index("if (!confirm(") < handler.index('api("/api/setup/telegram/unbind"')
+    assert "return;" in handler[handler.index("if (!confirm(") : handler.index('api("/api/setup/telegram/unbind"')]
+
+
 def test_ac3_setup_unbind_endpoint(bound):
     c, office, bot = bound
     r = c.post("/api/setup/telegram/unbind", headers=HEADERS)

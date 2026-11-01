@@ -49,7 +49,8 @@ watchdog false positive fixed in round 1; the others were real design decisions.
    now the same edit twice, an edit undone, or 10 edits without a command; reads count per part of a file.
 5. SI-1's build ran the whole suite itself and then again in the `repo:test` check: filed as SI-3 for the AI.
 6. SI-1's reply points people to "Settings" to switch groups, which did not exist: filed as SI-4.
-8. In SI-4's PR stage the AI ran the suite in the background and waited with an unbounded `until … sleep` loop:
-   filed as SI-6.
 7. The independent reviewer (review_clean) found a real race in SI-4's `unbind()`; the AI fixed it before the
    gate. The reviewer and the suite then ran again: a second `stage_complete` repeats every check.
+
+8. In SI-4's PR stage the AI ran the suite in the background and waited with an unbounded `until … sleep` loop:
+   filed as SI-6.

@@ -80,6 +80,13 @@ class StageOutcome(StrEnum):
     REJECTED = "rejected"  # a gate sent it back
     REOPENED = "reopened"  # moved back to an earlier stage
     STOPPED = "stopped"
+    SKIPPED = "skipped"  # the ticket was forced to done before this stage ran
+
+
+# Checks nobody may waive, whatever their role.
+UNWAIVABLE = frozenset({"no_secrets"})
+# Roles that may waive a check or force a ticket status (the local owner counts as admin).
+BYPASS_ROLES = ("admin", "lead", "dev", "owner")
 
 
 class Step(BaseModel):
@@ -103,6 +110,7 @@ class StageRun(BaseModel):
     rules: list[str] = Field(default_factory=list)
     checks: list[dict[str, Any]] = Field(default_factory=list)
     steps: list[Step] = Field(default_factory=list)
+    waivers: list[dict[str, Any]] = Field(default_factory=list)
 
 
 STAGE_TITLES = {

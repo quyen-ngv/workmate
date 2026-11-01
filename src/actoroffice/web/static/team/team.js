@@ -234,6 +234,13 @@ function card(item) {
       <div class="composer inline"><textarea placeholder="${p.gate === "knowledge" ? "Bỏ mục sai: 'bỏ 2, 5'" : "Ghi chú khi trả lại…"}" data-text></textarea></div>
       <div class="opts"><button class="btn good" data-approve="1">👍 ${p.gate === "knowledge" ? "Xác nhận" : "Duyệt"}</button><button class="btn bad" data-approve="0">👎 ${p.gate === "knowledge" ? "Bỏ (theo ghi chú)" : "Trả lại"}</button></div></div>`;
   }
+  if (item.kind === "waive_check") {
+    const failed = (p.failed || []).map((c) => `<li>❌ ${esc(c.id)}: ${esc(c.summary)}</li>`).join("");
+    return `<div class="card" data-card="${esc(item.id)}"><div class="who">⚠️ AI xin bỏ qua check <b>${esc(p.check)}</b> (${esc(p.stage_title)}) — cần ${esc(who)}</div>
+      <div class="q">${esc(p.reason)}</div>${failed ? `<ul>${failed}</ul>` : ""}
+      <div class="composer inline"><textarea placeholder="Ghi chú khi duyệt/từ chối…" data-text></textarea></div>
+      <div class="opts"><button class="btn good" data-approve="1">Cho phép bỏ qua</button><button class="btn bad" data-approve="0">Không, sửa đi</button></div></div>`;
+  }
   if (item.kind === "env_access") {
     return `<div class="card" data-card="${esc(item.id)}"><div class="who">🔑 AI xin quyền ${esc(p.level_label)} vào ${esc(p.resource)} (${esc(p.env)}) trong ${esc(p.ttl_h)}h — cần ${esc(who)}</div>
       <div class="q">${esc(p.reason)}</div><div class="opts"><button class="btn good" data-approve="1">Cho phép</button><button class="btn bad" data-approve="0">Không</button></div></div>`;
@@ -272,8 +279,11 @@ function renderPane(key) {
           ${st.status === "paused" ? `<button class="btn small" data-cmd="resume">▶ Tiếp</button>` : `<button class="btn small" data-cmd="pause">⏸ Dừng</button>`}
           <button class="btn small" data-cmd="retry" title="Làm lại giai đoạn">↻</button>
           ${t.stage === "pr" ? `<button class="btn small" data-cmd="merged">PR đã merge</button>` : ""}
+          <button class="btn small" data-waive title="Bỏ qua một check đang fail (cần lý do)">Bỏ qua check</button>
+          <button class="btn small" data-force title="Ép đổi status ticket (cần lý do)">Ép status</button>
         </span>
       </div>
+      ${(st.waivers || []).length ? `<div class="pane-meta">${st.waivers.map((w) => `<span class="chip waived" title="${esc(w.reason)}">⚠️ waived ${esc(w.check)} · ${esc(w.by_name)} · ${esc(w.at)} · ${esc(w.reason)}</span>`).join("")}</div>` : ""}
     </div>
     ${steps.length ? `<div class="steps">${steps.map((s, i) => `<div class="s ${s.done ? "done" : i === cur ? "cur" : ""}">${s.done ? "☑" : i === cur ? "▶" : "☐"} ${esc(s.text)}</div>`).join("")}</div>` : ""}
     <div class="timeline">${renderTimeline(timeline(key)) || `<div class="empty">Chưa có hoạt động.</div>`}</div>
@@ -512,6 +522,26 @@ document.addEventListener("click", (e) => {
   if (ds.saveBitbucket !== undefined) return act(async () => { await api("/api/setup/bitbucket", { method: "POST", body: { email: conn("bb_email"), token: conn("bb_token"), workspace: conn("bb_workspace") } }); toast("Bitbucket OK"); await pageSetup(); });
   const pane = t.closest("[data-pane]");
   const key = pane?.dataset.pane;
+  if (ds.waive !== undefined && key) return act(async () => {
+    const run = (state.details[key]?.stage?.stage_runs || []).filter((r) => r.stage === state.details[key]?.detail?.ticket?.stage).pop();
+    const failed = (run?.checks || []).filter((c) => c.status === "failed").map((c) => c.id);
+    const check = (prompt(`Bỏ qua check nào? (đang fail: ${failed.join(", ") || "không có"}; no_secrets không được bỏ qua)`, failed[0] || "") || "").trim();
+    if (!check) return;
+    const text = (prompt("Lý do bỏ qua (bắt buộc):") || "").trim();
+    if (!text) return toast("Cần nêu lý do", true);
+    await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: "waive", check, text } });
+    toast(`Đã bỏ qua ${check}`);
+    await refresh(key);
+  });
+  if (ds.force !== undefined && key) return act(async () => {
+    const status = (prompt("Ép sang status nào? backlog | todo | in_progress | in_review | blocked | done | cancelled") || "").trim();
+    if (!status) return;
+    const reason = (prompt("Lý do ép đổi (bắt buộc):") || "").trim();
+    if (!reason) return toast("Cần nêu lý do", true);
+    await api(`/api/tickets/${key}/force-status`, { method: "POST", body: { status, reason } });
+    toast(`Đã ép status ${status}`);
+    await refresh(key);
+  });
   if (ds.cmd && key) return act(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: ds.cmd } }); await refresh(key); });
   if (ds.send !== undefined && key) {
     const box = $("[data-steer]", pane);

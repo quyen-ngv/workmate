@@ -18,6 +18,8 @@ from actoroffice.__main__ import build_parser
         ["project", "set", "shop", "--team", "Shop", "--profile", "{}"],
         ["task", "Thử", "--team", "Shop", "--owner", "Lan", "--project", "shop", "--template", "code"],
         ["stage", "AO-1", "steer", "ưu", "tiên", "VIP"],
+        ["stage", "AO-1", "waive", "pr_linked", "code", "đã", "ở", "main"],
+        ["stage", "AO-1", "force", "done", "chốt", "tay"],
         ["rules", "add", "Test Java", "--body", "JUnit 5", "--scope", "global"],
         ["resource", "add", "payments", "--kind", "http", "--config", "{}"],
         ["jira", "sync"],

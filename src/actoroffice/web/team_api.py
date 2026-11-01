@@ -54,8 +54,14 @@ class TaskBody(BaseModel):
 
 
 class ControlBody(BaseModel):
-    cmd: str  # pause | resume | retry | stop | steer | merged
+    cmd: str  # pause | resume | retry | stop | steer | merged | waive
     text: str = ""
+    check: str = ""  # waive: the check to skip (text = the reason)
+
+
+class ForceStatusBody(BaseModel):
+    status: TicketStatus
+    reason: str = ""
 
 
 class ParticipantBody(BaseModel):
@@ -213,12 +219,22 @@ def register(app: FastAPI, office: Office) -> None:
             ticket = await stages.steer(key, body.text, by=by)
         elif cmd == "merged":
             ticket = await stages.external_passed(key, "merge", by=by, note=body.text or "PR đã merge")
+        elif cmd == "waive":
+            await stages.waive(key, body.check, body.text, by=by)
+            ticket = await office.tickets.get(key)
         elif cmd == "approved_script":
             ticket = await stages.external_passed(key, "script", by=by, note=body.text or "đã duyệt")
         else:
             raise HTTPException(422, f"không rõ lệnh {body.cmd}")
         office.scheduler.kick()
         return {"ticket": ticket.model_dump(), "status": await stages.status(ticket, viewer=by)}
+
+    @app.post("/api/tickets/{key}/force-status")
+    async def force_status(key: str, body: ForceStatusBody) -> dict[str, Any]:
+        """Set any status (ignores the transition table); needs a reason and bypass rights."""
+        ticket = await office.stages.force_status(key, body.status, body.reason, by=LOCAL_OWNER_ID)
+        office.scheduler.kick()
+        return ticket.model_dump()
 
     # ---- run activity ---------------------------------------------------------------------------------------
 

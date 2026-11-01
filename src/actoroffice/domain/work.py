@@ -131,6 +131,7 @@ class InteractionKind(StrEnum):
     APPROVE_ACCESS = "approve_access"  # an actor needs to change files of a read-only project; the user decides
     ENV_ACCESS = "env_access"  # the AI asks for time-limited access to a shared environment; a Dev/Lead decides
     APPROVE_STAGE = "approve_stage"  # a stage gate: people with the right role approve the stage's documents
+    WAIVE_CHECK = "waive_check"  # the AI asks to skip a failing check; people allowed to bypass decide
 
 
 class InteractionStatus(StrEnum):

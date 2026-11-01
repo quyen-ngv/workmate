@@ -79,7 +79,7 @@ GIT_LOCAL = {
 GIT_NETWORK = {"push", "pull", "fetch", "clone", "ls-remote", "submodule", "remote"}
 
 SAFE_TARGETS = {"/dev/null", "nul", "NUL", "$null", "/dev/stdout", "/dev/stderr"}
-NOT_SPLITTABLE = re.compile(r"`|\$\(|<\(|>\(|<<|\r|\n")
+NOT_SPLITTABLE = re.compile(r"`|\$\(|<\(|>\(|<<")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 OPERATORS = {"&&", "||", ";", "|", "&", "|&"}
 RANGE = re.compile(r"[\d,;$p]+")  # numbers and sed-style ranges (195,260p)
@@ -110,6 +110,9 @@ def split(command: str) -> list[Command] | None:
     """The commands of a chain, or None when the line cannot be split safely (substitution, heredoc, subshell,
     unbalanced quotes)."""
     if NOT_SPLITTABLE.search(command):
+        return None
+    command = _newlines_as_separators(command)
+    if command is None:
         return None
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()")
     lexer.whitespace_split = True
@@ -149,6 +152,34 @@ def split(command: str) -> list[Command] | None:
     elif current.redirects:
         return None
     return commands or None
+
+
+def _newlines_as_separators(command: str) -> str | None:
+    """A newline outside quotes ends a command (like `;`); inside quotes it is text (a multi-line commit message).
+    None when a backslash-newline continuation or an unbalanced quote makes it unclear."""
+    out: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if ch == "\\" and quote != "'" and i + 1 < len(command):
+            if command[i + 1] in "\r\n" and not quote:
+                return None
+            out += [ch, command[i + 1]]
+            i += 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "\r\n":
+            out.append(" ; " if ch == "\n" else " ")
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return None if quote else "".join(out)
 
 
 def classify(cmd: Command, place: Place, cwd: Path | None) -> tuple[Kind, str]:

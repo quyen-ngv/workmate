@@ -329,7 +329,8 @@ STAGE_TOOLS: list[ToolDef] = [
     ToolDef(
         "stage_switch",
         "Move the ticket to the other workflow: 'quick' for a small, clear change (one short plan, one approval), "
-        "'code' when it turns out bigger or has decisions people must make (requirements, plan with options).",
+        "'code' when it turns out bigger or has decisions people must make (requirements, plan with options). Put what "
+        "you found in reason (cause with file:line, what to change): the next session starts from it.",
         schema({"template": {"type": "string", "enum": ["quick", "code"]}, "reason": {"type": "string"}}, required=["template", "reason"]),
         stage_switch,
     ),

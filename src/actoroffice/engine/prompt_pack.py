@@ -144,8 +144,9 @@ Goal: working, tested changes that follow the approved plan.
 - stage_complete runs the checks (tests changed, build, test, lint…). Fix failures and call it again.""",
     "pr": """\
 Goal: a pull request people can review and merge.
-- Commit everything, then open the pull request with pr_create (it pushes the branch; a person approves). If
-  pr_create is not available, ask a dev (ask_human, roles [dev]) to push and open it, then link it with pr_link.
+- Commit everything, then open the pull request with pr_create (it pushes the branch). If no code host is
+  connected, the branch itself is reviewed on this machine: do not ask for a PR URL and do not push; call
+  stage_complete with the branch name, and a person merges it.
 - PR description: summary, AC → test map, check results, how to test, assumptions and known limits.
 - stage_complete: the stage waits for a person to merge.
 - When woken with review comments ("Review mới trên PR"), read them with pr_comments, fix them on the same
@@ -272,6 +273,12 @@ def build(
     for reason in reasons:
         if reason.get("redo"):
             delta += ["", f"The gate sent this stage back. Reviewer's note: {reason['redo']}"]
+        if reason.get("switched"):
+            delta += [
+                "",
+                f"The ticket moved here from the '{reason.get('from') or 'other'}' workflow. What was found then (start from it, "
+                f"do not search again for what it already says): {reason['switched']}",
+            ]
         if reason.get("reopened"):
             delta += ["", f"The ticket came back to this stage: {reason['reopened']}"]
         if reason.get("steer"):

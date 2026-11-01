@@ -122,3 +122,27 @@ async def test_people_switch_the_workflow_and_not_after_the_pr(office: Office) -
     await office.db.execute("UPDATE tickets SET stage = 'pr' WHERE id = ?", (ticket.id,))
     with pytest.raises(Exception, match="pull request"):
         await office.stages.switch_template(ticket.id, "quick", reason="x", by="user")
+
+
+async def test_without_a_code_host_the_committed_branch_is_the_review(tmp_path) -> None:
+    import subprocess
+    from types import SimpleNamespace
+
+    from actoroffice.services.checks import check_pr_linked
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@x", "-c", "commit.gpgsign=false"]
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+    subprocess.run([*git, "switch", "-q", "-c", "t/si-1-fix"], check=True)
+    office = SimpleNamespace(atlassian=SimpleNamespace(code_host=lambda: None))
+    ctx = SimpleNamespace(office=office, ticket=SimpleNamespace(pr_url=None), workspace=repo, project=SimpleNamespace(main_branch="main"))
+
+    assert (await check_pr_linked(ctx)).status == "failed"  # nothing committed yet
+    (repo / "a.txt").write_text("x", encoding="utf-8")
+    assert "chưa commit" in (await check_pr_linked(ctx)).summary
+    subprocess.run([*git, "add", "a.txt"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "fix"], check=True)
+    result = await check_pr_linked(ctx)
+    assert result.status == "passed" and "t/si-1-fix" in result.summary

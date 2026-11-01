@@ -330,6 +330,19 @@ async def changed_files(workspace: Path, base: str) -> list[str]:
 async def check_pr_linked(ctx: CheckContext) -> CheckResult:
     if ctx.ticket.pr_url:
         return CheckResult(id="pr_linked", status="passed", summary=ctx.ticket.pr_url)
+    if ctx.office.atlassian.code_host() is None and ctx.workspace is not None and (ctx.workspace / ".git").exists():
+        # A repo without a code host is reviewed on this machine: the ticket's branch is what people merge.
+        base = ctx.project.main_branch if ctx.project else "main"
+        _code, branch, _ = await run_argv(["git", "rev-parse", "--abbrev-ref", "HEAD"], ctx.workspace, timeout=30)
+        code, count, _ = await run_argv(["git", "rev-list", "--count", f"{base}..HEAD"], ctx.workspace, timeout=30)
+        _code, dirty, _ = await run_argv(["git", "status", "--porcelain"], ctx.workspace, timeout=30)
+        if code == 0 and count.strip().isdigit() and int(count.strip()) > 0 and not dirty.strip():
+            return CheckResult(
+                id="pr_linked", status="passed", summary=f"nhánh local {branch.strip()} ({count.strip()} commit) chờ người review và merge",
+                data={"branch": branch.strip(), "base": base},
+            )
+        reason = "còn thay đổi chưa commit" if dirty.strip() else f"nhánh chưa có commit nào so với {base}"
+        return CheckResult(id="pr_linked", status="failed", summary=f"chưa có PR và {reason}")
     return CheckResult(id="pr_linked", status="failed", summary="chưa có link PR (pr_link)")
 
 

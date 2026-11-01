@@ -213,3 +213,12 @@ def test_workspace_mode_offers_to_switch_to_folder_mode_when_only_local_programs
     assert local.decision == Decision.ASK and local.suggestions[0] == {"scope": "mode", "rule": "mode:folder"}
     network = engine.decide("Bash", {"command": "uvx ruff check src && git push origin t/x"}, ctx(ws))
     assert all(s["scope"] != "mode" for s in network.suggestions)  # the folder mode would not cover the push
+
+
+def test_newlines_inside_quotes_are_text_and_outside_they_split(engine, ws):
+    commit = 'git add -A && git commit -q -m "fix(telegram): x\n\nCo-Authored-By: Claude <noreply@anthropic.com>" && git log --oneline -1'
+    assert decide(engine, ctx(ws), commit) == Decision.ALLOW
+    assert decide(engine, ctx(ws), "ls\ncurl https://x") == Decision.ASK  # two commands, the second asks
+    parts = shell.split("ls\ncat a.txt")
+    assert [p.argv[0] for p in parts] == ["ls", "cat"]
+    assert shell.split("ls \\\nrm x") is None  # a line continuation is judged as a whole

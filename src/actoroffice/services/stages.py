@@ -544,7 +544,9 @@ class StageService:
         )
         await self._set_status(ticket.id, S.TODO, run_id=run_id, comment=None)
         if ticket.assignee_actor_id:
-            await office.wakes.enqueue(ticket.assignee_actor_id, WakeSource.MANUAL, ticket_id=ticket.id, payload={"stage": first.id})
+            await office.wakes.enqueue(
+                ticket.assignee_actor_id, WakeSource.MANUAL, ticket_id=ticket.id, payload={"stage": first.id, "switched": reason, "from": ticket.stage_template}
+            )
         office.scheduler.kick()
         await office.audit.record("stage:switch", "switched", ticket_id=ticket.id, target=tpl.name, detail={"by": by, "reason": reason})
         return await self._publish(ticket.id)

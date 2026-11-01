@@ -122,7 +122,11 @@ async def pr_create(args: dict[str, Any], ctx: ToolCtx) -> str:
     office = ctx.office
     host = office.atlassian.code_host()
     if host is None:
-        raise ToolError("No code host connected (an admin runs `actoroffice bitbucket login`). Ask a dev to open the PR instead.")
+        raise ToolError(
+            "No code host is connected: this repository is reviewed on this machine. Commit everything, then call "
+            "stage_complete with the branch name and a short summary; a person reviews the branch and merges it. "
+            "Do not ask for a PR URL and do not push."
+        )
     if ctx.ticket_id is None or ctx.workspace is None:
         raise ToolError("pr_create works inside a ticket's workspace.")
     ticket = await office.tickets.get(ctx.ticket_id)

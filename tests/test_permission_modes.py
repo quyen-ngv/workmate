@@ -150,3 +150,14 @@ def test_split_respects_quotes_and_redirects():
     assert [p.argv[:2] for p in parts] == [["git", "commit"], ["tail", "-3"]]
     assert parts[0].argv[3] == "a && b > c" and parts[0].redirects == [("2>&", "1")]
     assert shell.split("echo $(whoami)") is None and shell.split("cat <<EOF") is None and shell.split("(cd x; ls)") is None
+
+
+def test_remembered_prefixes_never_cover_a_whole_interpreter():
+    from actoroffice.security.policy import command_prefix
+
+    assert command_prefix("py -m ruff check src".split()) == "py -m ruff"
+    assert command_prefix("uvx ruff check src".split()) == "uvx ruff"
+    assert command_prefix("uv run pytest -q".split()) == "uv run pytest"
+    assert command_prefix("node build.js --prod".split()) == "node build.js"
+    assert command_prefix("kiro-cli whoami".split()) == "kiro-cli whoami"
+    assert command_prefix(["py"]) is None and command_prefix(["node"]) is None

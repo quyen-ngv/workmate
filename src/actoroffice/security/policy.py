@@ -351,10 +351,29 @@ def suggest_rules(tool: str, target: str) -> list[dict[str, str]]:
     return options
 
 
+LAUNCHERS = {
+    # program: how many words name what it runs ("py -m ruff", "uv run pytest", "npx prettier", "node build.js")
+    "py": 3, "python": 3, "python3": 3, "uv": 3, "uvx": 2, "npx": 2, "pnpx": 2, "bunx": 2, "pipx": 3,
+    "node": 2, "deno": 3, "bun": 2, "bash": 2, "sh": 2, "pwsh": 3, "powershell": 3, "java": 3, "go": 2,
+    "dotnet": 2, "cargo": 2, "npm": 3, "pnpm": 3, "yarn": 2, "mvn": 2, "gradle": 2,
+}
+
+
 def command_prefix(argv: list[str]) -> str | None:
-    """`uvx ruff check src` → `uvx ruff`, `kiro-cli whoami` → `kiro-cli whoami`, `node x.js` → `node`."""
+    """What "always allow" remembers: `uvx ruff check src` → `uvx ruff`, `py -m ruff check` → `py -m ruff`,
+    `kiro-cli whoami` → `kiro-cli whoami`. Never a bare interpreter (`py*` would allow any program)."""
     if not argv:
         return None
+    program = shell.program_name(argv[0])
+    if program in LAUNCHERS:
+        words = argv[: LAUNCHERS[program]]
+        if program in ("py", "python", "python3") and len(argv) > 1 and argv[1] != "-m":
+            words = argv[:2]  # py script.py
+        if program in ("npm", "pnpm", "yarn", "uv") and argv[1:2] != ["run"]:
+            words = argv[:2]  # npm install, uv sync; npm run build keeps the script name
+        if len(words) < 2 or any(len(w) > 60 for w in words):
+            return None
+        return " ".join(words)
     words = [argv[0]]
     if len(argv) > 1 and re.fullmatch(r"[a-z][\w:-]*", argv[1]) and "." not in argv[1]:
         words.append(argv[1])  # a subcommand, not a file or a flag

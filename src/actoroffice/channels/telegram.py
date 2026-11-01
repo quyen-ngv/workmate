@@ -500,13 +500,24 @@ class TelegramBridge:
                 "(quyền quản lý topic) rồi nhắn /start trong group.",
             )
             return
+        is_start = text.split()[0].split("@")[0].lower() == "/start" if text else False
         if self.chat_id is None:
+            if not is_start:
+                return  # only /start binds a group, not any message in an old group
             if chat.get("is_forum"):
                 await self._bind(int(chat["id"]))
             elif chat.get("type") in ("group", "supergroup"):
                 await self.api.call("sendMessage", chat_id=chat["id"], text="Hãy bật Topics cho group này (Cài đặt group → Topics) rồi nhắn /start lại.")
             return
         if chat.get("id") != self.chat_id:
+            if is_start:
+                extra = {"message_thread_id": msg["message_thread_id"]} if msg.get("is_topic_message") else {}
+                await self.api.call(
+                    "sendMessage",
+                    chat_id=chat["id"],
+                    text="Bot đang gắn với một group khác. Muốn chuyển sang group này, mở web → Cài đặt.",
+                    **extra,
+                )
             return
         thread = msg.get("message_thread_id") if msg.get("is_topic_message") else None
         if text.startswith("/"):

@@ -1,7 +1,8 @@
 """Tool-call policy: every tool call an actor makes is decided here (allow / ask / deny).
 
 Order of evaluation (first match wins):
-  1. hard denies — paths and commands that are never allowed, whatever the config says
+  1. hard denies — paths and commands that are never allowed, whatever the config says (also: writing files
+     through the shell, and waiting in a sleep loop that no `timeout` bounds; both deny with guidance)
   2. path containment — only the ticket workspace (+ read-only dirs) is reachable
   3. taint — a session that read untrusted content must ask before acting externally
   4. the project's permission mode (like Claude Code's modes, Codex's approval presets, Kiro's tool trust):
@@ -100,6 +101,12 @@ SHELL_FILE_WRITE = re.compile(
     r"|\b(?:Set-Content|Add-Content|Out-File)\b"
     r"|\bsed\s+(?:-[a-zA-Z]*i\b|--in-place)|\bperl\s+-[a-zA-Z]*i",
     re.IGNORECASE,
+)
+
+WAIT_LOOP_REASON = (
+    "Do not run a command in the background and wait for it with a sleep loop (until/while … sleep): it waits forever "
+    "if the command dies. Run long commands (tests, builds) in the foreground, one command per call. If you really "
+    "must wait, wrap the loop in `timeout N` (timeout 300 bash -c '…')."
 )
 
 HARD_DENY_COMMANDS = [
@@ -234,6 +241,10 @@ class PolicyEngine:
                 "Do not write files through the shell (heredoc or > redirection). Use the Write tool to create a file "
                 "and Edit to change one, then run each command on its own (no && chains).",
             )
+        if shell.wait_loop(cmd):
+            # A loop that sleeps until something happens can wait forever when that never comes (SI-6). A deny,
+            # not an ask: the reason reaches the actor, and no mode or rule can let it through.
+            return Verdict(Decision.DENY, Risk.EXEC, WAIT_LOOP_REASON)
         if ctx.workspace is not None and not cmd.lower().startswith(("powershell", "pwsh")):
             judged = self._chain(cmd, ctx)
             if judged is not None:

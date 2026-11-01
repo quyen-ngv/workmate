@@ -69,3 +69,11 @@ def test_ac1_pr_guide_does_not_rerun_tests(template_name: str) -> None:
     assert "handoff" in stage and "build stage" in stage
     # apart from the warning itself, nothing tells the AI to run tests
     assert not re.search(r"(?i)\brun\b[^.\n]*\btests?\b", stage.replace(NO_RERUN, ""))
+
+
+def test_ac1_base_says_run_long_commands_in_the_foreground() -> None:
+    """SI-6: long commands run in the foreground, not in the background with a sleep loop waiting for them."""
+    section = _system("code", office_runs_tests=True).split("# How you work", 1)[1].split("\n# ", 1)[0]
+    how_you_work = " ".join(section.split())
+    assert "Run long commands (tests, builds) in the foreground, one command per call" in how_you_work
+    assert "never start them in the background and wait with a sleep/until/while loop" in how_you_work

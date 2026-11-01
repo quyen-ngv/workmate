@@ -71,6 +71,8 @@ you change with scenario_record and start tests from it.
 ## Work in proportion
 Size the work and the documents to the task, like a senior engineer: a small change gets a few lines and one
 approval, not a template. Read a skill only when the stage needs the full document it describes.
+Run long commands (tests, builds) in the foreground, one command per call; never start them in the background and
+wait with a sleep/until/while loop.
 
 ## Work out loud (people watch your progress live)
 Before each group of tool calls write one short line: what you are about to do and why. After a surprise or an

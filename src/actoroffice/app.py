@@ -185,6 +185,17 @@ class Office:
         self._tasks.append(asyncio.create_task(self.telegram.run(ready), name="telegram"))
         await ready.wait()
 
+    async def stop_telegram(self) -> None:
+        """Stop the Telegram bridge (to switch to another bot or turn Telegram off) without stopping the office."""
+        for task in [t for t in self._tasks if t.get_name() == "telegram"]:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            self._tasks.remove(task)
+        if self.telegram is not None:
+            await self.telegram.api.close()
+            self.telegram = None
+
     async def close(self) -> None:
         await self.scheduler.shutdown()
         await self.automations.shutdown()

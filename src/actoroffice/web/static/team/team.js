@@ -439,9 +439,12 @@ async function pageSetup() {
 
     <h3>Kết nối</h3>
     <p class="hint">Token được lưu trên máy chủ (thư mục secrets), không hiện lại và AI không bao giờ thấy.</p>
-    <div class="rule"><div class="h"><b>Telegram</b>${status(c.telegram.configured, c.telegram.configured ? (c.telegram.bound ? "đã nối group" : "đã có token, chờ /start trong group") : "chưa kết nối")}</div>
-      <div class="b">@BotFather → /newbot → dán token. Sau đó tạo group, bật Topics, thêm bot làm admin và nhắn /start trong group.</div>
-      <div class="form"><label>Bot token<input data-c="tg_token" type="password" placeholder="123456789:AA…"></label><button class="btn primary" data-save-telegram>Kết nối</button></div></div>
+    <div class="rule"><div class="h"><b>Telegram</b>${status(c.telegram.running, c.telegram.running ? `@${c.telegram.bot} · ${c.telegram.bound ? "đã nối group" : "chờ /start trong group"}` : c.telegram.configured ? "có token, chưa chạy" : "chưa kết nối")}</div>
+      <div class="b">@BotFather → /newbot → dán token. Sau đó tạo group, bật Topics, thêm bot làm admin và nhắn /start trong group.
+Đổi sang bot khác: dán token mới rồi bấm Kết nối, bot cũ dừng ngay. Nếu bot mới được thêm vào group cũ thì các topic cũ dùng tiếp.</div>
+      ${c.telegram.env_override ? `<div class="b">⚠ Biến môi trường ${esc(c.telegram.env_override)} đang chứa token và được ưu tiên khi khởi động. Hãy xoá biến này nếu muốn dùng token nhập ở đây.</div>` : ""}
+      <div class="form"><label>Bot token${c.telegram.running ? " mới" : ""}<input data-c="tg_token" type="password" placeholder="123456789:AA…"></label><button class="btn primary" data-save-telegram>${c.telegram.running ? "Đổi bot" : "Kết nối"}</button>
+        ${c.telegram.configured ? `<button class="btn bad" data-telegram-off>Tắt Telegram</button>` : ""}</div></div>
     <div class="rule"><div class="h"><b>Jira + Confluence (Cloud)</b>${status(c.jira.configured, c.jira.configured ? `${c.jira.email} · ${c.jira.base_url}` : "chưa kết nối")}</div>
       <div class="b">Tạo API token tại id.atlassian.com → Security → API tokens.</div>
       <div class="form"><label>URL<input data-c="jira_url" placeholder="vd. https://acme.atlassian.net" value="${esc(c.jira.base_url || "")}"></label>
@@ -503,7 +506,8 @@ document.addEventListener("click", (e) => {
     await pageSetup();
   });
   const conn = (n) => ($(`[data-c="${n}"]`)?.value || "").trim();
-  if (ds.saveTelegram !== undefined) return act(async () => { const r = await api("/api/setup/telegram", { method: "POST", body: { token: conn("tg_token") } }); toast(`Đã nối bot @${r.bot}. ${r.next}`); await pageSetup(); });
+  if (ds.saveTelegram !== undefined) return act(async () => { const r = await api("/api/setup/telegram", { method: "POST", body: { token: conn("tg_token") } }); toast(`Đã nối bot @${r.bot}. ${r.next}`); if (r.warning) toast(r.warning, true); await pageSetup(); });
+  if (ds.telegramOff !== undefined) return act(async () => { const r = await api("/api/setup/telegram/off", { method: "POST" }); toast("Đã tắt Telegram"); if (r.warning) toast(r.warning, true); await pageSetup(); });
   if (ds.saveJira !== undefined) return act(async () => { const r = await api("/api/setup/jira", { method: "POST", body: { base_url: conn("jira_url"), email: conn("jira_email"), token: conn("jira_token") } }); toast(`Jira OK: ${r.user || ""}`); await pageSetup(); });
   if (ds.saveBitbucket !== undefined) return act(async () => { await api("/api/setup/bitbucket", { method: "POST", body: { email: conn("bb_email"), token: conn("bb_token"), workspace: conn("bb_workspace") } }); toast("Bitbucket OK"); await pageSetup(); });
   const pane = t.closest("[data-pane]");

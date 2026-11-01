@@ -50,7 +50,7 @@ def test_setup_status_and_ai_model(client, tmp_path):  # noqa: F811
     s = client.get("/api/setup").json()
     assert s["projects"] == [] and s["people"] == 0
     assert s["connections"] == {
-        "telegram": {"configured": False, "running": False, "bound": False},
+        "telegram": {"configured": False, "running": False, "bound": False, "bot": None, "env_override": None},
         "jira": {"configured": False, "base_url": None, "email": None},
         "bitbucket": {"configured": False, "workspace": None},
     }
@@ -124,3 +124,15 @@ def test_launchers_exist():
     root = Path(__file__).resolve().parents[1]
     assert "actoroffice serve" in (root / "run.bat").read_text(encoding="ascii")
     assert "actoroffice serve" in (root / "run.sh").read_text(encoding="ascii")
+
+
+def test_telegram_can_be_turned_off_and_env_tokens_are_flagged(client, tmp_path, mocked, monkeypatch):  # noqa: F811
+    login(client)
+    client.post("/api/setup/telegram", json={"token": TG_TOKEN}, headers=HEADERS)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "987654321:" + "B" * 35)
+    r = client.post("/api/setup/telegram", json={"token": TG_TOKEN}, headers=HEADERS).json()
+    assert "TELEGRAM_BOT_TOKEN" in r["warning"]
+    assert client.get("/api/setup").json()["connections"]["telegram"]["env_override"] == "TELEGRAM_BOT_TOKEN"
+    off = client.post("/api/setup/telegram/off", headers=HEADERS).json()
+    assert off["ok"] and "TELEGRAM_BOT_TOKEN" in off["warning"]
+    assert not (tmp_path / "home" / "secrets" / "telegram_token").exists()

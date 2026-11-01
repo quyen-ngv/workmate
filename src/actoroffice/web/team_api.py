@@ -368,6 +368,20 @@ def _cmd(profile: dict[str, Any], key: str) -> str:
     return ""
 
 
+def _telegram_env_key() -> str | None:
+    import os
+
+    from actoroffice.channels.telegram import ENV_KEYS
+
+    return next((k for k in ENV_KEYS if os.environ.get(k, "").strip()), None)
+
+
+async def _bot_name(office: Office) -> str | None:
+    if office.telegram is None:
+        return None
+    return office.telegram.bot_name or getattr(office.telegram.api, "bot_id", None)
+
+
 SETUP_TRANSPORT: Any = None  # tests plug an httpx.MockTransport here to fake Jira/Bitbucket/Telegram
 
 
@@ -392,7 +406,13 @@ def register_setup(app: FastAPI, office: Office) -> None:
             "teams": [t.model_dump() for t in await office.teams.list_teams()],
             "people": len([u for u in await office.teams.list_users() if u.id != LOCAL_OWNER_ID]),
             "connections": {
-                "telegram": {"configured": bool(load_token(office.settings)), "running": office.telegram is not None, "bound": bool(office.telegram and office.telegram.chat_id)},
+                "telegram": {
+                    "configured": bool(load_token(office.settings)),
+                    "running": office.telegram is not None,
+                    "bound": bool(office.telegram and office.telegram.chat_id),
+                    "bot": await _bot_name(office),
+                    "env_override": _telegram_env_key(),
+                },
                 "jira": {"configured": bool(jira), "base_url": (jira or {}).get("base_url"), "email": (jira or {}).get("email")},
                 "bitbucket": {"configured": bool(bitbucket), "workspace": (bitbucket or {}).get("workspace")},
             },
@@ -479,9 +499,28 @@ def register_setup(app: FastAPI, office: Office) -> None:
         path = token_path(office.settings)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(token, encoding="utf-8")
-        if office.telegram is None and SETUP_TRANSPORT is None:
+        running = office.telegram is not None and getattr(office.telegram.api, "bot_id", None) == token.split(":", 1)[0]
+        if not running and SETUP_TRANSPORT is None:
+            await office.stop_telegram()  # another bot was running: switch now
             await office.start_telegram(token)
-        return {"ok": True, "bot": me.get("username"), "next": "Tạo group Telegram, bật Topics, thêm bot làm admin rồi nhắn /start trong group."}
+        bound = bool(office.telegram and office.telegram.chat_id)
+        env = _telegram_env_key()
+        return {
+            "ok": True,
+            "bot": me.get("username"),
+            "bound": bound,
+            "next": "Bot đã vào group cũ và tiếp tục dùng các topic." if bound
+            else "Tạo group Telegram (hoặc dùng group cũ), bật Topics, thêm bot làm admin rồi nhắn /start trong group.",
+            "warning": f"Biến môi trường {env} đang đặt token khác: lần khởi động sau token đó sẽ được dùng. Hãy xoá biến này." if env else None,
+        }
+
+    @app.post("/api/setup/telegram/off")
+    async def setup_telegram_off() -> dict[str, Any]:
+        from actoroffice.channels.telegram import token_path
+
+        await office.stop_telegram()
+        token_path(office.settings).unlink(missing_ok=True)
+        return {"ok": True, "warning": f"Biến môi trường {_telegram_env_key()} vẫn còn token: lần khởi động sau bot sẽ chạy lại." if _telegram_env_key() else None}
 
     @app.post("/api/setup/ai")
     async def setup_ai(body: AiBody) -> dict[str, Any]:

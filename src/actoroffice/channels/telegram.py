@@ -101,6 +101,7 @@ class BotApi:
 
     def __init__(self, token: str, *, base: str = "https://api.telegram.org", client: httpx.AsyncClient | None = None) -> None:
         self._url = f"{base}/bot{token}/"
+        self.bot_id = token.split(":", 1)[0]  # public part of the token: tells one bot from another
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(60, connect=15))
 
     async def call(self, method: str, **params: Any) -> Any:
@@ -145,6 +146,7 @@ class TelegramBridge:
         self.office = office
         self.api = api
         self.chat_id: int | None = None
+        self.bot_name: str | None = None  # @username, read at start
         self._echo: list[tuple[str, str]] = []  # (conversation, text) the user just sent from Telegram
         self._runs: dict[str, tuple[int, int, str]] = {}  # run id → (chat, message id, html) of its last message
         self._topic_lock = asyncio.Lock()
@@ -157,6 +159,7 @@ class TelegramBridge:
     # ---- lifecycle --------------------------------------------------------------------------------
 
     async def run(self, ready: asyncio.Event | None = None) -> None:
+        await self._check_bot()
         self.chat_id = await self._state_int("chat_id")
         self.progress.enabled = await self._state_int("progress") != 0
         async with self.office.bus.subscribe() as queue:
@@ -167,6 +170,28 @@ class TelegramBridge:
                 with contextlib.suppress(TelegramError, OfficeError):
                     await self.sync_all()  # topics follow the office's current data (e.g. after a reset)
             await asyncio.gather(self._poll(), self._events(queue))
+
+    async def _check_bot(self) -> None:
+        """Another bot than last time: its update ids are its own (the saved offset would hide every new message) and
+        it may not be in the bound group. The binding is kept only when the new bot is in that group too."""
+        bot = getattr(self.api, "bot_id", None)
+        if bot is None:
+            return
+        with contextlib.suppress(TelegramError):
+            self.bot_name = (await self.api.call("getMe") or {}).get("username")
+        row = await self.office.db.fetchone("SELECT value FROM telegram_state WHERE key = 'bot_id'")
+        known = row["value"] if row else None
+        if known == bot:
+            return
+        await self.office.db.execute("DELETE FROM telegram_state WHERE key = 'offset'")
+        chat = await self._state_int("chat_id")
+        if chat is not None:
+            try:
+                await self.api.call("getChat", chat_id=chat)
+            except TelegramError:
+                await self.office.db.execute("DELETE FROM telegram_state WHERE key = 'chat_id'")
+                log.info("telegram: the new bot is not in group %s; send /start in its group to bind", chat)
+        await self._set_state("bot_id", bot)
 
     async def _events(self, queue: asyncio.Queue[Any]) -> None:
         while True:

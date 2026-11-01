@@ -4,7 +4,9 @@ live changes and evidence artifacts."""
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -16,7 +18,7 @@ from actoroffice.domain.run import TurnResult, TurnStatus
 from actoroffice.domain.work import ProjectAccess
 from actoroffice.engine.workspace import changes, ticket_env
 from actoroffice.runtimes.base import GateDecision
-from actoroffice.services.checks import parse_coverage
+from actoroffice.services.checks import CheckResult, parse_coverage
 
 from .fakes import FakeRuntime, TurnCtx
 
@@ -272,3 +274,166 @@ async def test_watchdog_lets_many_different_edits_through_but_stops_repeats_and_
         activity = describe_call("Read", {"file_path": "src/big.py", "offset": offset, "limit": 200})
         await reads.observe({"kind": "read", "status": "running", "fields": activity.fields})
     assert reads.loop is None
+
+
+# ---- SI-5: flaky_rerun reuses the build stage's repo:test result -------------------------------------------
+
+FAKE_TEST = """\
+import json, pathlib, sys
+here = pathlib.Path(__file__).parent
+codes = json.loads((here / "codes.json").read_text())
+count = here / "count"
+n = int(count.read_text()) if count.exists() else 0
+count.write_text(str(n + 1))
+sys.exit(codes[min(n, len(codes) - 1)])
+"""
+
+
+class FakeTest:
+    """A test command outside the repo (the tree stays clean): counts its runs, exits with the codes it is given."""
+
+    def __init__(self, folder: Path) -> None:
+        self.folder = folder
+        (folder / "fake_test.py").write_text(FAKE_TEST, encoding="utf-8")
+
+    @property
+    def argv(self) -> list[str]:
+        return [sys.executable, str(self.folder / "fake_test.py")]
+
+    def will_exit(self, *codes: int) -> None:
+        (self.folder / "codes.json").write_text(json.dumps(list(codes)), encoding="utf-8")
+        (self.folder / "count").unlink(missing_ok=True)
+
+    @property
+    def runs(self) -> int:
+        count = self.folder / "count"
+        return int(count.read_text()) if count.exists() else 0
+
+
+@pytest.fixture
+def fake_test(tmp_path: Path) -> FakeTest:
+    folder = tmp_path / "fake"
+    folder.mkdir()
+    return FakeTest(folder)
+
+
+async def run_checks(office: Office, ticket_id: int, workspace: Path, check_id: str) -> tuple[CheckResult, int]:
+    ticket = await office.tickets.get(ticket_id)
+    stage = (await office.stages.template_of(ticket)).stage(ticket.stage or "")
+    assert stage is not None
+    srun = await office.stages.ensure_run(ticket)
+    [result] = await office.stages.checks.run(ticket, stage, srun, workspace=workspace, run_id=None, only=[check_id])
+    return result, srun.id
+
+
+async def finish_build(office: Office, tmp_path: Path, fake_test: FakeTest, *, build_exit: int = 0, dirty: bool = False) -> tuple[int, Path, CheckResult]:
+    """A code ticket whose build stage ran repo:test and finished; the ticket is now at the pr stage."""
+    project = await repo_project(office, tmp_path, profile={"test": fake_test.argv})
+    ticket_id = await build_ticket(office, project)
+    repo = Path(project.path)
+    if dirty:
+        (repo / "notes.txt").write_text("x", encoding="utf-8")
+    fake_test.will_exit(build_exit)
+    result, srun_id = await run_checks(office, ticket_id, repo, "repo:test")
+    if dirty:
+        (repo / "notes.txt").unlink()
+    await office.db.execute(
+        "UPDATE stage_runs SET checks_json = ?, finished_at = ?, outcome = 'completed' WHERE id = ?",
+        (json.dumps([result.model_dump()]), "2026-11-01T00:00:00Z", srun_id),
+    )
+    await office.db.execute("UPDATE tickets SET stage = 'pr' WHERE id = ?", (ticket_id,))
+    return ticket_id, repo, result
+
+
+async def test_ac2_repo_test_records_head_and_clean(office: Office, tmp_path: Path, fake_test: FakeTest) -> None:
+    project = await repo_project(office, tmp_path, profile={"test": fake_test.argv})
+    ticket_id = await build_ticket(office, project)
+    repo = Path(project.path)
+    head = git(repo, "rev-parse", "HEAD")
+    fake_test.will_exit(0)
+    passed, _ = await run_checks(office, ticket_id, repo, "repo:test")
+    assert passed.status == "passed" and passed.data == {"head": head, "clean": True}
+    fake_test.will_exit(3)
+    failed, _ = await run_checks(office, ticket_id, repo, "repo:test")
+    assert failed.status == "failed" and failed.data == {"exit": 3, "head": head, "clean": True}
+    (repo / "notes.txt").write_text("x", encoding="utf-8")
+    dirty, _ = await run_checks(office, ticket_id, repo, "repo:test")
+    assert dirty.data["head"] == head and dirty.data["clean"] is False
+
+
+async def test_ac3_flaky_rerun_reuses_build_result_when_code_unchanged(office: Office, tmp_path: Path, fake_test: FakeTest) -> None:
+    ticket_id, repo, _ = await finish_build(office, tmp_path, fake_test)
+    head = git(repo, "rev-parse", "HEAD")
+    fake_test.will_exit(0)
+    result, _ = await run_checks(office, ticket_id, repo, "flaky_rerun")
+    assert fake_test.runs == 1
+    assert result.status == "passed"
+    assert "bước Làm" in result.summary and head[:7] in result.summary
+    assert result.data == {"runs": 1, "reused_head": head}
+
+
+async def test_ac4_flaky_rerun_single_run_fails_as_flaky(office: Office, tmp_path: Path, fake_test: FakeTest) -> None:
+    ticket_id, repo, _ = await finish_build(office, tmp_path, fake_test)
+    fake_test.will_exit(1)
+    result, _ = await run_checks(office, ticket_id, repo, "flaky_rerun")
+    assert fake_test.runs == 1
+    assert result.status == "failed" and "flaky" in result.summary and "exit 0 rồi 1" in result.summary
+    assert "bước Làm" in result.summary
+
+
+async def test_ac4_flaky_rerun_takes_the_exit_of_a_failed_build_result(office: Office, tmp_path: Path, fake_test: FakeTest) -> None:
+    ticket_id, repo, build = await finish_build(office, tmp_path, fake_test, build_exit=2)
+    assert build.status == "failed"
+    fake_test.will_exit(2)
+    result, _ = await run_checks(office, ticket_id, repo, "flaky_rerun")
+    assert fake_test.runs == 1
+    assert result.status == "failed" and "test lỗi cả 2 lần (exit 2)" in result.summary
+
+
+async def test_ac5_flaky_rerun_runs_twice_when_head_moved(office: Office, tmp_path: Path, fake_test: FakeTest) -> None:
+    ticket_id, repo, _ = await finish_build(office, tmp_path, fake_test)
+    (repo / "src" / "app.py").write_text("def total(x):\n    return x + 0\n", encoding="utf-8")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "change")
+    fake_test.will_exit(0, 1)
+    result, _ = await run_checks(office, ticket_id, repo, "flaky_rerun")
+    assert fake_test.runs == 2
+    assert result.status == "failed"
+    assert result.summary == "test cho kết quả khác nhau giữa 2 lần chạy (exit 0 rồi 1): có test flaky"
+    assert result.data == {"runs": 2}
+
+
+@pytest.mark.parametrize("when", ["build", "pr"])
+async def test_ac6_flaky_rerun_runs_twice_when_tree_dirty(office: Office, tmp_path: Path, fake_test: FakeTest, when: str) -> None:
+    ticket_id, repo, build = await finish_build(office, tmp_path, fake_test, dirty=when == "build")
+    assert build.data["clean"] is (when != "build")
+    if when == "pr":
+        (repo / "notes.txt").write_text("x", encoding="utf-8")
+    fake_test.will_exit(0)
+    result, _ = await run_checks(office, ticket_id, repo, "flaky_rerun")
+    assert fake_test.runs == 2
+    assert result.status == "passed" and result.summary == "test ổn định qua 2 lần chạy"
+
+
+@pytest.mark.parametrize(
+    ("codes", "status", "summary"),
+    [
+        ((1, 1), "failed", "test lỗi cả 2 lần (exit 1)"),
+        ((0, 1), "failed", "test cho kết quả khác nhau giữa 2 lần chạy (exit 0 rồi 1): có test flaky"),
+        ((0, 0), "passed", "test ổn định qua 2 lần chạy"),
+    ],
+)
+@pytest.mark.parametrize("missing", ["no_finished_build", "skipped", "no_head"])
+async def test_ac7_flaky_rerun_runs_twice_without_usable_result(
+    office: Office, tmp_path: Path, fake_test: FakeTest, missing: str, codes: tuple[int, int], status: str, summary: str
+) -> None:
+    ticket_id, repo, build = await finish_build(office, tmp_path, fake_test)
+    if missing == "no_finished_build":
+        await office.db.execute("UPDATE stage_runs SET finished_at = NULL WHERE ticket_id = ? AND stage = 'build'", (ticket_id,))
+    else:
+        update = {"status": "skipped"} if missing == "skipped" else {"data": {}}  # a result from before SI-5 has no head
+        checks = json.dumps([build.model_copy(update=update).model_dump()])
+        await office.db.execute("UPDATE stage_runs SET checks_json = ? WHERE ticket_id = ? AND stage = 'build'", (checks, ticket_id))
+    fake_test.will_exit(*codes)
+    result, _ = await run_checks(office, ticket_id, repo, "flaky_rerun")
+    assert fake_test.runs == 2
+    assert result.status == status and result.summary == summary

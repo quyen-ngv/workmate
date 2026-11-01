@@ -272,6 +272,21 @@ class TicketService:
         self.bus.publish("ticket.updated", ticket=updated.model_dump(), previous=ticket.status.value, by=by, comment=comment)
         return updated
 
+    async def force_status(self, ref: int | str, to: TicketStatus, *, by: str, reason: str) -> Ticket:
+        """Set any status, ignoring TRANSITIONS and any run that holds the ticket. Permission and the reason check
+        belong to the caller (StageService.force_status)."""
+        ticket = await self.get(ref)
+        async with self.db.tx() as tx:
+            await tx.execute(
+                "UPDATE tickets SET status = ?, checkout_run_id = NULL, updated_at = ? WHERE id = ?", (to.value, utcnow(), ticket.id)
+            )
+            await self._system_comment(tx, ticket.id, f"⚠️ Ép đổi status {ticket.status.value} → {to.value} bởi {by}: {reason}")
+            if to == S.DONE or to == S.CANCELLED:
+                await self._unblock_dependents(tx, ticket.id)
+            updated = await self._get(tx, ticket.id)
+        self.bus.publish("ticket.updated", ticket=updated.model_dump(), previous=ticket.status.value, by=by, comment=reason)
+        return updated
+
     async def checkout(self, ref: int | str, actor_id: str, run_id: str, *, ignore_blockers: bool = False) -> Ticket:
         """Atomically take ownership for one run. A 409 means someone else owns it: never retry.
 

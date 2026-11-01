@@ -140,6 +140,7 @@ code, pre { font-family: var(--mono); font-size: var(--fs-sm); }
 .pane-title .title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip { font-size: var(--fs-xs); padding: 1px 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
 .chip.needs_you { color: var(--needs); border-color: var(--needs); background: var(--needs-bg); }
+.chip.waived { color: var(--needs); border-color: var(--needs); background: var(--needs-bg); white-space: normal; }
 .chip.working { color: var(--ok); border-color: var(--ok); background: var(--ok-bg); }
 .chip.failed, .chip.blocked { color: var(--danger); border-color: var(--danger); background: var(--danger-bg); }
 .stepper { display: flex; gap: 2px; font-size: var(--fs-xs); color: var(--faint); flex-wrap: wrap; }

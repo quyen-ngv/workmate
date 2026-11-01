@@ -237,6 +237,8 @@ class Office:
             return await self._answer_access(item, response, by=by)
         if item.kind == InteractionKind.APPROVE_STAGE:
             return await self.stages.answer_gate(item, response, by=by)
+        if item.kind == InteractionKind.WAIVE_CHECK:
+            return await self.stages.answer_waive(item, response, by=by)
         if item.kind == InteractionKind.ENV_ACCESS:
             return await self.access.answer(item, response, by=by)
         if item.kind == InteractionKind.QUESTION and item.payload.get("roles") and by != LOCAL_OWNER_ID:

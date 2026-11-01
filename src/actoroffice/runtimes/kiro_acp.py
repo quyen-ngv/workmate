@@ -54,6 +54,15 @@ class AcpError(Exception):
         self.code = code
 
 
+def acp_mcp_entry(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    """A team connector in ACP's session/new format (env and headers are lists of name/value pairs)."""
+    if cfg.get("type") in ("http", "sse"):
+        headers = [{"name": k, "value": str(v)} for k, v in (cfg.get("headers") or {}).items()]
+        return {"type": cfg["type"], "name": name, "url": cfg["url"], "headers": headers}
+    env = [{"name": k, "value": str(v)} for k, v in (cfg.get("env") or {}).items()]
+    return {"name": name, "command": cfg["command"], "args": list(cfg.get("args") or []), "env": env}
+
+
 def find_kiro_cli() -> str | None:
     found = shutil.which("kiro-cli")
     if found:
@@ -271,6 +280,7 @@ class _Turn:
         if self.tools is not None:
             port = await self.tools.start()
             mcp.append(self.tools.mcp_server_entry(port))
+        mcp += [acp_mcp_entry(name, cfg) for name, cfg in spec.mcp_servers.items()]
         common = {"cwd": str(spec.cwd), "mcpServers": mcp, "additionalDirectories": [str(d) for d in spec.add_dirs]}
         fresh = True
         if spec.resume_session_id and can_load:

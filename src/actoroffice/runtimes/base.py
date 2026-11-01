@@ -51,6 +51,9 @@ class TurnSpec:
     hook_timeout_s: float = 180.0
     env: dict[str, str] = field(default_factory=dict)  # extra environment for the agent process and its tools
     show_thinking: bool = True  # stream the model's (summarized) thinking as "thinking" events
+    # Extra MCP servers (a team's connectors): name → {"type": "http", "url", "headers"} or
+    # {"type": "stdio", "command", "args", "env"}. Their tools go through the same gate ("external" rule).
+    mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

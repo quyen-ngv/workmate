@@ -18,6 +18,7 @@ from actoroffice.tools.chat_tools import CHAT_TOOLS
 from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
 from actoroffice.tools.office_tools import OFFICE_TOOLS
 from actoroffice.tools.registry import BoundTool, ToolCtx
+from actoroffice.tools.atlassian_tools import ATLASSIAN_TOOLS
 from actoroffice.tools.stage_tools import STAGE_TOOLS
 from actoroffice.tools.work_tools import CHAT_WORK_TOOLS, WORK_TOOLS
 
@@ -60,6 +61,9 @@ class Executor:
             root = await office.tickets.root_of(ticket.id)
             ws = await office.workspaces.realize(ticket, project, position, root)
             stage_run = await office.stages.ensure_run(ticket) if ticket.stage else None
+            read_dirs = list(ws.read_dirs)
+            if stage_run is not None:
+                read_dirs += await self._reference_dirs(ticket, project)
             session_key = ticket_session_key(actor.id, ticket.id)
             if stage_run is not None:
                 # One session per stage attempt: a new stage (or a retry) starts fresh from the dossier.
@@ -75,13 +79,15 @@ class Executor:
                 ws.path,
                 ticket_id=ticket.id,
                 ticket_key=ticket.key,
-                read_dirs=ws.read_dirs,
+                read_dirs=read_dirs,
                 seen_change_id=changes[-1].id if changes else 0,
                 seen_steer_id=await office.tickets.last_comment_id(ticket.id, "steer"),
             )
             new_comments = await self._new_comments(actor.id, actor.name, ticket.id, run_id)
             answered = await self._answered(wake)
+            office.gates[run_id] = gate
             tools = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS
+            mcp_servers: dict[str, Any] = {}
             if stage_run is not None:
                 compiled = await office.rules.compile(ticket=ticket, project=project, stage=stage_run.stage)
                 gate.policies = compiled.policies
@@ -93,11 +99,12 @@ class Executor:
                     guidelines=compiled.guideline_lines(),
                 )
                 system, prompt = pack.system, pack.turn
-                tools = tools + STAGE_TOOLS
+                tools = tools + STAGE_TOOLS + ATLASSIAN_TOOLS
                 model = office.settings.ai_model or actor.model or position.model or office.settings.default_model
                 if ticket.team_id:
                     team = await office.teams.get_team(ticket.team_id)
                     model = team.settings.model or model
+                    mcp_servers = dict(team.settings.mcp_servers)
             else:
                 prompt = context.ticket_prompt(
                     ticket,
@@ -130,10 +137,11 @@ class Executor:
                 internal_tools=[
                     BoundTool(t, ToolCtx(office, actor, position, run_id, ticket_id=ticket.id, workspace=ws.path)) for t in tools
                 ],
-                add_dirs=ws.read_dirs,
+                add_dirs=read_dirs,
                 max_turns=position.policy.max_turns,
                 hook_timeout_s=office.settings.approval_wait_s + 60,
                 env=self._env(actor, position),
+                mcp_servers=mcp_servers,
             )
             await office.runs.event(
                 run_id, "prompt", {"text": prompt, "resume": bool(resume), "cwd": str(ws.path), "stage": ticket.stage}
@@ -163,6 +171,7 @@ class Executor:
             error = f"{type(exc).__name__}: {exc}"
             await self._fallback(ticket, run_id, "Lượt chạy bị dừng đột ngột; xem nhật ký ở mục Hoạt động.")
         finally:
+            office.gates.pop(run_id, None)
             await office.tickets.release(ticket.id, run_id)
             await office.runs.finish(
                 run_id,
@@ -183,6 +192,20 @@ class Executor:
             if gate is not None and status != RunStatus.PARKED:
                 await self._drop_seen_changes(actor.id, ticket.id, gate.seen_change_id)
         return status
+
+    async def _ran_before(self, stage_run_id: int, wake: WakeRequest) -> bool:
+        row = await self.office.db.fetchone("SELECT COUNT(*) AS n FROM runs WHERE stage_run_id = ?", (stage_run_id,))
+        return bool(row and int(row["n"]) > 1)  # this run is already counted
+
+    async def _reference_dirs(self, ticket: Ticket, project: Any) -> list[Path]:
+        """Reference repositories of the ticket's team are readable in every run (callers, contracts, events)."""
+        dirs = []
+        for ref in await self.office.projects.list():
+            if ref.kind == "reference" and ref.path and (ref.team_id in (None, ticket.team_id)) and (project is None or ref.id != project.id):
+                path = Path(ref.path)
+                if path.is_dir():
+                    dirs.append(path.resolve())
+        return dirs
 
     async def _stage_prompt(
         self,
@@ -208,6 +231,9 @@ class Executor:
             people = await office.teams.members(team.id)
         dossier = await office.tickets.get_document(ticket.id, "dossier")
         position = await office.org.get_position(actor.position_id)
+        known = await office.stages.known(ticket, actor)
+        if stage.id == "understand" and stage_run.attempt == 1 and not resumed and not await self._ran_before(stage_run.id, wake):
+            await office.stages.post_known(ticket, known)
         return prompt_pack.build(
             actor=actor,
             ticket=ticket,
@@ -220,7 +246,8 @@ class Executor:
             project_line=context.project_line(project, cwd),
             dossier=dossier.body if dossier else "",
             guidelines=guidelines,
-            memories=await office.memory.context_for(actor, f"{ticket.title} {ticket.description}"),
+            memories=known["memories"],
+            similar=known["similar"],
             skills=office.skills.for_actor(actor, position),
             wake=wake,
             resumed=resumed,

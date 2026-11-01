@@ -60,6 +60,32 @@ class ProjectService:
         self.bus.publish("project.changed", project=updated.model_dump())
         return updated
 
+    async def configure(
+        self,
+        project_id: str,
+        *,
+        team_id: str | None = None,
+        kind: str | None = None,
+        repo_url: str | None = None,
+        profile: dict | None = None,
+        test_command: str | None = None,
+    ) -> Project:
+        """Team copilot fields: which team owns the project, code or reference repo, its build/test profile."""
+        current = await self.get(project_id)
+        if kind is not None and kind not in ("code", "reference", "automation"):
+            raise ProjectError("kind: code | reference | automation")
+        updates = {k: v for k, v in {"team_id": team_id, "kind": kind, "repo_url": repo_url, "profile": profile, "test_command": test_command}.items() if v is not None}
+        updated = current.model_copy(update=updates)
+        await self.db.execute("UPDATE projects SET config_json = ? WHERE id = ?", (updated.model_dump_json(), project_id))
+        self.bus.publish("project.changed", project=updated.model_dump())
+        return updated
+
+    async def find(self, ref: str) -> Project | None:
+        for project in await self.list():
+            if ref in (project.id, project.name):
+                return project
+        return None
+
     async def get(self, project_id: str) -> Project:
         row = await self.db.fetchone("SELECT config_json FROM projects WHERE id = ?", (project_id,))
         if not row:

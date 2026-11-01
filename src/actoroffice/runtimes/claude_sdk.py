@@ -112,7 +112,7 @@ class ClaudeSdkRuntime:
             if spec.coding_preset
             else spec.system_prompt
         )
-        mcp_servers: dict[str, Any] = {}
+        mcp_servers: dict[str, Any] = {name: dict(cfg) for name, cfg in spec.mcp_servers.items() if name != INTERNAL_SERVER}
         if spec.internal_tools:
             mcp_servers[INTERNAL_SERVER] = create_sdk_mcp_server(
                 name=INTERNAL_SERVER, version="0.1.0", tools=[_sdk_tool(t) for t in spec.internal_tools]

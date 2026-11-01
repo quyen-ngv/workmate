@@ -113,8 +113,9 @@ class PolicyEngine:
         # protected_dirs: our own data dir (db, config, secrets) — never reachable by actors.
         self.protected = [p.resolve() for p in [*_home_sensitive(), *(protected_dirs or [])]]
 
-    def decide(self, tool: str, args: dict[str, Any], ctx: ToolCallContext) -> Verdict:
-        verdict = self._decide(tool, args, ctx)
+    def decide(self, tool: str, args: dict[str, Any], ctx: ToolCallContext, *, external: bool = False) -> Verdict:
+        """external: one of our own tools that acts outside the machine (Jira comment, pull request…)."""
+        verdict = self._external(tool, ctx) if external else self._decide(tool, args, ctx)
         if verdict.decision != Decision.ASK:
             return verdict  # hard denies, protected paths and position denies are never overridden
         target = target_of(tool, args)

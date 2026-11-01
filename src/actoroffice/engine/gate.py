@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Our own tools that act outside the machine: they follow the position's "external" rule (usually ask).
+EXTERNAL_OFFICE_TOOLS = {"jira_comment", "pr_create", "pr_reply", "repo_fetch"}
+
 
 @dataclass
 class OfficeGate:
@@ -87,7 +90,7 @@ class OfficeGate:
             allow_rules=actor.allow_rules,
             trust_all=actor.permission_mode == PermissionMode.TRUST_ALL,
         )
-        verdict = office.policy.decide(tool, args, ctx)
+        verdict = office.policy.decide(tool, args, ctx, external=tool.removeprefix("mcp__office__") in EXTERNAL_OFFICE_TOOLS)
         target = target_of(tool, args) or tool
 
         if verdict.decision == Decision.ALLOW:

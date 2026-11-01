@@ -147,6 +147,36 @@ async def cmd_rules(office: Office, args: argparse.Namespace) -> None:
             out(f"{rule.id:6} {rule.status.value:8} {rule.kind.value:9} {rule.scope:24} {rule.stage:10} {rule.title}")
 
 
+async def cmd_bitbucket(office: Office, args: argparse.Namespace) -> None:
+    from actoroffice.services.atlassian import BitbucketCloud, save_bitbucket
+
+    if not (args.email and args.token and args.workspace):
+        raise OfficeError("Cách dùng: actoroffice bitbucket <email> <api token> <workspace>")
+    client = BitbucketCloud(args.email, args.token, args.workspace)
+    try:
+        from actoroffice.services.atlassian import _call
+
+        await _call(client.http, "GET", f"/workspaces/{args.workspace}")
+    finally:
+        await client.close()
+    save_bitbucket(office.settings.data_dir, args.email, args.token, args.workspace)
+    out(f"Đã lưu Bitbucket Cloud (workspace {args.workspace}).")
+
+
+async def cmd_project(office: Office, args: argparse.Namespace) -> None:
+    import json as _json
+
+    project = await office.projects.find(args.name)
+    if project is None:
+        raise OfficeError(f"Không có project '{args.name}'")
+    team = await office.teams.get_team(args.team) if args.team else None
+    profile = _json.loads(args.profile) if args.profile else None
+    project = await office.projects.configure(
+        project.id, team_id=team.id if team else None, kind=args.kind, repo_url=args.repo_url, profile=profile
+    )
+    out(f"{project.name}: team={project.team_id or '-'} kind={project.kind} repo={project.repo_url or '-'} profile={list(project.profile) or '-'}")
+
+
 # ---- environment ------------------------------------------------------------------------------------------
 
 
@@ -295,6 +325,21 @@ def register(sub: Any) -> None:
     p.add_argument("--spec", help='JSON, e.g. {"cmd": ["mvn", "-q", "verify"]} or {"deny_patterns": ["--force"]}')
     p.add_argument("--only-global", action="store_true")
     p.set_defaults(fn=cmd_rules)
+
+    p = sub.add_parser("bitbucket", help="connect Bitbucket Cloud: bitbucket <email> <api token> <workspace>")
+    p.add_argument("email", nargs="?")
+    p.add_argument("token", nargs="?")
+    p.add_argument("workspace", nargs="?")
+    p.set_defaults(fn=cmd_bitbucket)
+
+    p = sub.add_parser("project", help='project set <name> --team T --kind code|reference --repo-url ws/slug --profile '{"test": ["mvn","-q","test"]}'')
+    p.add_argument("action", choices=["set"])
+    p.add_argument("name")
+    p.add_argument("--team")
+    p.add_argument("--kind", choices=["code", "reference", "automation"])
+    p.add_argument("--repo-url")
+    p.add_argument("--profile", help="JSON: setup/build/test/lint/run argv lists, test_glob, os overrides")
+    p.set_defaults(fn=cmd_project)
 
     sub.add_parser("doctor", help="check what this machine can run (OS, WSL, git, bash, docker, kiro, claude)").set_defaults(fn=cmd_doctor)
 

@@ -49,6 +49,8 @@ class TeamSettings(BaseModel):
     model: str | None = None  # runtime for this team's tickets: "sonnet", "opus", "kiro", "kiro:<id>"
     jira_jql: str | None = None  # extra JQL for the Jira mirror (default: project = KEY AND labels = ai)
     default_template: str = "code"
+    # Extra MCP connectors for this team's tickets (see TurnSpec.mcp_servers), e.g. the Atlassian Rovo MCP server.
+    mcp_servers: dict[str, dict] = Field(default_factory=dict)
 
 
 class Team(BaseModel):

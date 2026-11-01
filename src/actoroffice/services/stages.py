@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -111,6 +112,38 @@ class StageService:
             await office.db.execute("UPDATE tickets SET origin_conversation_id = ? WHERE id = ?", (room.id, ticket.id))
         return room.id
 
+    async def known(self, ticket: Ticket, actor: Any) -> dict[str, Any]:
+        """What the team already knows that bears on this ticket: memories and similar earlier tickets."""
+        office = self.office
+        query = f"{ticket.title} {ticket.description[:400]}"
+        memories = await office.memory.context_for(actor, query)
+        similar: list[dict[str, Any]] = []
+        seen: set[str] = {ticket.key}
+        for hit in await office.memory.history(actor, query, limit=20):
+            key = hit.get("ticket_key")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            with contextlib.suppress(NotFound):
+                other = await office.tickets.get(key)
+                similar.append({"key": other.key, "title": other.title, "status": other.status.value, "snip": hit.get("snip", "")})
+            if len(similar) >= 3:
+                break
+        return {"memories": memories, "similar": similar}
+
+    async def post_known(self, ticket: Ticket, known: dict[str, Any]) -> None:
+        """Show people what the AI starts from, so a wrong assumption is corrected before any question is asked."""
+        memories, similar = known["memories"], known["similar"]
+        if not memories and not similar:
+            return
+        lines = ["📚 Mình đã biết (sai thì sửa giúp mình ngay ở đây):"]
+        lines += [f"- {m.content}" for m in memories[:8]]
+        if similar:
+            lines.append("Việc tương tự trước đây:")
+            lines += [f"- {s['key']} · {s['title']} ({s['status']})" for s in similar]
+        conv = ticket.origin_conversation_id or await self.conversation_of(ticket)
+        await self.office.chat.post_system(conv, "\n".join(lines))
+
     def _route(self, tpl: StageTemplate) -> str:
         return " → ".join(stage_title(s.id) + (" ✋" if s.gate else "") for s in tpl.stages)
 
@@ -145,8 +178,21 @@ class StageService:
         current = await self.current_run(ticket)
         if current is not None and current.finished_at is None:
             return current
+        if current is not None and current.outcome == StageOutcome.COMPLETED.value and await self._waits_outside(ticket):
+            # Done and waiting for an outside gate (PR review/merge, automation approval): follow-up work such as
+            # review fixes continues in the same attempt and session.
+            return current
         assert ticket.stage
         return await self._open_run(ticket.id, ticket.stage)
+
+    async def _waits_outside(self, ticket: Ticket) -> bool:
+        try:
+            stage = await self.stage_def(ticket)
+        except OfficeError:
+            return False
+        if not stage.gate:
+            return False
+        return (await self.office.teams.gate_policy(ticket, stage.gate)).external
 
     async def runs(self, ticket_id: int) -> list[StageRun]:
         rows = await self.office.db.fetchall("SELECT * FROM stage_runs WHERE ticket_id = ? ORDER BY id", (ticket_id,))

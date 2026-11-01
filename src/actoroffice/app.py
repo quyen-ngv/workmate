@@ -33,7 +33,9 @@ from actoroffice.security.redact import Redactor
 from actoroffice.services.automations import AutomationService
 from actoroffice.services.chat import ChatService
 from actoroffice.services.interactions import InteractionService
+from actoroffice.services.atlassian import Atlassian
 from actoroffice.services.jira import JiraMirror
+from actoroffice.services.prwatch import PullRequestWatcher
 from actoroffice.services.memory import MemoryService
 from actoroffice.services.merges import MergeService
 from actoroffice.services.notices import ChatNotifier
@@ -85,6 +87,9 @@ class Office:
         self.stages = StageService(self)
         self.jira = JiraMirror(self)
         self.rules = RuleService(self, settings.data_dir / "rules")
+        self.atlassian = Atlassian(settings.data_dir)
+        self.prs = PullRequestWatcher(self)
+        self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),
             KiroAcpRuntime(cli_path=settings.kiro_cli_path, engine=settings.kiro_engine),
@@ -114,6 +119,7 @@ class Office:
             self._tasks.append(asyncio.create_task(run_timers(self), name="timers"))
             if self.jira.ready():
                 self._tasks.append(asyncio.create_task(self.jira.run_forever(), name="jira"))
+            self._tasks.append(asyncio.create_task(self.prs.run_forever(), name="pull-requests"))
 
     async def start_notifier(self) -> None:
         ready = asyncio.Event()
@@ -179,6 +185,7 @@ class Office:
         if self.telegram is not None:
             await self.telegram.api.close()
         await self.jira.close()
+        await self.atlassian.close()
         await self.db.close()
 
     async def answer(self, interaction_id: str, response: dict[str, Any], *, by: str = "user") -> Interaction:

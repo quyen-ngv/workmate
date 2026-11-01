@@ -68,9 +68,10 @@ error say what you found and what you will do next. Never write secrets.
 STAGE_INSTRUCTIONS: dict[str, str] = {
     "understand": """\
 Goal: an exact, testable requirement the BA can approve.
-- Read the ticket and its Jira description. Search earlier tickets and memories for the same area, and the code
-  for what exists today (entry points, rules already implemented, data). Note contradictions between the request,
-  the docs and the code.
+- Read the ticket and its Jira issue (jira_issue, related issues with jira_search). Search Confluence
+  (wiki_search / wiki_page), earlier tickets and memories for the same area, and the code for what exists today
+  (entry points, rules already implemented, data). Other services' code: repos_list / repo_fetch. Note
+  contradictions between the request, the docs and the code.
 - Ask the right roles about real gaps (business rules → ba, feasibility → dev, edge cases/test data → qe).
 - Write the document `requirements` (doc_put): user story, scope in/out, business rules, assumptions, and
   acceptance criteria numbered AC-1, AC-2… each in Given / When / Then form (observable, testable).
@@ -106,11 +107,12 @@ Goal: working, tested changes that follow the approved plan.
 - stage_complete runs the checks (tests changed, build, test, lint…). Fix failures and call it again.""",
     "pr": """\
 Goal: a pull request people can review and merge.
-- Push the ticket branch and open a pull request with the PR tool when you have one; otherwise ask a dev
-  (ask_human, roles [dev]) to push and open it, and give them the branch and the description.
-- PR description: summary, AC → test map, check results, how to test, assumptions.
-- Link it with pr_link(url), then stage_complete: the stage waits for a person to merge.
-- When woken with review comments, fix them on the same branch, reply, and keep the dossier current.""",
+- Commit everything, then open the pull request with pr_create (it pushes the branch; a person approves). If
+  pr_create is not available, ask a dev (ask_human, roles [dev]) to push and open it, then link it with pr_link.
+- PR description: summary, AC → test map, check results, how to test, assumptions and known limits.
+- stage_complete: the stage waits for a person to merge.
+- When woken with review comments ("Review mới trên PR"), read them with pr_comments, fix them on the same
+  branch, commit, reply to each comment with pr_reply, and keep the dossier current. Then end your turn.""",
     "produce": """\
 Goal: the deliverable the requirements describe.
 - Write the `report` (research) or `document` (doc) the approved requirements ask for. Cite every source.
@@ -147,6 +149,7 @@ def build(
     guidelines: list[str],
     memories: list[Memory],
     skills: list[Skill],
+    similar: list[dict[str, Any]] | None = None,
     wake: WakeRequest,
     resumed: bool,
     answered: list[Interaction],
@@ -167,6 +170,11 @@ def build(
     known = []
     if memories:
         known.append("\n".join(f"- [{m.kind.value}, {(m.updated_at or m.created_at)[:10]}] {m.content}" for m in memories))
+    if similar:
+        known.append(
+            "Similar earlier tickets (read their dossier with doc_get ticket=<key> key=dossier):\n"
+            + "\n".join(f"- {s['key']} · {s['title']} ({s['status']})" for s in similar)
+        )
     if skills:
         known.append("Skills (read with skill_read before using):\n" + "\n".join(f"- {s.ref.name}: {s.description}" for s in skills[:30]))
     parts["known"] = "# What the team already knows\n" + "\n\n".join(known) if known else ""

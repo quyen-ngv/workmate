@@ -540,7 +540,8 @@ def register_setup(app: FastAPI, office: Office) -> None:
             "permission:project", "changed", target=project.name,
             detail={"from": {"mode": before.permission_mode, "rules": before.allow_rules}, "to": body.model_dump(exclude_none=True)},
         )
-        return project.model_dump()
+        # pending cards the new permission allows are approved by themselves (a narrower one approves nothing)
+        return {**project.model_dump(), "auto_approved": await office.permissions_recheck(project_id=project.id)}
 
     @app.post("/api/setup/ai")
     async def setup_ai(body: AiBody) -> dict[str, Any]:

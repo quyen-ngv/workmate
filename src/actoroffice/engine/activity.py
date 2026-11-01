@@ -119,7 +119,8 @@ class ActivityTracker:
         activity = describe_call(name, args)
         if activity is None:
             return None
-        activity.status = "running"
+        # Without a call id no result event can be matched to it: show it as done, not as running forever.
+        activity.status = "running" if call_id else "ok"
         activity.call_id = str(call_id) if call_id else None
         if call_id:
             self.calls.setdefault(run_id, {})[str(call_id)] = _Call(name, args, time.monotonic(), activity)

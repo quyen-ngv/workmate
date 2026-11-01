@@ -19,6 +19,7 @@ from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
 from actoroffice.tools.office_tools import OFFICE_TOOLS
 from actoroffice.tools.registry import BoundTool, ToolCtx
 from actoroffice.tools.atlassian_tools import ATLASSIAN_TOOLS
+from actoroffice.tools.infra_tools import INFRA_TOOLS
 from actoroffice.tools.stage_tools import STAGE_TOOLS
 from actoroffice.tools.work_tools import CHAT_WORK_TOOLS, WORK_TOOLS
 
@@ -104,7 +105,8 @@ class Executor:
                     guidelines=compiled.guideline_lines(),
                 )
                 system, prompt = pack.system, pack.turn
-                tools = tools + STAGE_TOOLS + ATLASSIAN_TOOLS
+                replaced = {t.name for t in INFRA_TOOLS}
+                tools = [t for t in tools if t.name not in replaced] + STAGE_TOOLS + ATLASSIAN_TOOLS + INFRA_TOOLS
                 model = office.settings.ai_model or actor.model or position.model or office.settings.default_model
                 if ticket.team_id:
                     team = await office.teams.get_team(ticket.team_id)

@@ -36,7 +36,9 @@ from actoroffice.services.interactions import InteractionService
 from actoroffice.services.access import AccessService
 from actoroffice.services.atlassian import Atlassian
 from actoroffice.services.jira import JiraMirror
+from actoroffice.services.infra import InfraService
 from actoroffice.services.knowledge import KnowledgeService
+from actoroffice.services.logs import LogService
 from actoroffice.services.prwatch import PullRequestWatcher
 from actoroffice.services.review import ReviewService
 from actoroffice.services.memory import MemoryService
@@ -95,6 +97,8 @@ class Office:
         self.review = ReviewService(self)
         self.access = AccessService(self)
         self.knowledge = KnowledgeService(self)
+        self.infra = InfraService(self)
+        self.logs = LogService(self)
         self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),

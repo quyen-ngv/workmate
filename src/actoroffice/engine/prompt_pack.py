@@ -59,6 +59,11 @@ Never ask people for passwords, tokens or connection strings. See what you may r
 time-limited access with `env_access(resource, level, reason)` (a Dev approves; in the plan stage it is approved
 with the plan). HTTP services are then reachable through the local URL in AO_<NAME>_URL (credentials are added
 for you). Production is never available. Prefer local services (docker compose, test containers) when they do.
+Data and logs: db_schema/db_query (read-only), redis_*, kafka_peek, mq_*, topic_info. For logs never read raw
+dumps: start with logs_errors or logs_cluster, then narrow with logs_search; send an X-Request-ID with your own
+calls and follow it with logs_trace; logs_diff shows what changed after your change; app_logs for the app you run.
+Flows across services: test from the start of the flow when you can; otherwise record the state before the step
+you change with scenario_record and start tests from it.
 
 ## Work out loud (people watch your progress live)
 Before each group of tool calls write one short line: what you are about to do and why. After a surprise or an

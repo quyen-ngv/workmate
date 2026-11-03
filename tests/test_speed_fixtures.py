@@ -155,21 +155,23 @@ def test_ac4_copied_repo_matches_a_fresh_repo_and_is_independent(tmp_path) -> No
     other = seed.copy_repo(tmp_path / "other", FILES)
     template = seed.template_repo(FILES)
 
+    tree, log = seed.git(fresh, "ls-tree", "-r", "HEAD"), seed.git(fresh, "log", "--format=%T %s %an <%ae>")
+    assert tree and len(log.splitlines()) == 1
     for repo in (copy, other):
-        assert seed.git(repo, "branch", "--show-current") == "main"
-        assert seed.git(repo, "ls-tree", "-r", "HEAD") == seed.git(fresh, "ls-tree", "-r", "HEAD")
-        assert seed.git(repo, "log", "--format=%T %s %an <%ae>") == seed.git(fresh, "log", "--format=%T %s %an <%ae>")
-        assert seed.git(repo, "status", "--porcelain") == ""
+        assert seed.git(repo, "status", "--porcelain", "--branch") == "## main"  # on main, nothing changed or untracked
+        assert seed.git(repo, "ls-tree", "-r", "HEAD") == tree
+        assert seed.git(repo, "log", "--format=%T %s %an <%ae>") == log
         assert (repo / "src" / "app.py").read_text(encoding="utf-8") == FILES["src/app.py"]
 
-    head = seed.git(template, "rev-parse", "HEAD")
+    head = seed.git(other, "rev-parse", "HEAD")
     (copy / "src" / "app.py").write_text("def total(x):\n    return 2 * x\n", encoding="utf-8")
     seed.git(copy, "add", "-A")
     seed.git(copy, *seed.IDENT, "commit", "-q", "-m", "change")
-    seed.git(copy, "switch", "-q", "-c", "t/x")
-    assert seed.git(template, "rev-parse", "HEAD") == head == seed.git(other, "rev-parse", "HEAD")
-    assert seed.git(template, "status", "--porcelain") == "" and seed.git(template, "branch", "--format=%(refname:short)") == "main"
-    assert (template / "src" / "app.py").read_text(encoding="utf-8") == FILES["src/app.py"]
+    assert seed.git(copy, "rev-parse", "HEAD") != head
+    for repo in (template, other):
+        assert seed.git(repo, "rev-parse", "HEAD") == head
+        assert seed.git(repo, "status", "--porcelain", "--branch") == "## main"
+        assert (repo / "src" / "app.py").read_text(encoding="utf-8") == FILES["src/app.py"]
 
 
 def test_ac4_an_empty_repo_copy_has_one_empty_commit(tmp_path) -> None:

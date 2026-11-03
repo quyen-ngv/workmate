@@ -156,7 +156,7 @@ def _quick() -> StageTemplate:
         name="quick",
         stages=[
             StageDef(id="scope", outputs=["plan"], checks=["outputs", "plan_ac"], gate="plan"),
-            StageDef(id="build", checks=["no_secrets", "log_lint", "repo:build", "repo:test", "repo:lint"]),
+            StageDef(id="build", checks=["no_secrets", "log_lint", "repo:build", "repo:test", "repo:lint", "review_clean"]),
             StageDef(id="pr", checks=["pr_linked"], gate="merge"),
         ],
     )

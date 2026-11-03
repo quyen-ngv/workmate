@@ -9,8 +9,12 @@ import pytest
 
 from actoroffice.app import Office
 from actoroffice.config import Settings
-from actoroffice.domain.run import TurnResult, TurnStatus
-from actoroffice.domain.work import InteractionKind, TicketStatus
+from actoroffice.domain.org import Actor
+from actoroffice.domain.run import TurnResult, TurnStatus, WakeRequest, WakeSource
+from actoroffice.domain.stage import StageRun, default_templates
+from actoroffice.domain.work import InteractionKind, Ticket, TicketStatus
+from actoroffice.engine import prompt_pack
+from actoroffice.engine.prompt_pack import REVIEW_REPLY
 
 from .fakes import FakeRuntime, TurnCtx
 
@@ -34,7 +38,7 @@ def runtime() -> FakeRuntime:
 
 @pytest.fixture
 async def office(tmp_path, runtime) -> AsyncIterator[Office]:
-    o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05), runtime=runtime)
+    o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05, ai_review=False), runtime=runtime)
     await o.open()
     await o.start_notifier()
     yield o
@@ -89,12 +93,53 @@ async def test_small_change_switches_to_quick_and_needs_one_approval(office: Off
     await office.answer(gate.id, {"approved": True})
     await office.scheduler.wait_idle(timeout=30)
     assert "No handoff document and no plan_steps needed" in prompts[2]
+    assert REVIEW_REPLY in prompts[2]
+    [build_run] = [r for r in await office.stages.runs(ticket.id) if r.stage == "build"]
+    review = next(c for c in build_run.checks if c["id"] == "review_clean")
+    assert review["status"] == "skipped"  # ai_review off: the flow passes as before
 
     t = await office.tickets.get(ticket.id)
     assert t.stage == "pr" and t.pr_url.endswith("/pull/7")
     assert await gates(office, ticket.id) == []  # no requirement, knowledge or other gates on the way
     await office.stages.external_passed(ticket.id, "merge", by="user", note="merged")
     assert (await office.tickets.get(ticket.id)).status == TicketStatus.DONE  # no close/KB stage
+
+
+def test_ac1_quick_build_ends_with_review_clean() -> None:
+    build = default_templates()["quick"].stage("build")
+    assert build is not None
+    assert build.checks[-2:] == ["repo:lint", "review_clean"]
+
+
+def test_ac2_quick_build_guide_explains_review_reply() -> None:
+    template = default_templates()["quick"]
+    prompts = {}
+    for stage_id in ("scope", "build", "pr"):
+        stage = template.stage(stage_id)
+        assert stage is not None
+        prompts[stage_id] = prompt_pack.build(
+            actor=Actor(id="copilot", position_id="ai-engineer", name="Copilot"),
+            ticket=Ticket(id=1, key="SI-11", title="t"),
+            template=template,
+            stage=stage,
+            stage_run=StageRun(id=1, ticket_id=1, stage=stage_id, attempt=1, started_at=""),
+            language="Vietnamese",
+            team_name=None,
+            people=[],
+            project_line="",
+            dossier="",
+            guidelines=[],
+            memories=[],
+            skills=[],
+            wake=WakeRequest(id=1, actor_id="copilot", source=WakeSource.ASSIGNMENT),
+            resumed=False,
+            answered=[],
+            new_comments=[],
+            changes=[],
+            office_runs_tests=True,
+        ).parts["stage"]
+    assert REVIEW_REPLY in prompts["build"]
+    assert REVIEW_REPLY not in prompts["scope"] and REVIEW_REPLY not in prompts["pr"]
 
 
 async def test_a_short_plan_still_needs_an_acceptance_criterion(office: Office, runtime: FakeRuntime) -> None:

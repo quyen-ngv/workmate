@@ -182,12 +182,14 @@ class Scheduler:
                 raise TimeoutError("scheduler did not become idle")
 
     async def stop_run(self, run_id: str) -> None:
+        self.office.executor.stop(run_id)
         await self.office.runtime.cancel(run_id)
 
     async def shutdown(self) -> None:
         self._stopping = True
         self.kick()
         for run_id in list(self._running):
+            self.office.executor.stop(run_id)
             await self.office.runtime.cancel(run_id)
         if self._running:
             await asyncio.wait(list(self._running.values()), timeout=30)

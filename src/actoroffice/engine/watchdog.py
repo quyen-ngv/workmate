@@ -4,9 +4,10 @@ developer instead.
 
 - slow:     one command has been running longer than `slow_command_s`
 - stalled:  no event at all for `stall_after_s`
-- looping:  the same failing command 3 times, the same part of a file read 4 times, the same edit made twice or
-            an edit undone, or 10 edits of one file with no command (test/build run) in between. Several different
-            edits of one file are normal work, not a loop.
+- looping:  the same failing command 3 times, the same part of a file read 4 times, the same edit made twice
+            (so an edit redone after it was undone), or 2 undone edits / 10 edits of one file with no command
+            (test/build run) in between. Several different edits of one file are normal work, and so is
+            undoing one misplaced edit once: neither is a loop.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 FAILS_FOR_LOOP = 3
 READS_FOR_LOOP = 4
 EDITS_FOR_LOOP = 10
+UNDOS_FOR_LOOP = 2
 
 
 def normalize_command(cmd: str) -> str:
@@ -43,6 +45,7 @@ class Watchdog:
     reads: Counter[str] = field(default_factory=Counter)
     edits_since_command: Counter[str] = field(default_factory=Counter)
     edit_sigs: dict[str, set[str]] = field(default_factory=dict)  # path → edits made since the last command
+    undos: Counter[str] = field(default_factory=Counter)  # path → edits undone since the last command
     running: dict[str, tuple[str, float]] = field(default_factory=dict)  # call id → (command, started)
     reported: set[str] = field(default_factory=set)
     loop: str | None = None  # set when a loop is detected; the gate turns it into a stop-and-ask
@@ -72,6 +75,7 @@ class Watchdog:
             self.running.pop(str(call), None)
             self.edits_since_command.clear()
             self.edit_sigs.clear()
+            self.undos.clear()
             if status == "error":
                 self.failures[command] += 1
                 if self.failures[command] >= FAILS_FOR_LOOP:
@@ -92,7 +96,9 @@ class Watchdog:
             if sig and sig in seen:
                 await self._loop(f"lặp lại đúng một chỗ sửa trong `{path[-80:]}`")
             elif undo and undo in seen and undo != sig:
-                await self._loop(f"sửa rồi lại hoàn tác trong `{path[-80:]}`")
+                self.undos[path] += 1  # one undo fixes a misplaced edit; a second one is going back and forth
+                if self.undos[path] >= UNDOS_FOR_LOOP:
+                    await self._loop(f"hoàn tác {self.undos[path]} lần trong `{path[-80:]}`")
             if sig:
                 seen.add(sig)
             self.edits_since_command[path] += 1

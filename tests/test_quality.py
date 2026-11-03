@@ -659,7 +659,7 @@ async def test_artifacts_reach_the_ticket_topic(office: Office, tmp_path: Path) 
         task.cancel()
 
 
-async def test_watchdog_lets_many_different_edits_through_but_stops_repeats_and_undos() -> None:
+async def test_watchdog_lets_many_different_edits_through_but_stops_repeats() -> None:
     from types import SimpleNamespace
 
     from actoroffice.engine.activity import describe_call
@@ -681,16 +681,74 @@ async def test_watchdog_lets_many_different_edits_through_but_stops_repeats_and_
     await dog.observe(edit("old 1", "new 1"))
     assert dog.loop and "lặp lại" in dog.loop
 
-    undo = Watchdog(office, "run_y", stall_after_s=600, slow_command_s=600)
-    await undo.observe(edit("a = 1", "a = 2"))
-    await undo.observe(edit("a = 2", "a = 1"))
-    assert undo.loop and "hoàn tác" in undo.loop
-
     reads = Watchdog(office, "run_z", stall_after_s=600, slow_command_s=600)
     for offset in (1, 200, 400, 600, 800):  # reading a big file part by part is not a loop
         activity = describe_call("Read", {"file_path": "src/big.py", "offset": offset, "limit": 200})
         await reads.observe({"kind": "read", "status": "running", "fields": activity.fields})
     assert reads.loop is None
+
+
+# ---- SI-15: undoing one misplaced edit is not a loop -------------------------------------------------------
+
+
+def _undo_watchdog(run_id: str):
+    from types import SimpleNamespace
+
+    from actoroffice.engine.activity import describe_call
+    from actoroffice.engine.watchdog import Watchdog
+
+    async def event(*_args, **_kwargs) -> None:
+        return None
+
+    def edit(old: str, new: str, path: str = "README.md") -> dict:
+        activity = describe_call("Edit", {"file_path": path, "old_string": old, "new_string": new})
+        return {"kind": "edit", "status": "running", "fields": activity.fields}
+
+    office = SimpleNamespace(runs=SimpleNamespace(event=event))
+    return Watchdog(office, run_id, stall_after_s=600, slow_command_s=600), edit
+
+
+async def test_ac1_one_undo_of_a_misplaced_edit_does_not_stop() -> None:
+    dog, edit = _undo_watchdog("run_ac1")
+    await dog.observe(edit("## Usage\n", "## Usage\n### Lint\n"))  # added in the wrong place (SI-14)
+    await dog.observe(edit("## Usage\n### Lint\n", "## Usage\n"))  # removed again
+    await dog.observe(edit("## End\n", "## End\n### Lint\n"))  # placed where it belongs
+    assert dog.loop is None
+
+
+async def test_ac2_redo_after_undo_or_a_second_undo_stops() -> None:
+    redo, edit = _undo_watchdog("run_ac2a")
+    await redo.observe(edit("a = 1", "a = 2"))
+    await redo.observe(edit("a = 2", "a = 1"))
+    assert redo.loop is None
+    await redo.observe(edit("a = 1", "a = 2"))  # add, remove, add again
+    assert redo.loop and "lặp lại" in redo.loop
+
+    twice, edit = _undo_watchdog("run_ac2b")
+    await twice.observe(edit("a = 1", "a = 2"))
+    await twice.observe(edit("b = 1", "b = 2"))
+    await twice.observe(edit("a = 2", "a = 1"))
+    assert twice.loop is None
+    await twice.observe(edit("b = 2", "b = 1"))  # second undo in the same file
+    assert twice.loop and "hoàn tác 2 lần" in twice.loop
+
+
+async def test_ac3_a_command_resets_the_undo_count() -> None:
+    dog, edit = _undo_watchdog("run_ac3")
+    await dog.observe(edit("a = 1", "a = 2"))
+    await dog.observe(edit("b = 1", "b = 2"))
+    await dog.observe(edit("a = 2", "a = 1"))
+    await dog.observe({"kind": "command", "status": "ok", "call_id": "c1", "fields": {"command": "uv run pytest"}})
+    await dog.observe(edit("c = 1", "c = 2"))
+    await dog.observe(edit("c = 2", "c = 1"))  # one undo since the command
+    assert dog.loop is None
+
+    other, edit = _undo_watchdog("run_ac3b")  # undos are counted per file
+    await other.observe(edit("a = 1", "a = 2", path="a.py"))
+    await other.observe(edit("a = 1", "a = 2", path="b.py"))
+    await other.observe(edit("a = 2", "a = 1", path="a.py"))
+    await other.observe(edit("a = 2", "a = 1", path="b.py"))
+    assert other.loop is None
 
 
 # ---- SI-5: flaky_rerun reuses the build stage's repo:test result -------------------------------------------

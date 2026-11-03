@@ -416,7 +416,6 @@ ARTIFACT_MAX = 45 * 1024 * 1024
 async def artifact_add(args: dict[str, Any], ctx: ToolCtx) -> str:
     """A file people should see (UI screenshot per AC, test video/trace, report): kept with the ticket, shown on
     Telegram and the web, linked from the PR description."""
-    import shutil
     from pathlib import Path
 
     office = ctx.office
@@ -432,6 +431,15 @@ async def artifact_add(args: dict[str, Any], ctx: ToolCtx) -> str:
     if source.stat().st_size > ARTIFACT_MAX:
         raise ToolError("file too large (max 45 MB)")
     ticket = await office.tickets.get(ctx.ticket_id)
+    target = await _save_artifact(ctx, ticket, source, kind, str(args.get("caption") or ""), args.get("ac"))
+    return f"Saved {kind} {target.name} with {ticket.key} (people see it in the ticket topic)."
+
+
+async def _save_artifact(ctx: ToolCtx, ticket: Any, source: Any, kind: str, caption: str, ac: Any) -> Any:
+    """Copy a checked file to data_dir/artifacts/<KEY>/, record it as a work product, tell the channels."""
+    import shutil
+
+    office = ctx.office
     folder = office.settings.data_dir / "artifacts" / ticket.key
     folder.mkdir(parents=True, exist_ok=True)
     target = folder / source.name
@@ -440,10 +448,81 @@ async def artifact_add(args: dict[str, Any], ctx: ToolCtx) -> str:
         target = folder / f"{source.stem}-{n}{source.suffix}"
         n += 1
     shutil.copy2(source, target)
-    caption = str(args.get("caption") or "").strip()[:300]
-    await office.tickets.add_work_product(ticket.id, kind, str(target), {"note": caption, "ac": args.get("ac")})
+    caption = caption.strip()[:300]
+    await office.tickets.add_work_product(ticket.id, kind, str(target), {"note": caption, "ac": ac})
     office.bus.publish("ticket.artifact", ticket_id=ticket.id, path=str(target), kind=kind, caption=caption)
-    return f"Saved {kind} {target.name} with {ticket.key} (people see it in the ticket topic)."
+    return target
+
+
+def _slug(text: str) -> str:
+    """A file name part without accents: "AC-9 Bấm ảnh" → "ac-9-bam-anh"."""
+    import unicodedata
+
+    plain = unicodedata.normalize("NFKD", text.replace("đ", "d").replace("Đ", "D")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-")[:50].strip("-")
+
+
+async def ui_screenshot(args: dict[str, Any], ctx: ToolCtx) -> str:
+    """Screenshot of a page of the ticket's temporary app (project profile `ui`), saved as an artifact of an AC."""
+    from urllib.parse import urljoin, urlsplit
+
+    from actoroffice.engine.browser import BrowserError, is_loopback, parse_actions
+    from actoroffice.services.checks import ac_id
+    from actoroffice.services.ui_preview import UiEnvError, ui_spec
+
+    office = ctx.office
+    if ctx.ticket_id is None or ctx.workspace is None:
+        raise ToolError("ui_screenshot works inside a ticket.")
+    path = str(args.get("path") or "").strip()
+    if "://" in path and not is_loopback(path):
+        # checked before anything starts: the browser only ever opens this machine (no outside network)
+        raise ToolError(f"Refused: only loopback addresses (127.0.0.1, localhost, ::1) may be opened, not {path[:120]}")
+    try:
+        actions = parse_actions(args.get("actions"))
+    except ValueError as exc:
+        raise ToolError(f"actions: {exc}") from exc
+    width = max(320, min(int(args.get("width") or 1280), 3840))
+    height = max(240, min(int(args.get("height") or 800), 2160))
+    ac = ac_id(args.get("ac"))
+    caption = str(args.get("caption") or "").strip()
+    ticket = await office.tickets.get(ctx.ticket_id)
+    project = await office.projects.get(ticket.project_id) if ticket.project_id else None
+    if ui_spec(project.profile if project else None) is None:
+        raise ToolError("The project has no UI profile (ui.start and ui.url): ask a Dev to add it in Settings, or write 'không chụp được: …' in the handoff.")
+
+    async def env_error(reason: str, tail: str = "") -> ToolError:
+        await office.tickets.add_work_product(ticket.id, "ui_error", reason, {"ac": ac, "reason": reason})
+        note = f"\nLast output lines:\n{office.redact(tail)}" if tail else ""
+        return ToolError(
+            f"Environment error, no screenshot: {reason}.{note}\nIt is recorded for {ac or 'this ticket'}; if it cannot be fixed, "
+            "write 'không chụp được: <lý do>' on the AC's line in the handoff."
+        )
+
+    try:
+        preview = await office.ui.ensure(ctx.run_id, ticket, project, ctx.workspace)
+    except UiEnvError as exc:
+        raise await env_error(exc.reason, exc.tail) from None
+    entry = preview.url
+    parts = urlsplit(entry)
+    target = path if "://" in path else (urljoin(f"{parts.scheme}://{parts.netloc}/", path.lstrip("/")) if path else entry)
+    if not is_loopback(target):
+        raise ToolError("Refused: only loopback addresses may be opened")
+    slug = _slug(f"{ac or 'ui'} {caption}") or "ui"
+    out = preview.shots / f"{slug}.png"
+    n = 1
+    while out.exists():
+        out = preview.shots / f"{slug}-{n}.png"
+        n += 1
+    try:
+        result = await office.ui.browser.screenshot(entry, target, out, width=width, height=height, full_page=bool(args.get("full_page")), actions=actions)
+    except BrowserError as exc:
+        raise await env_error(str(exc)) from None
+    except Exception as exc:  # a selector that never shows up, a page error: the AI fixes its call
+        raise ToolError(preview.mask(office.redact(f"Screenshot failed: {type(exc).__name__}: {str(exc)[:600]}"))) from None
+    saved = await _save_artifact(ctx, ticket, out, "screenshot", caption, ac)
+    blocked = f" Blocked {len(result.blocked)} request(s) to other hosts: {', '.join(result.blocked[:3])}." if result.blocked else ""
+    shown = preview.mask(target).replace(f"{parts.scheme}://{parts.netloc}", "")
+    return f"Saved screenshot {saved.name} of {shown or '/'} ({width}x{height}) for {ac or 'no AC'} with {ticket.key}.{blocked}"
 
 
 STAGE_TOOLS.append(
@@ -461,6 +540,30 @@ STAGE_TOOLS.append(
             required=["path", "kind"],
         ),
         artifact_add,
+    )
+)
+STAGE_TOOLS.append(
+    ToolDef(
+        "ui_screenshot",
+        "Screenshot a page of this ticket's UI for an acceptance criterion tagged [ui]. The office starts the project's "
+        "app on this machine (profile ui: seed, start, url; signed in), opens path in a headless browser (only "
+        "localhost; requests to other hosts are blocked), runs the actions in order, saves a PNG as an artifact of the "
+        "AC that people see at the pr pane, the gate card and the PR description. path: a path of the app like "
+        "'/team' (empty = the profile url). actions: [{\"click\": css}, {\"fill\": css, \"text\": \"…\"}, "
+        "{\"wait\": css or milliseconds}]. The app stops when your turn ends.",
+        schema(
+            {
+                "path": {"type": "string"},
+                "ac": {"type": "string", "description": "AC id it proves, e.g. AC-3"},
+                "caption": {"type": "string"},
+                "width": {"type": "integer"},
+                "height": {"type": "integer"},
+                "full_page": {"type": "boolean"},
+                "actions": {"type": "array", "items": {"type": "object"}},
+            },
+            required=["ac", "caption"],
+        ),
+        ui_screenshot,
     )
 )
 

@@ -195,6 +195,10 @@ class Executor:
             office.gates.pop(run_id, None)
             if gate is not None and gate.watchdog is not None:
                 await gate.watchdog.stop()
+            try:
+                await office.ui.stop_run(run_id)  # the temporary app of ui_screenshot lives as long as the run
+            except Exception:
+                log.exception("run %s: stopping the UI preview failed", run_id)
             await office.tickets.release(ticket.id, run_id)
             await office.runs.finish(
                 run_id,

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from actoroffice.app import Office
@@ -63,6 +64,7 @@ class ControlBody(BaseModel):
 CLOSED = (TicketStatus.DONE, TicketStatus.CANCELLED)
 CLOSED_PAGE = 20  # closed tickets per sidebar page
 CLOSED_MAX = 50
+ARTIFACT_KINDS = ("screenshot", "video", "trace", "report", "file")
 
 
 class ParticipantBody(BaseModel):
@@ -209,6 +211,7 @@ def register(app: FastAPI, office: Office) -> None:
             "participants": [m.model_dump() for m in await teams.participants(ticket.id)],
             "review": await office.stages.last_review(ticket.id),
             "review_acs": await office.stages.review_acs(ticket.id),
+            "ui_evidence": await office.stages.ui_evidence(ticket.id),
             "merge": await office.merges.panel(ticket.key) if ticket.stage == "pr" else {"available": False},
         }
 
@@ -233,7 +236,23 @@ def register(app: FastAPI, office: Office) -> None:
     @app.get("/api/tickets/{key}/artifacts")
     async def ticket_artifacts(key: str) -> list[dict[str, Any]]:
         ticket = await office.tickets.get(key)
-        return [p for p in await office.tickets.work_products(ticket.id) if p["kind"] in ("screenshot", "video", "trace", "report", "file")]
+        return [p for p in await office.tickets.work_products(ticket.id) if p["kind"] in ARTIFACT_KINDS]
+
+    @app.get("/api/tickets/{key}/artifacts/{product_id}/file")
+    async def ticket_artifact_file(key: str, product_id: int) -> FileResponse:
+        """The file of one artifact (screenshots in the pr pane and gate card, SI-23): only an artifact of this
+        ticket, only from its own folder data_dir/artifacts/<KEY>/."""
+        ticket = await office.tickets.get(key)
+        row = await office.db.fetchone("SELECT ticket_id, kind, ref FROM work_products WHERE id = ?", (product_id,))
+        if row is None or row["ticket_id"] != ticket.id or row["kind"] not in ARTIFACT_KINDS:
+            raise NotFound(f"{ticket.key} không có artifact {product_id}")
+        folder = (office.settings.data_dir / "artifacts" / ticket.key).resolve()
+        path = Path(row["ref"]).resolve()
+        if not path.is_relative_to(folder):
+            raise HTTPException(403, "artifact nằm ngoài thư mục của ticket")
+        if not path.is_file():
+            raise NotFound(f"file của artifact {product_id} không còn")
+        return FileResponse(path, headers={"Cache-Control": "private, max-age=3600"})
 
     @app.post("/api/tickets/{key}/participants")
     async def set_participant(key: str, body: ParticipantBody) -> dict[str, Any]:
@@ -386,6 +405,11 @@ class SetupProject(BaseModel):
     test: str = ""
     build: str = ""
     lint: str = ""
+    # UI evidence (SI-23): how the office runs the app for screenshots; all empty = no UI profile
+    ui_seed: str = ""
+    ui_start: str = ""
+    ui_url: str = ""
+    ui_paths: str = ""  # globs, separated by commas, spaces or new lines
 
 
 class JiraBody(BaseModel):
@@ -429,6 +453,41 @@ def _cmd(profile: dict[str, Any], key: str) -> str:
     return ""
 
 
+def _plain_cmd(profile: dict[str, Any], key: str) -> str:
+    """Like _cmd, but quotes only arguments that need it: "{port}" stays readable in the form."""
+    import shlex
+
+    value = profile.get(key)
+    if not (isinstance(value, list) and value and all(isinstance(v, str) for v in value)):
+        return ""
+    return " ".join(v if v and not re.search(r"[\s'\"\\]", v) else shlex.quote(v) for v in value)
+
+
+def _ui_fields(profile: dict[str, Any]) -> dict[str, str]:
+    ui = profile.get("ui") if isinstance(profile.get("ui"), dict) else {}
+    return {
+        "ui_seed": _plain_cmd(ui, "seed"),
+        "ui_start": _plain_cmd(ui, "start"),
+        "ui_url": str(ui.get("url") or ""),
+        "ui_paths": ", ".join(str(p) for p in ui.get("paths") or []),
+    }
+
+
+def _ui_profile(body: SetupProject) -> dict[str, Any] | None:
+    """profile["ui"] from the form: None when every UI field is empty; 422 when start or url is missing."""
+    seed, start = _argv(body.ui_seed), _argv(body.ui_start)
+    url = body.ui_url.strip()
+    paths = [p for p in re.split(r"[\s,]+", body.ui_paths) if p]
+    if not (seed or start or url or paths):
+        return None
+    if not start or not url:
+        raise HTTPException(422, "Cấu hình giao diện cần cả lệnh start và URL")
+    ui: dict[str, Any] = {"start": start, "url": url, "paths": paths}
+    if seed:
+        ui["seed"] = seed
+    return ui
+
+
 def _telegram_env_key() -> str | None:
     import os
 
@@ -461,7 +520,7 @@ def register_setup(app: FastAPI, office: Office) -> None:
         return {
             "ai": {"name": office.settings.ai_name, "model": office.settings.ai_model or office.settings.default_model},
             "projects": [
-                {**p.model_dump(), "test": _cmd(p.profile, "test"), "build": _cmd(p.profile, "build"), "lint": _cmd(p.profile, "lint")}
+                {**p.model_dump(), "test": _cmd(p.profile, "test"), "build": _cmd(p.profile, "build"), "lint": _cmd(p.profile, "lint"), **_ui_fields(p.profile)}
                 for p in projects
             ],
             "teams": [t.model_dump() for t in await office.teams.list_teams()],
@@ -481,6 +540,7 @@ def register_setup(app: FastAPI, office: Office) -> None:
 
     @app.post("/api/setup/project")
     async def setup_project(body: SetupProject) -> dict[str, Any]:
+        ui = _ui_profile(body)  # checked before anything is saved
         if body.id:
             current = await office.projects.get(body.id)
             project = await office.projects.update(
@@ -495,6 +555,10 @@ def register_setup(app: FastAPI, office: Office) -> None:
                 profile[key] = value
             else:
                 profile.pop(key, None)
+        if ui:
+            profile["ui"] = ui
+        else:
+            profile.pop("ui", None)
         project = await office.projects.configure(project.id, team_id=body.team_id or None, repo_url=body.repo_url or None, profile=profile)
         imported = await office.rules.import_conventions(project, by=LOCAL_OWNER_ID)
         return {"project": project.model_dump(), "imported_rules": [r.id for r in imported]}

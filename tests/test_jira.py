@@ -15,6 +15,7 @@ from actoroffice.domain.work import InteractionKind
 from actoroffice.services.jira import JiraClient, JiraMirror, adf_to_text, text_to_adf
 
 from .fakes import FakeRuntime
+from .seed import seed_db
 
 
 def adf(*paragraphs: str) -> dict[str, Any]:
@@ -49,6 +50,7 @@ class FakeJira:
 @pytest.fixture
 async def office(tmp_path) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05), runtime=FakeRuntime(scripts=[]))
+    seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
     yield o

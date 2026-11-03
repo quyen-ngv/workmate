@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
+import functools
 import logging
 from importlib import resources
 from typing import Any
@@ -320,7 +322,7 @@ class Office:
         position = await self.org.find_position("engineer")
         if position is None:
             folder = resources.files("actoroffice.templates.positions")
-            data = yaml.safe_load((folder / "engineer.yaml").read_text(encoding="utf-8"))
+            data = position_template((folder / "engineer.yaml").read_text(encoding="utf-8"))
             position = await self.org.create_position(Position(id=new_id("pos"), **data))
         actor = await self.org.hire(position.id, self.settings.ai_name, emoji="🤖", model=self.settings.ai_model)
         self.bus.publish("team.changed")
@@ -373,7 +375,7 @@ class Office:
         for item in sorted(folder.iterdir(), key=lambda f: f.name):
             if not item.name.endswith(".yaml"):
                 continue
-            data = yaml.safe_load(item.read_text(encoding="utf-8"))
+            data = position_template(item.read_text(encoding="utf-8"))
             existing = await self.org.find_position(data["name"])
             if existing is None:
                 created.append(await self.org.create_position(Position(id=new_id("pos"), **data)))
@@ -400,6 +402,16 @@ class Office:
         if installed:
             await self.skills.commit(f"office: install standard skills ({', '.join(installed)})", "office")
         return installed
+
+
+@functools.lru_cache(maxsize=64)
+def _parse_position(text: str) -> Any:
+    return yaml.safe_load(text)
+
+
+def position_template(text: str) -> dict[str, Any]:
+    """A position template's YAML, parsed once per text (an edited file is parsed again); each caller gets its own copy."""
+    return copy.deepcopy(_parse_position(text))
 
 
 def _walk_files(folder: Any, prefix: str = "") -> list[tuple[str, str]]:

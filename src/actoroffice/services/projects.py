@@ -137,9 +137,10 @@ class ProjectService:
             raise ProjectError(f"Không tìm thấy thư mục {folder}")
         result = {"path": str(folder), "access": access}
         if access == ProjectAccess.WORKTREE:
-            if git_branch(folder) is None and not any(folder.iterdir()):
-                _git_init(folder)  # an empty folder becomes a fresh repo with one empty commit on main
             branch = git_branch(folder)
+            if branch is None and not any(folder.iterdir()):
+                _git_init(folder)  # an empty folder becomes a fresh repo with one empty commit on main
+                branch = git_branch(folder)
             if branch is None:
                 raise ProjectError("Chế độ worktree cần một git repository (hoặc chọn 'direct' / 'read_only')")
             result["main_branch"] = branch

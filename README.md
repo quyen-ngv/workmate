@@ -177,7 +177,8 @@ Typical enterprise use:
 ## Development
 
 ```bash
-uv run py -m pytest -q              # unit + engine + enterprise-flow tests (fake runtime, no Claude calls)
+uv run py -m pytest -q              # unit + engine + enterprise-flow tests (fake runtime, no Claude calls), in parallel (-n auto)
+uv run py -m pytest -q -n0          # the same in one process (easier to debug; tests/seed.py holds the shared DB/git templates)
 uv run py spikes/p0_claude_sdk.py   # live SDK behaviour checks (uses a little quota, model haiku)
 ```
 

@@ -18,6 +18,7 @@ from actoroffice.engine.prompt_pack import REVIEW_REPLY
 from actoroffice.services.stages import StageError
 
 from .fakes import FakeRuntime, TurnCtx
+from .seed import copy_repo, seed_db
 
 PLAN = """\
 Problem: .tabs-right in team.css:118 has no flex-shrink, so many tabs push it out.
@@ -40,6 +41,7 @@ def runtime() -> FakeRuntime:
 @pytest.fixture
 async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05, ai_review=False), runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
     yield o
@@ -176,11 +178,8 @@ async def test_without_a_code_host_the_committed_branch_is_the_review(tmp_path) 
 
     from actoroffice.services.checks import check_pr_linked
 
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    repo = copy_repo(tmp_path / "repo", message="base")  # an empty commit on main
     git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@x", "-c", "commit.gpgsign=false"]
-    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "base"], check=True)
     subprocess.run([*git, "switch", "-q", "-c", "t/si-1-fix"], check=True)
     office = SimpleNamespace(atlassian=SimpleNamespace(code_host=lambda: None))
     ctx = SimpleNamespace(office=office, ticket=SimpleNamespace(pr_url=None), workspace=repo, project=SimpleNamespace(main_branch="main"))

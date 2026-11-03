@@ -23,6 +23,7 @@ from actoroffice.domain.work import ProjectAccess
 from actoroffice.engine.gate import ENV_DUMP
 
 from .fakes import FakeRuntime
+from .seed import seed_db
 from .test_quality import build_ticket, run_checks
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,7 @@ LINT = "uv run ruff check src tests"
 @pytest.fixture
 async def office(tmp_path) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05), runtime=FakeRuntime(scripts=[]))
+    seed_db(o.settings.db_path)
     await o.open()
     yield o
     await o.close()

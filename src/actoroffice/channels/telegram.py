@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from actoroffice.core.http import ssl_context
 from actoroffice.domain.errors import Conflict, OfficeError
 
 from . import tg_format as fmt
@@ -102,7 +103,7 @@ class BotApi:
     def __init__(self, token: str, *, base: str = "https://api.telegram.org", client: httpx.AsyncClient | None = None) -> None:
         self._url = f"{base}/bot{token}/"
         self.bot_id = token.split(":", 1)[0]  # public part of the token: tells one bot from another
-        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(60, connect=15))
+        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(60, connect=15), verify=ssl_context())
 
     async def call(self, method: str, **params: Any) -> Any:
         params = {k: v for k, v in params.items() if v is not None}

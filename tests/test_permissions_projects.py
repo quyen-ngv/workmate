@@ -17,6 +17,7 @@ from actoroffice.runtimes.base import GateDecision
 from actoroffice.security.policy import Decision, PolicyEngine, ToolCallContext, rule_matches, suggest_rules
 
 from .fakes import FakeRuntime, TurnCtx
+from .seed import seed_db
 
 
 @pytest.fixture
@@ -27,6 +28,7 @@ def runtime() -> FakeRuntime:
 @pytest.fixture
 async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=5), runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.install_default_positions(skills=False)
     await o.start_notifier()

@@ -30,6 +30,7 @@ from actoroffice.services.approvals_recheck import AUTO_BY
 from actoroffice.services.interactions import input_hash
 
 from .fakes import FakeRuntime, TurnCtx, deferred
+from .seed import seed_db
 
 TOKEN = "t" * 40
 HEADERS = {"X-Requested-With": "actoroffice"}
@@ -43,6 +44,7 @@ def runtime() -> FakeRuntime:
 @pytest.fixture
 async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=5), runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.install_default_positions(skills=False)
     await o.start_notifier()

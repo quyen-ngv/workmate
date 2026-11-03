@@ -13,6 +13,7 @@ from actoroffice.channels.telegram import TelegramBridge, TelegramError
 from actoroffice.config import Settings
 
 from .fakes import FakeRuntime
+from .seed import seed_db
 
 GROUP = -100123
 
@@ -41,6 +42,7 @@ class Bot:
 @pytest.fixture
 async def office(tmp_path) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home"), runtime=FakeRuntime(scripts=[]))
+    seed_db(o.settings.db_path)
     await o.open()
     yield o
     await o.close()

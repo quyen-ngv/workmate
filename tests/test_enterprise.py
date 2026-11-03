@@ -27,6 +27,7 @@ from actoroffice.services.automations import AutomationError
 from actoroffice.tools.registry import ToolError
 
 from .fakes import FakeRuntime, Script, TurnCtx
+from .seed import seed_db
 
 S = TicketStatus
 
@@ -60,6 +61,7 @@ def runtime() -> RoleRuntime:
 @pytest.fixture
 async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05), runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.install_default_positions(skills=False)
     await o.start_notifier()

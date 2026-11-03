@@ -9,6 +9,7 @@ import pytest
 
 from actoroffice.app import Office
 from actoroffice.config import Settings
+from actoroffice.core.http import ssl_context
 from actoroffice.domain.errors import PolicyDenied
 from actoroffice.domain.run import TurnResult, TurnStatus
 from actoroffice.domain.work import InteractionKind
@@ -16,6 +17,7 @@ from actoroffice.runtimes.base import GateDecision
 from actoroffice.services.access import save_secret
 
 from .fakes import FakeRuntime, TurnCtx
+from .seed import seed_db
 
 TOKEN = "Bearer s3cr3t-payments-token"
 
@@ -28,6 +30,7 @@ def runtime() -> FakeRuntime:
 @pytest.fixture
 async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05), runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
     yield o
@@ -96,7 +99,7 @@ async def test_grant_opens_a_credentialed_proxy_that_enforces_the_level(office: 
 
     url = envs[0]["AO_PAYMENTS_API_URL"]
     assert url.startswith("http://127.0.0.1:") and TOKEN not in str(envs[0])  # the run never sees the token
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=ssl_context()) as client:  # the CA bundle is loaded once per process
         got = await client.get(f"{url}/v1/payments/42?expand=1")
         assert got.status_code == 200 and got.json()["order"] == 42
         denied = await client.post(f"{url}/v1/refunds", json={"x": 1})
@@ -109,7 +112,7 @@ async def test_grant_opens_a_credentialed_proxy_that_enforces_the_level(office: 
     await office.access.revoke(grant.id, by=minh.id)
     assert await office.access.active(ticket.id) == []
     with pytest.raises(httpx.HTTPError):
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(verify=ssl_context()) as client:
             await client.get(f"{url}/v1/payments/42")
 
 

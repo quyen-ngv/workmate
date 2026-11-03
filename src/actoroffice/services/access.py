@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from actoroffice.core.http import ssl_context
 from actoroffice.domain.access import LEVEL_ORDER, LEVEL_VI, AccessLevel, Grant, Resource, ResourceKind
 from actoroffice.domain.errors import Conflict, NotFound, OfficeError, PolicyDenied
 from actoroffice.domain.ids import new_id, utcnow
@@ -86,7 +87,7 @@ class HttpEnvelope:
         self.headers = {str(k): str(v) for k, v in (secret.get("headers") or {}).items()} if isinstance(secret, dict) else {}
         for value in self.headers.values():
             office.redact.register(value)
-        self.client = httpx.AsyncClient(timeout=60, transport=transport, follow_redirects=False)
+        self.client = httpx.AsyncClient(timeout=60, transport=transport, follow_redirects=False, verify=True if transport else ssl_context())
         self.server: asyncio.base_events.Server | None = None
         self.port = 0
         self.log: list[str] = []

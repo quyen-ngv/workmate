@@ -15,6 +15,7 @@ from actoroffice.engine.reaper import reap_orphans
 from actoroffice.runtimes.base import GateDecision
 
 from .fakes import FakeRuntime, TurnCtx, deferred
+from .seed import seed_db
 
 
 @pytest.fixture
@@ -25,6 +26,7 @@ def runtime() -> FakeRuntime:
 @pytest.fixture
 async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05, max_concurrent_runs=2), runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.install_default_positions(skills=False)
     yield o

@@ -14,6 +14,7 @@ from actoroffice.config import Settings
 from actoroffice.domain.work import InteractionKind
 
 from .fakes import FakeRuntime
+from .seed import seed_db
 from .test_telegram import GROUP, FakeBot
 
 LAN, MINH, STRANGER = 111, 222, 999
@@ -43,6 +44,7 @@ def press(data: str, sender: int, thread: int | None = None) -> dict[str, Any]:
 @pytest.fixture
 async def office(tmp_path) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05), runtime=FakeRuntime(scripts=[]))
+    seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
     yield o

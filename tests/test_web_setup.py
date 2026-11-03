@@ -10,6 +10,7 @@ import yaml
 
 from actoroffice.web import team_api
 
+from .seed import copy_repo, seed_db
 from .test_telegram import GROUP, FakeBot
 from .test_web import HEADERS, client, login  # noqa: F401  (fixture re-export)
 
@@ -62,14 +63,8 @@ def test_setup_status_and_ai_model(client, tmp_path):  # noqa: F811
 
 def test_project_from_the_web_with_commands_and_conventions(client, tmp_path):  # noqa: F811
     login(client)
-    repo = tmp_path / "billing"
-    repo.mkdir()
+    repo = copy_repo(tmp_path / "billing")  # an empty commit on main
     (repo / "AGENTS.md").write_text("Luôn chạy test trước khi commit.", encoding="utf-8")
-    import subprocess
-
-    ident = ["-c", "user.name=t", "-c", "user.email=t@x", "-c", "commit.gpgsign=false"]
-    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), *ident, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
     assert client.post("/api/setup/project", json={"name": "x", "path": str(tmp_path)}, headers=HEADERS).status_code == 422  # not a git repo
     team = client.post("/api/teams", json={"name": "Billing"}, headers=HEADERS).json()
     r = client.post(
@@ -160,6 +155,7 @@ def bound(tmp_path):
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
+        seed_db(office.settings.db_path)
         await office.open()
         office.telegram = TelegramBridge(office, bot)
         office.telegram.chat_id = GROUP

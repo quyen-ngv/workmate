@@ -14,6 +14,7 @@ from actoroffice.services.review import evaluate
 from actoroffice.web.server import create_app
 
 from .fakes import FakeRuntime
+from .seed import seed_db
 from .test_web import HEADERS, TOKEN, client, login  # noqa: F401  (fixture re-export)
 
 
@@ -25,6 +26,7 @@ def office_client(tmp_path):
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
+        seed_db(office.settings.db_path)
         await office.open()
         await office.install_default_positions(skills=False)
         yield

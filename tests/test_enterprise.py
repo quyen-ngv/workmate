@@ -23,6 +23,7 @@ from actoroffice.domain.chat import ConversationKind
 from actoroffice.domain.run import TurnResult, TurnStatus, Usage
 from actoroffice.domain.work import InteractionKind, InteractionStatus, ProjectAccess, TicketStatus
 from actoroffice.runtimes.base import GateDecision
+from actoroffice.services.automations import AutomationError
 from actoroffice.tools.registry import ToolError
 
 from .fakes import FakeRuntime, Script, TurnCtx
@@ -369,7 +370,7 @@ def test_python_launcher_available():
 
 
 async def test_change_wakes_a_lead_blocked_on_its_devs_and_done_needs_finished_children(office, runtime):
-    lead, dev = await hire(office, "lead", "Long"), await hire(office, "dev", "Minh")
+    lead, _dev = await hire(office, "lead", "Long"), await hire(office, "dev", "Minh")
     feature = await office.tickets.create("Báo cáo", assignee_actor_id=None)
     plan = await office.tickets.create("Kế hoạch", parent_id=feature.id, assignee_actor_id=lead.id, status=S.BLOCKED)
     task = await office.tickets.create("Bảng tổng hợp", parent_id=plan.id, assignee_actor_id=None)
@@ -563,7 +564,7 @@ async def test_script_flow_needs_review_then_runs_and_reports(office, runtime):
     await settle(office)
     automation = await office.automations.get("prices")
     assert automation.status == AutomationStatus.PENDING_REVIEW and automation.schedule == "daily@07:30"
-    with pytest.raises(Exception):
+    with pytest.raises(AutomationError):
         await office.automations.run(automation, "manual")  # not before review
     [review] = [i for i in await office.interactions.pending() if i.kind == InteractionKind.APPROVE_AUTOMATION]
     assert "collected 1 row" in review.payload["code"]["prices.py"]

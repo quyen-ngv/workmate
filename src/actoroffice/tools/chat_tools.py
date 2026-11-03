@@ -22,10 +22,10 @@ async def propose_ticket(args: dict[str, Any], ctx: ToolCtx) -> str:
     if args.get("replace_previous"):
         # The user changed their mind: the older proposals of this actor in this chat must not be confirmable any more.
         for old in await office.interactions.pending():
+            mine = old.kind == InteractionKind.CONFIRM_TICKET and old.actor_id == ctx.actor.id
             same_chat = old.payload.get("conversation_id") == ctx.conversation_id
-            if old.kind == InteractionKind.CONFIRM_TICKET and old.actor_id == ctx.actor.id and same_chat:
-                if await office.interactions.cancel(old.id):
-                    withdrawn.append(str(old.payload.get("title")))
+            if mine and same_chat and await office.interactions.cancel(old.id):
+                withdrawn.append(str(old.payload.get("title")))
     parent = None
     if args.get("parent"):
         parent = (await office.tickets.get(str(args["parent"]))).key

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import AsyncIterator
 
@@ -174,10 +175,15 @@ async def test_memory_compaction_merges_and_keeps_pinned(office, runtime):
     for text in ("Repo dùng Java 21", "Dự án dùng Java 21", "Test bằng JUnit 5", "Test bằng JUnit 5 + AssertJ", "Deploy thứ 6", "Không deploy thứ 6"):
         ids.append((await office.memory.add(minh, text, kind=MemoryKind.FACT, created_by="Minh")).id)
     pinned = await office.memory.add(minh, "Anh chủ thích câu ngắn", kind=MemoryKind.PREFERENCE, created_by="user", pinned=True)
-    answer = (
-        '{"memories": [{"kind": "fact", "content": "Dự án dùng Java 21", "from": [%d, %d]}, '
-        '{"kind": "fact", "content": "Test bằng JUnit 5 + AssertJ", "from": [%d, %d]}, '
-        '{"kind": "decision", "content": "Không deploy vào thứ 6", "from": [%d, %d]}]}' % tuple(ids)
+    answer = json.dumps(
+        {
+            "memories": [
+                {"kind": "fact", "content": "Dự án dùng Java 21", "from": ids[0:2]},
+                {"kind": "fact", "content": "Test bằng JUnit 5 + AssertJ", "from": ids[2:4]},
+                {"kind": "decision", "content": "Không deploy vào thứ 6", "from": ids[4:6]},
+            ]
+        },
+        ensure_ascii=False,
     )
 
     async def compact(ctx: TurnCtx) -> TurnResult:

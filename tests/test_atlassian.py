@@ -160,9 +160,11 @@ async def test_confluence_search_read_and_publish() -> None:
         path = request.url.path
         if path.endswith("/rest/api/content/search"):
             assert 'text ~ "hoàn tiền"' in request.url.params["cql"]
-            return httpx.Response(200, json={"results": [{"id": "11", "title": "Refund policy", "space": {"key": "BIL"}, "version": {"when": "2025-03-01T00:00"}, "_links": {"webui": "/spaces/BIL/pages/11"}}]})
+            page = {"id": "11", "title": "Refund policy", "space": {"key": "BIL"}, "version": {"when": "2025-03-01T00:00"}, "_links": {"webui": "/spaces/BIL/pages/11"}}
+            return httpx.Response(200, json={"results": [page]})
         if path.endswith("/api/v2/pages/11"):
-            return httpx.Response(200, json={"id": "11", "title": "Refund policy", "version": {"number": 4, "createdAt": "2025-03-01"}, "body": {"storage": {"value": "<h2>Rules</h2><p>VIP: 60 ngày</p><ul><li>Khác: 30</li></ul>"}}, "_links": {"webui": "/x"}})
+            body = {"storage": {"value": "<h2>Rules</h2><p>VIP: 60 ngày</p><ul><li>Khác: 30</li></ul>"}}
+            return httpx.Response(200, json={"id": "11", "title": "Refund policy", "version": {"number": 4, "createdAt": "2025-03-01"}, "body": body, "_links": {"webui": "/x"}})
         if path.endswith("/api/v2/spaces"):
             return httpx.Response(200, json={"results": [{"id": "900", "key": "BIL"}]})
         if path.endswith("/api/v2/pages") and request.method == "GET":

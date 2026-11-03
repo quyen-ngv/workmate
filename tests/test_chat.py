@@ -179,6 +179,6 @@ async def test_actor_can_open_group_from_dm(office, runtime):
     await office.scheduler.wait_idle(timeout=10)
 
     groups = [c for c in await office.chat.list() if c["kind"] == "group"]
-    assert len(groups) == 1 and set(groups[0]["members"][i]["id"] for i in range(3)) >= {mai.id, minh.id, "user"}
+    assert len(groups) == 1 and {groups[0]["members"][i]["id"] for i in range(3)} >= {mai.id, minh.id, "user"}
     bodies = [m.body for m in await office.chat.messages(groups[0]["id"])]
     assert "Trả 401." in bodies

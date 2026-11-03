@@ -118,7 +118,13 @@ async def test_tools_need_a_grant_and_answer_read_only(office: Office, runtime: 
             await ctx.office("db_query", {"resource": "orders-db", "sql": "DELETE FROM orders"})
         out["scenario"] = await ctx.office(
             "scenario_record",
-            {"name": "order-acked", "flow": "đặt lệnh", "step": "khớp", "queries": [{"resource": "orders-db", "table": "orders", "sql": "SELECT * FROM orders WHERE id = 1"}], "messages": [{"topic": "orders.routed", "value": {"order": 1}}]},
+            {
+                "name": "order-acked",
+                "flow": "đặt lệnh",
+                "step": "khớp",
+                "queries": [{"resource": "orders-db", "table": "orders", "sql": "SELECT * FROM orders WHERE id = 1"}],
+                "messages": [{"topic": "orders.routed", "value": {"order": 1}}],
+            },
         )
         out["loaded"] = await ctx.office("scenario_load", {"name": "order-acked"})
         return TurnResult(status=TurnStatus.COMPLETED, session_id=f"s-{ctx.spec.run_id}")

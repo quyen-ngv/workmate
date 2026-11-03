@@ -359,7 +359,7 @@ async def list_dir(args: dict[str, Any], ctx: ToolCtx) -> str:
     for entry in entries[:200]:
         try:
             if entry.is_dir():
-                count = sum(1 for _ in zip(range(1000), entry.iterdir()))
+                count = sum(1 for _ in zip(range(1000), entry.iterdir(), strict=False))
                 rows.append(f"{entry.name}/  ({count if count < 1000 else '1000+'} items)")
             else:
                 rows.append(f"{entry.name}  ({entry.stat().st_size} bytes)")

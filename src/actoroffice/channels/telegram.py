@@ -545,9 +545,9 @@ class TelegramBridge:
                 await self.send(thread, f"<i>Bạn chưa được đăng ký (Telegram id <code>{sender}</code>): nhờ admin reply tin của bạn với /adduser Tên vai.</i>")
             return
         reply = msg.get("reply_to_message") or {}
-        if reply and reply.get("message_id") != thread and not reply.get("forum_topic_created"):
-            if await self._answer_card(int(reply["message_id"]), text, who):
-                return
+        is_reply = reply and reply.get("message_id") != thread and not reply.get("forum_topic_created")
+        if is_reply and await self._answer_card(int(reply["message_id"]), text, who):
+            return
         conv_id = await self._conversation_of(thread)
         if conv_id is None:
             await self.send(thread, HELP)
@@ -745,7 +745,7 @@ class TelegramBridge:
 
     async def send(self, thread: int | None, text: str, rows: list[list[dict[str, str]]] | None = None) -> int:
         markup = {"inline_keyboard": rows} if rows else None
-        params = dict(chat_id=self.chat_id, message_thread_id=thread, reply_markup=markup, link_preview_options={"is_disabled": True})
+        params = {"chat_id": self.chat_id, "message_thread_id": thread, "reply_markup": markup, "link_preview_options": {"is_disabled": True}}
         try:
             result = await self.api.call("sendMessage", text=text, parse_mode="HTML", **params)
         except TelegramError as exc:

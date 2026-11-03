@@ -101,7 +101,8 @@ def prompt(params: dict, sessions: dict) -> dict:
     request("fs/write_text_file", {"sessionId": session, "path": cwd + sep + "out.md", "content": f"{notes.strip()} | {out}"})
     outside = request("fs/write_text_file", {"sessionId": session, "path": state["outside"], "content": "x"})
     update(session, {"sessionUpdate": "tool_call", "toolCallId": "t3", "title": "Write outside", "kind": "edit", "rawInput": {"path": state["outside"]}})
-    update(session, {"sessionUpdate": "tool_call_update", "toolCallId": "t3", "status": "failed", "content": [{"type": "content", "content": {"type": "text", "text": outside.get("error", {}).get("message", "")}}]})
+    error = outside.get("error", {}).get("message", "")
+    update(session, {"sessionUpdate": "tool_call_update", "toolCallId": "t3", "status": "failed", "content": [{"type": "content", "content": {"type": "text", "text": error}}]})
 
     server = state["mcp"][0]
     mcp(server, "initialize", {"protocolVersion": "2025-06-18"}, 1)

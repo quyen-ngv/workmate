@@ -190,3 +190,12 @@ uv run py scenarios/run.py --home F:/_ao_lab/home --only analyst,enterprise
 ```
 
 Results, with objective checks per scenario, are written to `docs/test-plan/results/`.
+
+### Lint
+
+```bash
+uv run ruff check src tests         # rules and line length are set in pyproject.toml [tool.ruff]
+```
+
+The project profile's lint command (web Cài đặt → "Lệnh lint") should be `uv run ruff check src tests`, so the
+`repo:lint` check runs it at the build stage. There is no auto-formatter (`ruff format` is not used).

@@ -93,11 +93,14 @@ GIT_BASH_DRIVE = re.compile(r"^/([a-zA-Z])(/|$)")
 # The ticket's temp folder (TMPDIR/TEMP/TMP of a run): inside the workspace, so writing there needs no click.
 TICKET_TMP = ".ao-tmp"
 _TMP_NAMES = r"(?:TMPDIR|TEMP|TMP)"
-# A word that starts with the temp variable: $TMPDIR/x, ${TEMP}\x (sh), $env:TEMP\x (PowerShell).
+# A word that starts with $TMPDIR: $TMPDIR/x, ${TMPDIR}\x (sh), $env:TMPDIR\x (PowerShell). Only TMPDIR:
+# a login shell may set TMP/TEMP again (MSYS2's /etc/profile: TMP=/tmp), Git Bash keeps a TMPDIR that exists.
 TMP_PREFIX = {
-    "sh": re.compile(rf"^\$(?:\{{{_TMP_NAMES}\}}|{_TMP_NAMES}(?!\w))(?=[/\\]|$)"),
-    "ps": re.compile(rf"^\$env:{_TMP_NAMES}(?=[/\\]|$)", re.IGNORECASE),
+    "sh": re.compile(r"^\$(?:\{TMPDIR\}|TMPDIR(?!\w))(?=[/\\]|$)"),
+    "ps": re.compile(r"^\$env:TMPDIR(?=[/\\]|$)", re.IGNORECASE),
 }
+# Unquoted, bash splits the value on blanks and expands globs in it: such a folder is not one path.
+_SPLIT_OR_GLOB = re.compile(r"[\s*?\[\]]")
 # Every way a command may read the variable; any other mention of the name (TMPDIR=…, export TMP, unset,
 # $env:TEMP = …, $env:TEMP += …, a quoted or escaped use) means the value may not be the one the office set.
 _TMP_READ = {
@@ -132,16 +135,18 @@ class Place:
     workspace: Path | None
     readable: list[Path]
     protected: list[Path]
-    tmp: Path | None = None  # what $TMPDIR / $TEMP / $TMP name (tmp_dir), None: they stay unknown
+    tmp: Path | None = None  # what $TMPDIR names (tmp_dir), None: it stays unknown
     dialect: str = "sh"
 
 
 def tmp_dir(command: str, parts: list[Command], workspace: Path | None, dialect: str = "sh") -> Path | None:
-    """The ticket's temp folder when the line can only read TMPDIR/TEMP/TMP, so they still hold what the office
+    """The ticket's temp folder when the line can only read TMPDIR/TEMP/TMP, so TMPDIR still holds what the office
     set. None (judge `$TMPDIR` as unknown, like any variable) when it may change them in any way: the name
     anywhere else (also split by quotes or `\\`: TM''PDIR), any other `$`, an assignment, or a builtin that sets
-    variables. Not a bash emulator: when in doubt, None."""
+    variables; or when the folder holds a blank or a glob character. Not a bash emulator: when in doubt, None."""
     if workspace is None or dialect not in _TMP_READ or _TMP_LITERAL.search(command):
+        return None
+    if _SPLIT_OR_GLOB.search(str(workspace / TICKET_TMP)):
         return None
     rest = _TMP_READ[dialect].sub(" ", command)
     if "$" in rest or _TMP_MENTION.search(re.sub(r"[\"'`\\]", "", rest)):

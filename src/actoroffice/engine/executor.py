@@ -163,7 +163,7 @@ class Executor:
                 env={
                     **self._env(actor, position),
                     **ticket_env(ticket, project),
-                    **(await ticket_tmp(ws.path)),
+                    **(await ticket_tmp(ws)),
                     **(await office.access.env_for(ticket.id) if stage_run is not None else {}),
                 },
                 mcp_servers=mcp_servers,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -10,8 +11,8 @@ import pytest
 
 from actoroffice.app import Office
 from actoroffice.config import Settings
-from actoroffice.domain.org import Position, PositionPolicy
-from actoroffice.engine.workspace import ticket_tmp
+from actoroffice.domain.org import Position, PositionPolicy, WorkspaceKind
+from actoroffice.engine.workspace import Workspace, ticket_tmp
 from actoroffice.security import shell
 from actoroffice.security.policy import Decision, PolicyEngine, ToolCallContext
 from actoroffice.security.shell import TICKET_TMP
@@ -47,6 +48,7 @@ async def test_ac1_ticket_run_env_points_temp_vars_to_the_ticket_tmp(office, run
     spec = runtime.specs[0]
     tmp = Path(spec.cwd) / TICKET_TMP
     assert {name: spec.env[name] for name in TMP_VARS} == dict.fromkeys(TMP_VARS, str(tmp))
+    assert spec.env["CLAUDE_CODE_TMPDIR"] == str(tmp)  # Claude Code's sandbox TMPDIR stays under it
     assert tmp.is_dir()
 
 
@@ -54,20 +56,33 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True).stdout
 
 
+def _exclude_lines(repo: Path) -> list[str]:
+    exclude = Path(_git(repo, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
+    return exclude.read_text(encoding="utf-8").splitlines()
+
+
 async def test_ac4_ticket_tmp_is_excluded_from_git_once(tmp_path):
     repo = copy_repo(tmp_path / "repo", {"a.txt": "a\n"})
     worktree = tmp_path / "wt"
     _git(repo, "worktree", "add", "-q", "-b", "t/x", str(worktree))
-    env = await ticket_tmp(worktree)
+    ws = Workspace(worktree, WorkspaceKind.GIT_WORKTREE, "t/x")
+    env = await ticket_tmp(ws)
     (Path(env["TMPDIR"]) / "x.txt").write_text("x", encoding="utf-8")
     assert _git(worktree, "status", "--porcelain") == ""
-    await ticket_tmp(worktree)
-    exclude = Path(_git(worktree, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
-    assert exclude.read_text(encoding="utf-8").splitlines().count(f"{TICKET_TMP}/") == 1
+    await ticket_tmp(ws)
+    assert _exclude_lines(worktree).count(f"{TICKET_TMP}/") == 1
+
+
+async def test_ac4_direct_project_in_a_subfolder_of_its_repo_is_excluded(tmp_path):
+    repo = copy_repo(tmp_path / "mono", {"apps/web/a.txt": "a\n"})
+    env = await ticket_tmp(Workspace(repo / "apps" / "web", WorkspaceKind.FOLDER, direct=True))
+    (Path(env["TMPDIR"]) / "x.txt").write_text("x", encoding="utf-8")
+    assert _git(repo, "status", "--porcelain") == ""
+    assert _exclude_lines(repo).count(f"{TICKET_TMP}/") == 1
 
 
 async def test_ac4_plain_folder_gets_a_tmp_without_git(tmp_path):
-    env = await ticket_tmp(tmp_path)
+    env = await ticket_tmp(Workspace(tmp_path, WorkspaceKind.FOLDER))
     assert Path(env["TEMP"]).is_dir() and not (tmp_path / ".git").exists()
 
 
@@ -88,8 +103,8 @@ def _decide(ws: Path, command: str, tool: str = "Bash") -> Decision:
     [
         "uv run main.py > $TMPDIR/out.txt",
         'uv run main.py > "${TMPDIR}/out.txt"',
-        "uv run main.py 2> $TEMP/err.txt",
-        "uv run main.py > $TMP",
+        "uv run main.py 2> $TMPDIR/err.txt",
+        "uv run main.py > ${TMPDIR}",
         "mkdir -p $TMPDIR/run",
         "cp a.txt $TMPDIR/b.txt && uv run main.py $TMPDIR/b.txt",
     ],
@@ -100,7 +115,25 @@ def test_ac2_writing_to_the_ticket_tmp_needs_no_click(ws, command):
 
 def test_ac2_absolute_path_and_powershell_need_no_click(ws):
     assert _decide(ws, f"uv run main.py > {(ws / TICKET_TMP / 'x.txt').as_posix()}") == Decision.ALLOW
-    assert _decide(ws, "uv run main.py > $env:TEMP/x.txt", tool="PowerShell") == Decision.ALLOW
+    assert _decide(ws, "uv run main.py > $env:TMPDIR/x.txt", tool="PowerShell") == Decision.ALLOW
+
+
+@pytest.mark.parametrize(("command", "tool"), [("uv run main.py > $TEMP/x", "Bash"), ("uv run main.py > $TMP/x", "Bash"), ("uv run main.py > $env:TEMP/x", "PowerShell")])
+def test_ac3_temp_and_tmp_still_ask(ws, command, tool):
+    """A login shell may set TMP/TEMP again (MSYS2 /etc/profile: TMP=/tmp): only TMPDIR names the ticket's folder."""
+    assert _decide(ws, command, tool=tool) == Decision.ASK
+
+
+@pytest.mark.parametrize("name", ["my ws", "ws[1]", "ws*"])
+def test_ac3_folder_that_bash_would_split_or_glob_still_asks(tmp_path, name):
+    """Unquoted, bash splits $TMPDIR on blanks (`rm -rf $TMPDIR/run` → rm C:/Users/John …) and expands globs in it."""
+    if os.name == "nt" and "*" in name:
+        pytest.skip("Windows has no * in folder names")
+    ws = tmp_path / name
+    ws.mkdir()
+    assert _decide(ws.resolve(), "mkdir -p $TMPDIR/run") == Decision.ASK
+    if " " in name:  # the quoted absolute path is one word: it stays allowed
+        assert _decide(ws.resolve(), f"mkdir -p '{(ws / TICKET_TMP / 'run').as_posix()}'") == Decision.ALLOW
 
 
 @pytest.mark.parametrize(

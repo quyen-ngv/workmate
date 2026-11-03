@@ -90,15 +90,17 @@ def ticket_env(ticket: Ticket, project: Project | None) -> dict[str, str]:
     return env
 
 
-async def ticket_tmp(workspace: Path) -> dict[str, str]:
-    """TMPDIR/TEMP/TMP of a run: a temp folder inside the workspace (the policy lets the actor write there without
-    a click, /tmp would ask). In a git checkout it goes to info/exclude once, so it is never committed."""
-    tmp = workspace / TICKET_TMP
+async def ticket_tmp(ws: Workspace) -> dict[str, str]:
+    """TMPDIR/TEMP/TMP of a run: a temp folder inside the workspace (the policy lets the actor write to $TMPDIR
+    without a click, /tmp would ask). In a git checkout (a worktree, or a direct project that may sit in a
+    subfolder of its repo) it goes to info/exclude once, so it is never committed. CLAUDE_CODE_TMPDIR too: Claude
+    Code puts its own TMPDIR (sandbox) under it."""
+    tmp = ws.path / TICKET_TMP
     tmp.mkdir(parents=True, exist_ok=True)
-    if (workspace / ".git").exists():
-        code, out = await _git(workspace, "rev-parse", "--git-path", "info/exclude", check=False)
+    if ws.kind == WorkspaceKind.GIT_WORKTREE or ws.direct:
+        code, out = await _git(ws.path, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude", check=False)
         if code == 0 and out.strip():
-            exclude = workspace / out.strip()
+            exclude = Path(out.strip())
             lines = exclude.read_text(encoding="utf-8", errors="replace").splitlines() if exclude.is_file() else []
             if f"{TICKET_TMP}/" not in (line.strip() for line in lines):
                 exclude.parent.mkdir(parents=True, exist_ok=True)
@@ -106,7 +108,7 @@ async def ticket_tmp(workspace: Path) -> dict[str, str]:
                 with exclude.open("a", encoding="utf-8") as f:
                     f.write(f"{prefix}{TICKET_TMP}/\n")
     value = str(tmp)
-    return {"TMPDIR": value, "TEMP": value, "TMP": value}
+    return {"TMPDIR": value, "TEMP": value, "TMP": value, "CLAUDE_CODE_TMPDIR": value}
 
 
 async def cleanup_ticket(ticket: Ticket, workspace: Path) -> None:

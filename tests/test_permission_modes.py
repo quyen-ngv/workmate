@@ -669,12 +669,28 @@ def test_si36_ac2_comments_and_text_hashes(engine, ws, command, argv):
 
 
 @pytest.mark.parametrize(
-    ("command", "argv"),
-    [("echo a # note", ["echo", "a", "#", "note"]), ("echo a #'x'\nls", ["echo", "a", "#x", ";", "ls"])],
+    "command",
+    [
+        # the scan stops at `#`; bash reads `$'\''` as one `'`, so `id` runs (tried on Git Bash)
+        "echo a # x\necho $'\\''; id #'",
+        "echo ${HOME} $'\\''; id #'",
+    ],
 )
-def test_si36_ac3_powershell_keeps_hash_as_text(command, argv):
-    parts = shell.split(command, "ps")
-    assert [tok for p in parts for tok in [*p.argv, ";"]][:-1] == argv
+def test_si36_ansi_c_quoting_behind_an_early_stop_is_unsplit(engine, ws, command):
+    assert shell.split(command) is None
+    c = ctx(ws)
+    c.allow_rules = ["Bash(echo *)"]
+    assert decide(engine, c, command) != Decision.ALLOW, command
+
+
+@pytest.mark.parametrize("command", ["echo a # note", "Write-Host a #'\nRemove-Item x; '", "echo a <# x #> b", "#x"])
+def test_si36_ac3_powershell_comment_is_unsplit(command):
+    # PowerShell comments start at `#` too; the line is judged on the whole text
+    assert shell.split(command, "ps") is None
+
+
+def test_si36_ac3_powershell_hash_inside_a_word_still_splits():
+    assert [p.argv for p in shell.split("echo a#b; ls", "ps")] == [["echo", "a#b"], ["ls"]]
 
 
 def test_ac12_powershell_unchanged(engine, ws):

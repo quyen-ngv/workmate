@@ -82,6 +82,8 @@ GIT_NETWORK = {"push", "pull", "fetch", "clone", "ls-remote", "submodule", "remo
 SAFE_TARGETS = {"/dev/null", "nul", "NUL", "$null", "/dev/stdout", "/dev/stderr"}
 NOT_SPLITTABLE = re.compile(r"`|\$\(|<\(|>\(|<<")
 CONTINUATION = re.compile(r"\\[\r\n]")  # bash removes backslash-newline: `$\⏎(` is `$(`
+ANSI_C = re.compile(r"\$'")  # bash: in `$'\''` the `\'` does not end the string
+PS_COMMENT = re.compile(r"(?:^|[\s;&|()<>])#")  # PowerShell: a comment, whose quotes hide nothing
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 OPERATORS = {"&&", "||", ";", "|", "&", "|&"}
 RANGE = re.compile(r"[\d,;$p]+")  # numbers and sed-style ranges (195,260p)
@@ -111,12 +113,14 @@ class Place:
 def split(command: str, dialect: str = "sh") -> list[Command] | None:
     """The commands of a chain, or None when the line cannot be split safely (substitution, heredoc, subshell,
     unbalanced quotes, ANSI-C quoting). In sh, `$(`, backticks and `<<` that are only text (quoted or escaped,
-    see specials_are_text) do not count; PowerShell is judged on the whole text."""
+    see specials_are_text) do not count; PowerShell is judged on the whole text and never split when it may hold a
+    comment (`#` starting a word, `<#`), since this lexer does not follow PowerShell quoting inside it."""
     if dialect == "sh":
         literal = specials_are_text(command)
-        if literal is None or (not literal and (NOT_SPLITTABLE.search(command) or CONTINUATION.search(command))):
-            return None
-    elif NOT_SPLITTABLE.search(command):
+        whole_text = NOT_SPLITTABLE.search(command) or CONTINUATION.search(command) or ANSI_C.search(command)
+        if literal is None or (not literal and whole_text):
+            return None  # the scan stops early (`#`, `${`), so `$'…'` behind it is checked on the whole text
+    elif NOT_SPLITTABLE.search(command) or PS_COMMENT.search(command):
         return None
     command = _newlines_as_separators(command, dialect)
     if command is None:

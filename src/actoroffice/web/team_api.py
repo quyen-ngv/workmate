@@ -14,6 +14,7 @@ from actoroffice.domain.errors import NotFound
 from actoroffice.domain.stage import TEMPLATE_TITLES, default_templates
 from actoroffice.domain.team import LOCAL_OWNER_ID, TeamSettings
 from actoroffice.domain.work import TicketStatus
+from actoroffice.services.stages import stage_title
 
 
 class PersonBody(BaseModel):
@@ -54,8 +55,14 @@ class TaskBody(BaseModel):
 
 
 class ControlBody(BaseModel):
-    cmd: str  # pause | resume | retry | stop | steer | merged
+    cmd: str  # pause | resume | retry | stop | steer | merged | reopen
     text: str = ""
+    stage: str = ""  # reopen: the stage to go back to
+
+
+CLOSED = (TicketStatus.DONE, TicketStatus.CANCELLED)
+CLOSED_PAGE = 20  # closed tickets per sidebar page
+CLOSED_MAX = 50
 
 
 class ParticipantBody(BaseModel):
@@ -115,14 +122,40 @@ def register(app: FastAPI, office: Office) -> None:
     # ---- board (sidebar) ----------------------------------------------------------------------------------
 
     @app.get("/api/board")
-    async def board(viewer: str = LOCAL_OWNER_ID, done: bool = False) -> dict[str, Any]:
-        """Teams → tickets running through stages, each with its derived status; "needs you" for the viewer."""
-        statuses = None if done else [s for s in TicketStatus if s not in (TicketStatus.DONE, TicketStatus.CANCELLED)]
+    async def board(viewer: str = LOCAL_OWNER_ID, closed: bool = False, limit: int = CLOSED_PAGE, offset: int = 0) -> dict[str, Any]:
+        """Teams → tickets running through stages, each with its derived status; "needs you" for the viewer.
+        `closed=true`: one page of done/cancelled tickets instead, read from the tickets table only (no derived status)."""
+        closed_marks = ",".join("?" * len(CLOSED))
+        count = await office.db.fetchone(
+            f"SELECT COUNT(*) AS n FROM tickets WHERE stage IS NOT NULL AND status IN ({closed_marks})", [s.value for s in CLOSED]
+        )
+        closed_count = count["n"] if count else 0
+        if closed:
+            limit = max(1, min(limit, CLOSED_MAX))
+            offset = max(0, offset)
+            page = await office.db.fetchall(
+                "SELECT id, key, title, team_id, stage, stage_template, status, updated_at FROM tickets"
+                f" WHERE stage IS NOT NULL AND status IN ({closed_marks}) ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+                [*(s.value for s in CLOSED), limit + 1, offset],
+            )
+            return {
+                "tickets": [
+                    {
+                        "id": r["id"], "ticket": r["key"], "title": r["title"], "team_id": r["team_id"], "stage": r["stage"],
+                        "stage_title": stage_title(r["stage"]), "template": r["stage_template"], "updated_at": r["updated_at"],
+                        "ticket_status": r["status"], "status": r["status"],
+                    }
+                    for r in page[:limit]
+                ],
+                "has_more": len(page) > limit,
+                "limit": limit,
+                "offset": offset,
+                "closed_count": closed_count,
+            }
+        statuses = [s for s in TicketStatus if s not in CLOSED]
         rows = await office.db.fetchall(
-            "SELECT id FROM tickets WHERE stage IS NOT NULL"
-            + ("" if statuses is None else f" AND status IN ({','.join('?' * len(statuses))})")
-            + " ORDER BY updated_at DESC LIMIT 300",
-            [s.value for s in statuses] if statuses else [],
+            f"SELECT id FROM tickets WHERE stage IS NOT NULL AND status IN ({','.join('?' * len(statuses))}) ORDER BY updated_at DESC LIMIT 300",
+            [s.value for s in statuses],
         )
         items = []
         for row in rows:
@@ -135,6 +168,7 @@ def register(app: FastAPI, office: Office) -> None:
             "teams": [{"id": t.id, "name": t.name, "needs_you": sum(1 for i in items if i["team_id"] == t.id and i["needs_viewer"])} for t in team_rows],
             "tickets": items,
             "needs_you": sum(1 for i in items if i["needs_viewer"]),
+            "closed_count": closed_count,
         }
 
     # ---- stages ----------------------------------------------------------------------------------------------
@@ -191,7 +225,10 @@ def register(app: FastAPI, office: Office) -> None:
         ticket = await office.tickets.get(key)
         root = await office.tickets.root_of(ticket.id)
         project = await office.projects.get(ticket.project_id) if ticket.project_id else None
-        return await changes(office.settings.workspaces_dir / root.key, project.main_branch if project else "main")
+        base = project.main_branch if project else "main"
+        if ticket.status in CLOSED:
+            base = await office.stages.merged_base(root) or base
+        return await changes(office.settings.workspaces_dir / root.key, base)
 
     @app.get("/api/tickets/{key}/artifacts")
     async def ticket_artifacts(key: str) -> list[dict[str, Any]]:
@@ -227,6 +264,13 @@ def register(app: FastAPI, office: Office) -> None:
             ticket = await stages.switch_template(key, target, reason=body.text or f"người chọn quy trình {label}", by=by)
         elif cmd == "approved_script":
             ticket = await stages.external_passed(key, "script", by=by, note=body.text or "đã duyệt")
+        elif cmd == "reopen":
+            current = await office.tickets.get(key)
+            if current.status not in CLOSED:
+                raise HTTPException(409, f"{current.key} chưa đóng: dùng ↻ hoặc chỉ dẫn cho AI")
+            if not body.text.strip():
+                raise HTTPException(422, "Cần lý do mở lại")
+            ticket = await stages.reopen(key, body.stage.strip(), reason=body.text.strip(), by=by)
         else:
             raise HTTPException(422, f"không rõ lệnh {body.cmd}")
         office.scheduler.kick()

@@ -12,7 +12,8 @@ const STATUS_LABEL = {
 };
 
 const state = {
-  board: { teams: [], tickets: [], needs_you: 0 },
+  board: { teams: [], tickets: [], needs_you: 0, closed_count: 0 },
+  closed: { open: false, items: [], has_more: false, loading: false }, // "Đã xong" section: loaded only when opened
   team: null, // filter: team id or null = all
   open: JSON.parse(localStorage.getItem("ao.open") || "[]"),
   focus: localStorage.getItem("ao.focus") || null,
@@ -33,7 +34,11 @@ async function api(path, opts = {}) {
   if (res.status === 401) { location.href = "/"; throw new Error("not signed in"); }
   const text = await res.text();
   const data = text && (res.headers.get("content-type") || "").includes("json") ? JSON.parse(text) : text;
-  if (!res.ok) throw new Error((data && (data.error || (typeof data.detail === "string" ? data.detail : null))) || res.statusText);
+  if (!res.ok) {
+    const err = new Error((data && (data.error || (typeof data.detail === "string" ? data.detail : null))) || res.statusText);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -95,8 +100,35 @@ async function loadBoard() {
   renderTabs();
 }
 
+// One page of done/cancelled tickets (offset 0 starts over).
+async function loadClosed(offset = 0) {
+  state.closed.loading = true;
+  renderSidebar();
+  try {
+    const page = await api(`/api/board?closed=true&limit=20&offset=${offset}`);
+    state.closed.items = offset ? [...state.closed.items, ...page.tickets] : page.tickets;
+    state.closed.has_more = page.has_more;
+    state.board.closed_count = page.closed_count;
+  } finally {
+    state.closed.loading = false;
+    renderSidebar();
+  }
+}
+
 async function loadTicket(key) {
-  const [detail, stage] = await Promise.all([api(`/api/tickets/${key}`), api(`/api/tickets/${key}/stage`).catch(() => null)]);
+  let detail, stage;
+  try {
+    [detail, stage] = await Promise.all([api(`/api/tickets/${key}`), api(`/api/tickets/${key}/stage`).catch(() => null)]);
+  } catch (e) {
+    if (e.status !== 404) throw e;
+    // the ticket no longer exists: drop its tab (closed tickets keep theirs)
+    state.open = state.open.filter((k) => k !== key);
+    if (state.focus === key) state.focus = state.open[0] || null;
+    delete state.details[key];
+    save();
+    renderTabs();
+    return;
+  }
   state.details[key] = { detail, stage };
   const runs = (detail.runs || []).slice(0, 4).reverse();
   for (const run of runs) {
@@ -105,15 +137,32 @@ async function loadTicket(key) {
   }
 }
 
-function boardItem(key) {
-  return state.board.tickets.find((t) => t.ticket === key);
+// Name, status and id of an open ticket: from the board, else the closed list, else its loaded detail.
+function ticketInfo(key) {
+  const item = state.board.tickets.find((t) => t.ticket === key) || state.closed.items.find((t) => t.ticket === key);
+  if (item) return item;
+  const t = state.details[key]?.detail.ticket;
+  return t ? { id: t.id, ticket: t.key, title: t.title, status: t.status } : null;
 }
 
 // ---- sidebar -------------------------------------------------------------------------------------------------
 
 function renderSidebar() {
-  const { teams, tickets, needs_you } = state.board;
+  const { teams, tickets, needs_you, closed_count } = state.board;
   const visible = tickets.filter((t) => !state.team || t.team_id === state.team);
+  const closed = state.closed;
+  const closedItems = closed.items.filter((t) => !state.team || t.team_id === state.team);
+  const closedSection = closed_count ? `
+      <button class="side-title closed-head" data-closed-toggle aria-expanded="${closed.open}">${closed.open ? "▾" : "▸"} Đã xong (${closed_count})</button>
+      ${closed.open ? `
+        ${closedItems.map((t) => `
+          <button class="tk closed ${state.focus === t.ticket ? "on" : ""}" data-open="${esc(t.ticket)}" title="${esc(t.title)}">
+            <span class="dot ${esc(t.ticket_status)}"></span>
+            <span class="col"><span class="name">${esc(t.title)}</span><span class="sub">${esc(t.ticket)} · ${esc(t.stage_title)}</span></span>
+            ${t.ticket_status === "cancelled" ? `<span class="tag-cancelled">đã huỷ</span>` : `<span class="meta">${ago(t.updated_at)}</span>`}
+          </button>`).join("")}
+        ${closed.loading ? `<div class="empty">Đang tải…</div>` : ""}
+        ${closed.has_more && !closed.loading ? `<button class="btn small closed-more" data-closed-more>Xem thêm</button>` : ""}` : ""}` : "";
   const byTeam = {};
   for (const t of visible) (byTeam[t.team_id || ""] ||= []).push(t);
   const teamName = (id) => (teams.find((t) => t.id === id) || {}).name || "Chung";
@@ -133,7 +182,8 @@ function renderSidebar() {
             <span class="col"><span class="name">${esc(t.title)}</span>
               <span class="sub">${esc(t.ticket)} · ${esc(t.stage_title)}${t.activity ? " · " + esc(t.activity.title) : ""}</span></span>
             ${t.needs_viewer ? `<span class="badge">Cần bạn</span>` : `<span class="meta">${ago(t.activity?.at || t.updated_at)}</span>`}
-          </button>`).join("")}`).join("") || `<div class="empty">Chưa có việc. Bấm + để giao việc cho AI.</div>`}
+          </button>`).join("")}`).join("") || (closed_count ? `<div class="empty">Không có việc đang làm.</div>` : `<div class="empty">Chưa có việc. Bấm + để giao việc cho AI.</div>`)}
+      ${closedSection}
     </div>
     <div class="side-foot">
       <button data-page="inbox">Cần tôi ${needs_you ? `(${needs_you})` : ""}</button>
@@ -147,7 +197,7 @@ function renderTabs() {
   const sides = [["files", "Files"], ["changes", "Changes"], ["dossier", "Dossier"], ["rules", "Rules"], ["access", "Access"]];
   $("#tabs").innerHTML = `
     ${state.open.map((key) => {
-      const t = boardItem(key);
+      const t = ticketInfo(key);
       return `<button class="tab ${state.focus === key ? "on" : ""}" data-tab="${esc(key)}"><span class="dot ${esc(t?.status || "")}"></span>
         <span class="name">${esc(t ? t.title : key)}</span><span class="x" data-close="${esc(key)}">×</span></button>`;
     }).join("")}
@@ -287,10 +337,13 @@ function renderPane(key) {
   const steps = st.steps || [];
   const cur = steps.findIndex((s) => !s.done);
   const pending = d.detail.pending || [];
+  // done/cancelled: read only, the only action is "Mở lại" (stage status has no "cancelled": use the ticket's)
+  const closed = ["done", "cancelled"].includes(t.status);
   el.innerHTML = `
     <div class="pane-head">
       <div class="pane-title"><span class="key">${esc(t.key)}</span><span class="title">${esc(t.title)}</span>
-        <span class="chip ${esc(st.status)}">${esc(st.stage_title || "")} · ${esc(STATUS_LABEL[st.status] || st.status || "")}</span></div>
+        ${closed ? `<span class="chip ${esc(t.status)}">${t.status === "cancelled" ? "Đã huỷ" : "Đã xong"} · ${esc(st.stage_title || "")}</span>`
+          : `<span class="chip ${esc(st.status)}">${esc(st.stage_title || "")} · ${esc(STATUS_LABEL[st.status] || st.status || "")}</span>`}</div>
       <div class="stepper">${stages.map((s, i) => `<span class="${i === idx ? "cur" : i < idx ? "past" : ""}">${esc(s.id)}${s.gate ? ' <b class="gate">✋</b>' : ""}</span>`).join("→")}</div>
       <div class="pane-meta">
         ${st.who?.length ? `<span>chờ ${esc(st.who.join(", "))}</span>` : ""}
@@ -298,21 +351,21 @@ function renderPane(key) {
         <span>lần ${st.attempt || 1}</span><span>${(tokens(st.usage) / 1000).toFixed(1)}k tok</span>
         ${t.jira_url ? `<a href="${esc(t.jira_url)}" target="_blank" rel="noreferrer">${esc(t.jira_key)}</a>` : ""}
         ${t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noreferrer">PR</a>` : ""}
-        <span class="pane-controls">
+        ${closed ? `<span class="pane-controls"><button class="btn small primary" data-reopen title="Đưa ticket về một giai đoạn để AI làm tiếp">↩ Mở lại</button></span>` : `<span class="pane-controls">
           ${st.status === "paused" ? `<button class="btn small" data-cmd="resume">▶ Tiếp</button>` : `<button class="btn small" data-cmd="pause">⏸ Dừng</button>`}
           <button class="btn small" data-cmd="retry" title="Làm lại giai đoạn">↻</button>
           ${mergeButton(d.stage?.merge)}
           ${t.stage === "pr" ? `<button class="btn small" data-cmd="merged">PR đã merge</button>` : ""}
           ${t.stage_template === "code" && ["understand", "plan"].includes(t.stage) ? `<button class="btn small" data-cmd="quick" title="Việc nhỏ: 1 ghi chú ngắn, 1 lần duyệt">⇄ Sửa nhỏ</button>` : ""}
           ${t.stage_template === "quick" && ["scope", "build"].includes(t.stage) ? `<button class="btn small" data-cmd="full" title="Quy trình đầy đủ: requirements, plan, kiến thức">⇄ Đầy đủ</button>` : ""}
-        </span>
+        </span>`}
       </div>
     </div>
     ${steps.length ? `<div class="steps">${steps.map((s, i) => `<div class="s ${s.done ? "done" : i === cur ? "cur" : ""}">${s.done ? "☑" : i === cur ? "▶" : "☐"} ${esc(s.text)}</div>`).join("")}</div>` : ""}
-    ${t.stage === "pr" ? reviewList(d.stage?.review) + reviewAcList(d.stage?.review_acs) : ""}
+    ${t.stage === "pr" || closed ? reviewList(d.stage?.review) + reviewAcList(d.stage?.review_acs) : ""}
     <div class="timeline">${renderTimeline(timeline(key)) || `<div class="empty">Chưa có hoạt động.</div>`}</div>
     ${pending.length ? `<div class="cards">${pending.map(card).join("")}</div>` : ""}
-    <div class="composer"><textarea placeholder="Chỉ dẫn cho AI… Enter để gửi, Shift+Enter xuống dòng" data-steer></textarea><button class="btn primary" data-send>Gửi</button></div>`;
+    ${closed ? "" : `<div class="composer"><textarea placeholder="Chỉ dẫn cho AI… Enter để gửi, Shift+Enter xuống dòng" data-steer></textarea><button class="btn primary" data-send>Gửi</button></div>`}`;
   const tl = $(".timeline", el);
   tl.scrollTop = tl.scrollHeight;
 }
@@ -404,6 +457,20 @@ async function pageNewTask() {
     <label>Mô tả<textarea data-f="description" rows="6" placeholder="Bối cảnh, mong muốn, link Jira/Confluence…"></textarea></label>
     <div><button class="btn primary" data-create-task>Giao cho AI</button></div>`);
   body.dataset.page = "new";
+}
+
+// "Mở lại" a closed ticket: back to a stage (up to where it ended) with a required reason; default build.
+function pageReopen(key) {
+  const d = state.details[key];
+  const stages = d?.stage?.template?.stages || [];
+  const end = stages.findIndex((s) => s.id === d?.detail.ticket.stage);
+  const choices = end >= 0 ? stages.slice(0, end + 1) : stages;
+  const pick = choices.some((s) => s.id === "build") ? "build" : choices[0]?.id;
+  const body = sheet(`Mở lại ${key}`, `<div class="reopen">
+    <label>Quay về giai đoạn<select data-reopen-stage>${choices.map((s) => `<option value="${esc(s.id)}" ${s.id === pick ? "selected" : ""}>${esc(s.title || s.id)}</option>`).join("")}</select></label>
+    <label>Lý do (bắt buộc)<textarea data-reopen-text rows="4" placeholder="vd. thiếu test cho trường hợp huỷ đơn"></textarea></label>
+    <div><button class="btn primary" data-reopen-send="${esc(key)}">Mở lại</button></div></div>`);
+  body.dataset.page = "reopen";
 }
 
 async function pageInbox() {
@@ -537,6 +604,23 @@ document.addEventListener("click", (e) => {
   const ds = t.dataset;
   if (ds.open) { e.preventDefault(); $("#overlay").hidden = true; openTicket(ds.open); return; }
   if (ds.team !== undefined) { state.team = ds.team || null; renderSidebar(); return; }
+  if (ds.closedToggle !== undefined) {
+    state.closed.open = !state.closed.open;
+    if (state.closed.open) return act(() => loadClosed(0));
+    renderSidebar();
+    return;
+  }
+  if (ds.closedMore !== undefined) return act(() => loadClosed(state.closed.items.length));
+  if (ds.reopenSend) return act(async () => {
+    const stage = $("[data-reopen-stage]").value;
+    const text = $("[data-reopen-text]").value.trim();
+    if (!text) { toast("Cần lý do mở lại", true); return; }
+    await api(`/api/tickets/${ds.reopenSend}/control`, { method: "POST", body: { cmd: "reopen", stage, text } });
+    $("#overlay").hidden = true;
+    toast(`Đã mở lại ${ds.reopenSend}`);
+    if (state.closed.open) await loadClosed(0);
+    await refresh(ds.reopenSend);
+  });
   if (ds.close) { e.stopPropagation(); state.open = state.open.filter((k) => k !== ds.close); if (state.focus === ds.close) state.focus = state.open[0] || null; save(); renderTabs(); renderPanes(); return; }
   if (ds.tab) { state.focus = ds.tab; save(); renderTabs(); renderSidebar(); renderPanes(); return; }
   if (ds.split !== undefined) { state.split = !state.split; save(); renderTabs(); renderPanes(); return; }
@@ -574,6 +658,7 @@ document.addEventListener("click", (e) => {
     if (!confirm(`Merge nhánh của ${key} vào ${ds.merge}? Office chạy test trên kết quả merge; test lỗi hoặc xung đột thì ${ds.merge} giữ nguyên.`)) return;
     return act(async () => { await api(`/api/tickets/${key}/merge/start`, { method: "POST" }); toast("Đang merge, kết quả sẽ hiện ở timeline"); await refresh(key); });
   }
+  if (ds.reopen !== undefined && key) { pageReopen(key); return; }
   if (ds.cmd && key) return act(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: ds.cmd } }); await refresh(key); });
   if (ds.send !== undefined && key) {
     const box = $("[data-steer]", pane);
@@ -662,8 +747,11 @@ function soon(key) {
   }, 400);
 }
 
+// Board first, then the open tabs (a closed ticket is not on the board but its pane must still refresh).
 function keyOfTicketId(id) {
-  return (state.board.tickets.find((t) => t.id === id) || {}).ticket;
+  const onBoard = state.board.tickets.find((t) => t.id === id);
+  if (onBoard) return onBoard.ticket;
+  return state.open.find((key) => ticketInfo(key)?.id === id || state.details[key]?.detail.ticket.id === id);
 }
 
 function connect() {
@@ -694,7 +782,7 @@ function connect() {
 
 (async () => {
   await act(loadBoard);
-  state.open = state.open.filter((k) => state.board.tickets.some((t) => t.ticket === k));
+  // tabs stay across reloads, closed tickets included; loadTicket drops a tab only when the ticket is gone (404)
   if (state.focus && !state.open.includes(state.focus)) state.focus = state.open[0] || null;
   renderTabs();
   renderPanes();

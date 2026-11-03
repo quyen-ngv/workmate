@@ -500,15 +500,17 @@ class StageService:
         if not (workspace / ".git").exists():
             return
         project = await office.projects.get(ticket.project_id) if ticket.project_id else None
-        base = project.main_branch if project else "main"
-        merges = [p for p in await office.tickets.work_products(root.id) if p["kind"] == "merge" and p["metadata"].get("sha")]
-        if merges:
-            # Merged by the office: main already holds the branch, so diff against main as it was before the merge.
-            base = f"{merges[-1]['metadata']['sha']}^1"
+        base = await self.merged_base(root) or (project.main_branch if project else "main")
         files = await changed_files(workspace, base)
         stale = await office.knowledge.mark_stale(team_id=ticket.team_id, changed_files=files)
         if stale:
             await office.tickets.add_comment(ticket.id, f"⚠️ {len(stale)} ghi chú kiến thức có thể đã cũ sau thay đổi này: #{', #'.join(map(str, stale))}", author_kind="system", author_id=None)
+
+    async def merged_base(self, root: Ticket) -> str | None:
+        """Main as it was before the office merged the root's branch (`<merge sha>^1`), or None when it did not."""
+        merges = [p for p in await self.office.tickets.work_products(root.id) if p["kind"] == "merge" and p["metadata"].get("sha")]
+        # Merged by the office: main already holds the branch, so diff against main as it was before the merge.
+        return f"{merges[-1]['metadata']['sha']}^1" if merges else None
 
     async def advance(self, ticket_id: int, *, by: str, run_id: str | None = None) -> Ticket:
         office = self.office
@@ -609,6 +611,9 @@ class StageService:
         if run_id:
             self.finished_runs.add(run_id)
         await office.db.execute("UPDATE tickets SET stage = ?, updated_at = ? WHERE id = ?", (target, utcnow(), ticket.id))
+        if ticket.status in (S.DONE, S.CANCELLED):
+            # a closed ticket may still carry ⏹ Stop's pause: the scheduler would skip it after reopening
+            await office.db.execute("UPDATE tickets SET paused = 0 WHERE id = ?", (ticket.id,))
         await self._open_run(ticket.id, target)
         await office.tickets.add_comment(
             ticket.id, f"↩️ Quay lại giai đoạn {stage_title(target)} ({await self._name(by)}): {reason}", author_kind="system", author_id=None

@@ -94,6 +94,9 @@ class OfficeGate:
         target = target_of(tool, args) or tool
 
         if verdict.decision == Decision.ALLOW:
+            # A one-time 'allow' for this call (a click, or a card approved by a wider permission) is used up here
+            # too: left unused it would run the call unasked once the permission is narrowed again (SI-9).
+            await office.interactions.consume_grant(self.actor.id, self.ticket_id, tool, args, decision="allow")
             self._count(tool, args)
             if verdict.taints:
                 self.tainted = True

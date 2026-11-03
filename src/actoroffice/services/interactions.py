@@ -138,18 +138,26 @@ class InteractionService:
         self.bus.publish("interaction.resolved", interaction=item.model_dump())
         return item
 
-    async def consume_grant(self, actor_id: str, ticket_id: int | None, tool: str, args: dict[str, Any]) -> str | None:
-        """Return 'allow' / 'deny' if a one-time human decision exists for exactly this call."""
+    async def consume_grant(
+        self, actor_id: str, ticket_id: int | None, tool: str, args: dict[str, Any], *, decision: str | None = None
+    ) -> str | None:
+        """Return 'allow' / 'deny' if a one-time human decision exists for exactly this call, and use it up.
+
+        `decision` limits it to grants of that kind (the gate uses up an 'allow' grant on a call the policy already
+        allows, so it cannot run the call unasked after the permission is narrowed again)."""
         digest = input_hash(tool, args)
-        async with self.db.tx() as tx:
-            row = await tx.fetchone(
-                "SELECT id, decision FROM approval_grants WHERE actor_id = ? AND ticket_id IS ? AND tool = ? "
-                "AND input_hash = ? AND used = 0 ORDER BY id LIMIT 1",
-                (actor_id, ticket_id, tool, digest),
-            )
-            if not row:
-                return None
-            await tx.execute("UPDATE approval_grants SET used = 1 WHERE id = ?", (row["id"],))
+        sql = "SELECT id, decision FROM approval_grants WHERE actor_id = ? AND ticket_id IS ? AND tool = ? AND input_hash = ? AND used = 0"
+        params: tuple[Any, ...] = (actor_id, ticket_id, tool, digest)
+        if decision is not None:
+            sql += " AND decision = ?"
+            params += (decision,)
+        # read first, outside a write transaction: most calls have no grant and must not cost a write
+        row = await self.db.fetchone(sql + " ORDER BY id LIMIT 1", params)
+        if not row:
+            return None
+        cur = await self.db.execute("UPDATE approval_grants SET used = 1 WHERE id = ? AND used = 0", (row["id"],))
+        if cur.rowcount != 1:  # another run used it in between
+            return None
         return str(row["decision"])
 
     async def mark_parked(self, interaction_id: str) -> None:

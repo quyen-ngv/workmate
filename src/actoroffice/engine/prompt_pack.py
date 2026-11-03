@@ -179,6 +179,13 @@ Goal: a pull request people can review and merge.
 Goal: the deliverable the requirements describe.
 - Write the `report` (research) or `document` (doc) the approved requirements ask for. Cite every source.
 - stage_complete: the requester accepts it or sends it back with a note.""",
+    "research:produce": """\
+Goal: the deliverable the requirements describe.
+- Write the `report` the approved requirements ask for. Cite every source.
+- When the report recommends work to do, end by calling propose_tickets with one item per piece of work (title,
+  why with the evidence, description with draft acceptance criteria, workflow code|quick, depends_on for the order).
+  People approve the list in one go; do not create those tickets yourself with ticket_create.
+- stage_complete: the requester accepts it or sends it back with a note.""",
     "close": """\
 Goal: what the team learned is written down and confirmed by people.
 - Read the dossier, comments, plan and handoff. Complete every dossier section and the links.

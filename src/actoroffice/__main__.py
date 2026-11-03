@@ -141,6 +141,10 @@ async def _answer(office: Office, interaction_id: str, reply: str) -> None:
     elif item.kind == InteractionKind.CONFIRM_TICKET:
         resolved = await office.answer(item.id, {"confirmed": yes})
         out(f"Created {resolved.response.get('ticket_key')}" if yes and resolved.response else f"Dropped {item.id}")
+    elif item.kind == InteractionKind.PROPOSE_TICKETS:
+        resolved = await office.answer(item.id, {"approved": yes})
+        created = (resolved.response or {}).get("created") or []
+        out(f"Created {', '.join(created)}" if created else f"Dropped {item.id}")
     else:
         options = item.payload.get("options") or []
         answer = options[int(reply) - 1] if reply.isdigit() and 0 < int(reply) <= len(options) else reply
@@ -154,6 +158,9 @@ def _describe_interaction(data: dict[str, Any]) -> str:
         return f"⚠ [{data['id']}] {p.get('actor')} · {p.get('ticket')} wants {p['tool']}: {p.get('target')}  ({p.get('reason')})"
     if data["kind"] == InteractionKind.CONFIRM_TICKET.value:
         return f"+ [{data['id']}] {p.get('proposed_by')} proposes ticket '{p.get('title')}' → {p.get('assignee')}  (y/n)"
+    if data["kind"] == InteractionKind.PROPOSE_TICKETS.value:
+        titles = "; ".join(f"{i.get('n')}. {i.get('title')}" for i in p.get("items") or [])
+        return f"+ [{data['id']}] {p.get('proposed_by')} proposes {len(p.get('items') or [])} tickets: {titles}  (y/n)"
     options = "  ".join(f"{i}) {o}" for i, o in enumerate(p.get("options") or [], 1))
     return f"? [{data['id']}] {p.get('asked_by')} · asks: {p.get('question')}  {options}"
 

@@ -22,6 +22,7 @@ from actoroffice.tools.chat_tools import CHAT_TOOLS
 from actoroffice.tools.infra_tools import INFRA_TOOLS
 from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
 from actoroffice.tools.office_tools import OFFICE_TOOLS
+from actoroffice.tools.proposal_tools import PROPOSE_TICKETS
 from actoroffice.tools.registry import BoundTool, ToolCtx
 from actoroffice.tools.stage_tools import STAGE_TOOLS
 from actoroffice.tools.work_tools import CHAT_WORK_TOOLS, WORK_TOOLS
@@ -30,6 +31,8 @@ from . import context, prompt_pack
 from .gate import OfficeGate
 from .watchdog import Watchdog
 from .workspace import ticket_env
+
+TICKET_TOOLS = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS + [PROPOSE_TICKETS]  # every ticket run (stage tools added on top)
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -106,7 +109,7 @@ class Executor:
             if stage_run is not None:
                 gate.watchdog = Watchdog(office, run_id, office.settings.stall_after_s, office.settings.slow_command_s)
                 gate.watchdog.start()
-            tools = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS
+            tools = TICKET_TOOLS
             mcp_servers: dict[str, Any] = {}
             if stage_run is not None:
                 compiled = await office.rules.compile(ticket=ticket, project=project, stage=stage_run.stage)

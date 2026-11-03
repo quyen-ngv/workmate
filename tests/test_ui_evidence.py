@@ -699,8 +699,10 @@ def test_ac12_seed_script_fills_temp_home(tmp_path: Path) -> None:
     db = sqlite3.connect(tmp_path / "data" / "office.db")
     try:
         rows = db.execute("SELECT stage, status FROM tickets WHERE stage IS NOT NULL").fetchall()
-        assert len(rows) == 5
-        assert {r[0] for r in rows} >= {"understand", "build", "pr"}
+        assert len(rows) == 7  # SI-24 added a research ticket at produce and the "run now" ticket of a proposal
+        assert {r[0] for r in rows} >= {"understand", "build", "pr", "produce"}
+        assert db.execute("SELECT COUNT(*) FROM interactions WHERE kind = 'propose_tickets' AND status = 'pending'").fetchone()[0] == 2
+        assert db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'backlog' AND stage IS NULL").fetchone()[0] == 2
         assert {r[1] for r in rows} >= {"done", "cancelled", "in_review"}
         assert db.execute("SELECT COUNT(*) FROM teams").fetchone()[0] >= 1
         assert db.execute("SELECT COUNT(*) FROM users WHERE id != 'owner'").fetchone()[0] >= 1

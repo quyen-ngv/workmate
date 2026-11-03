@@ -271,6 +271,8 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
             + (f"\n{md_to_html(desc[:2500])}" if desc else "")
         )
         return text, [[btn("✅ Tạo ticket", "y"), btn("Bỏ", "n")]]
+    if kind == "propose_tickets":
+        return proposal_card(p, btn)
     if kind == "approve_automation":
         steps = "\n".join(f"{i}. {esc(step_label(s))}" for i, s in enumerate(p.get("steps") or [], 1))
         code = p.get("code") or {}
@@ -295,6 +297,24 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
     return f"<b>{esc(kind)}</b>", []
 
 
+def proposal_card(p: dict[str, Any], btn: Any) -> tuple[str, list[list[Button]]]:
+    """A list of proposed tickets (SI-24): numbered lines cut to the message limit, create-all / drop-all buttons."""
+    items = p.get("items") or []
+    where = f" · {esc(p.get('source_ticket'))}" if p.get("source_ticket") else ""
+    head = f"📋 <b>{esc(p.get('proposed_by'))} đề xuất {len(items)} ticket</b>{where}"
+    hint = "\n\n<i>↩️ Reply 'bỏ 2, 5' để tạo các mục còn lại. Sửa từng mục trên web.</i>"
+    lines = []
+    for it in items:
+        deps = [str(d) for d in it.get("depends_on") or []] + list(it.get("blocked_by") or [])
+        lines.append(
+            f"{esc(it.get('n'))}. <b>{esc(str(it.get('title') or '')[:150])}</b> · {esc(it.get('workflow'))}"
+            f" · {'chạy ngay' if it.get('run_now') else 'backlog'}" + (f" · sau {esc(', '.join(deps))}" if deps else "")
+            + (f"\n   <i>{esc(str(it.get('why') or '')[:160])}</i>" if it.get("why") else "")
+        )
+    text = f"{head}\n{fit_lines(lines, max(0, LIMIT - len(head) - len(hint) - 50))}{hint}"
+    return text, [[btn(f"✅ Tạo {len(items)} ticket", "y"), btn("🗑 Bỏ hết", "n")]]
+
+
 def response_for(item: dict[str, Any], choice: str) -> dict[str, Any]:
     """Turn a button press into the same answer the web UI sends."""
     p = item.get("payload") or {}
@@ -309,7 +329,7 @@ def response_for(item: dict[str, Any], choice: str) -> dict[str, Any]:
         return {"confirmed": True}
     if kind == "approve_automation":
         return {"approved": True, "run_now": choice == "y"}
-    if kind in ("approve_stage", "env_access"):
+    if kind in ("approve_stage", "env_access", "propose_tickets"):
         return {"approved": choice == "y"}
     if kind == "approve_access" and choice in ("gw", "gd"):
         return {"approved": True, "access": "worktree" if choice == "gw" else "direct"}
@@ -332,6 +352,10 @@ def verdict(item: dict[str, Any]) -> str:
         return f"✅ Đã tạo {r['ticket_key']}" if r.get("ticket_key") else "Đã bỏ"
     if kind == "approve_automation":
         return "✅ Đã duyệt và bật" if r.get("approved") else "⛔ Đã từ chối"
+    if kind == "propose_tickets":
+        if not r.get("approved"):
+            return "🗑 Đã bỏ hết"
+        return f"✅ Đã tạo {', '.join(r.get('created') or [])}" if r.get("created") else "✅ Đã duyệt"
     if kind == "env_access":
         if not r.get("approved"):
             return "⛔ Không cấp quyền"

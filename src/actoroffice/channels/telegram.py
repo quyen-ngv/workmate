@@ -27,6 +27,7 @@ import httpx
 
 from actoroffice.core.http import ssl_context
 from actoroffice.domain.errors import Conflict, OfficeError
+from actoroffice.services.proposals import parse_drop
 
 from . import tg_format as fmt
 from .tg_menu import COMMANDS, Menus
@@ -571,9 +572,14 @@ class TelegramBridge:
             return False
         try:
             item = await self.office.interactions.get(row["interaction_id"])
-            if item.status.value != "pending" or item.kind.value not in ("question", "ask_colleague", "approve_stage"):
+            if item.status.value != "pending" or item.kind.value not in ("question", "ask_colleague", "approve_stage", "propose_tickets"):
                 return False
-            if item.kind.value == "approve_stage":  # a text reply to a gate card sends the stage back with that note
+            if item.kind.value == "propose_tickets":  # "bỏ 2, 5": create the other proposed tickets
+                drop = parse_drop(text)
+                if drop is None:
+                    return False
+                await self.office.answer(item.id, {"approved": True, "drop": drop}, by=who)
+            elif item.kind.value == "approve_stage":  # a text reply to a gate card sends the stage back with that note
                 await self.office.answer(item.id, {"approved": False, "note": text}, by=who)
             else:
                 await self.office.answer(item.id, {"answer": text}, by=who)

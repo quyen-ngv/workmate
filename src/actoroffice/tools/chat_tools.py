@@ -8,6 +8,7 @@ from typing import Any
 from actoroffice.domain.work import InteractionKind, Priority, TicketStatus
 
 from .office_tools import PROJECT_ACCESS_REQUEST, TICKET_UPDATE, doc_get, list_actors, list_dir, ticket_get
+from .proposal_tools import PROPOSE_TICKETS
 from .registry import ToolCtx, ToolDef, ToolError, schema
 
 
@@ -144,6 +145,7 @@ CHAT_TOOLS: list[ToolDef] = [
         ),
         propose_ticket,
     ),
+    PROPOSE_TICKETS,
     ToolDef(
         "chat_create_group",
         "Create a group chat with colleagues (the user is always added) and post your opening message, to discuss "

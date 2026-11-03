@@ -114,8 +114,10 @@ class InteractionService:
                 )
             run = await tx.fetchone("SELECT status FROM runs WHERE id = ?", (item.run_id,)) if item.run_id else None
             # The run that asked is gone (parked or finished): wake the actor to continue.
-            # A confirmed ticket proposal wakes its assignee through the new ticket instead.
-            if item.actor_id and item.kind != InteractionKind.CONFIRM_TICKET and (run is None or run["status"] != "running"):
+            # A confirmed ticket proposal wakes its assignee through the new ticket instead (the result of a list of
+            # proposals is a comment or chat message).
+            quiet = (InteractionKind.CONFIRM_TICKET, InteractionKind.PROPOSE_TICKETS)
+            if item.actor_id and item.kind not in quiet and (run is None or run["status"] != "running"):
                 await self.wakes.enqueue(
                     item.actor_id,
                     WakeSource.INTERACTION,

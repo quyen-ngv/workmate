@@ -240,4 +240,7 @@ def _summary(item: dict[str, Any]) -> str:
         return f"{p.get('actor')} xin quyền sửa thư mục dự án {p.get('project')}: {p.get('reason')}"
     if kind == "approve_automation":
         return f"{p.get('owner')} xin duyệt automation {p.get('name')} ({p.get('schedule_text')}): {p.get('description')}"
+    if kind == "propose_tickets":
+        titles = "; ".join(str(i.get("title")) for i in p.get("items") or [])
+        return f"{p.get('proposed_by')} đề xuất {len(p.get('items') or [])} ticket: {titles}"
     return kind

@@ -87,6 +87,8 @@ class Answer(BaseModel):
     run_now: bool | None = None  # approving an automation also runs it once
     access: str | None = None  # approving project access: "worktree" or "direct"
     note: str | None = None  # a stage gate sent back (or knowledge items dropped: "bỏ 2, 5")
+    items: list[dict[str, Any]] | None = None  # proposed tickets: the person's choices and edits per item (SI-24)
+    drop: list[int] | None = None  # proposed tickets: item numbers left out
 
 
 class NewTicket(BaseModel):

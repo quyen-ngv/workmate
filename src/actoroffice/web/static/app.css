@@ -126,6 +126,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .card .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .card .done { color: var(--muted); font-size: 12px; margin-top: 6px; }
 .card input, .card textarea { width: 100%; margin-top: 6px; }
+.card .proposal { border-top: 1px solid var(--border); padding: 8px 0; }
+.card .proposal.off { opacity: 0.5; }
+.card .proposal-head { display: flex; gap: 6px; align-items: center; }
+.card .proposal-head input[type="checkbox"] { width: auto; margin-top: 0; }
+.card .proposal-warn { color: var(--warn); background: var(--warn-bg); border-radius: var(--radius); padding: 4px 8px; font-size: 12px; margin-top: 6px; }
 
 .live { border-top: 1px solid var(--border); padding: 8px 20px; display: flex; flex-direction: column; gap: 4px; background: var(--panel-2); }
 .live:empty { display: none; }

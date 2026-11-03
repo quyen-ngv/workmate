@@ -166,11 +166,15 @@ def register(app: FastAPI, office: Office) -> None:
             last = await office.runs.last_activity(st["run_id"]) if st["run_id"] else None
             items.append({**st, "id": ticket.id, "team_id": ticket.team_id, "updated_at": ticket.updated_at, "activity": last})
         team_rows = await teams.list_teams()
+        backlog_count, backlog = await office.proposals.backlog()
         return {
             "teams": [{"id": t.id, "name": t.name, "needs_you": sum(1 for i in items if i["team_id"] == t.id and i["needs_viewer"])} for t in team_rows],
             "tickets": items,
             "needs_you": sum(1 for i in items if i["needs_viewer"]),
             "closed_count": closed_count,
+            "backlog_count": backlog_count,
+            "backlog": backlog,
+            "projects": [{"id": p.id, "name": p.name} for p in await office.projects.list()],  # choices on proposal cards
         }
 
     # ---- stages ----------------------------------------------------------------------------------------------
@@ -195,6 +199,13 @@ def register(app: FastAPI, office: Office) -> None:
         ticket = await office.stages.start(
             key, template=body.template, by=LOCAL_OWNER_ID, team_id=body.team_id, owner_user_id=body.owner_user_id, mode=body.mode
         )
+        office.scheduler.kick()
+        return ticket.model_dump()
+
+    @app.post("/api/tickets/{key}/backlog/start")
+    async def start_backlog(key: str) -> dict[str, Any]:
+        """The "Bắt đầu" button of the sidebar's Backlog list (SI-24): run the ticket's suggested workflow."""
+        ticket = await office.proposals.start_backlog(key, by=LOCAL_OWNER_ID)
         office.scheduler.kick()
         return ticket.model_dump()
 

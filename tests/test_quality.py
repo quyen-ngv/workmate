@@ -457,6 +457,49 @@ async def test_ac10_gate_card_lists_review(office: Office, runtime: FakeRuntime,
     assert "Điểm review" in text and "<b>F1</b> [high] src/app.py:2 thiếu khoá → không sửa: ngoài phạm vi" in text
 
 
+async def test_review_reply_refused_after_the_stage_finished(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    """The gate card holds a copy of the replies; a finished stage run must not change behind it."""
+    from actoroffice.tools.registry import ToolError
+
+    ticket_id = await review_ticket(office, tmp_path)
+    ticket = await office.tickets.get(ticket_id)
+    await office.rules.propose(
+        title="Code cần lead", body="", kind="gate", scope=f"team:{ticket.team_id}", spec={"roles": ["lead"], "when": {"paths": ["src/**"]}}, by="user", activate=True
+    )
+    errors: list[str] = []
+    before: list[dict] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        await ctx.office("review_reply", {"id": "F1", "action": "wontfix", "note": "ngoài phạm vi"})
+        await ctx.office("stage_complete", {"summary": "x"})  # passes: the rules gate waits, the ticket stays at build
+        before.append(await stored_review(office, ticket_id))
+        with pytest.raises(ToolError) as exc:
+            await ctx.office("review_reply", {"id": "F1", "action": "fixed", "note": "đổi ý"})
+        errors.append(str(exc.value))
+        return ok(ctx)
+
+    await run_review(office, runtime, ticket_id, work, reviewer(findings(("medium", "b"))), reviewer(findings()))
+    assert "already finished" in errors[0]
+    assert await stored_review(office, ticket_id) == before[0]
+    [item] = [i for i in await office.interactions.pending(ticket_id=ticket_id) if i.kind.value == "approve_stage"]
+    assert item.payload["review"][0]["reply"] == "không sửa: ngoài phạm vi"
+
+
+def test_gate_card_stays_under_telegram_limit() -> None:
+    from actoroffice.channels.tg_format import LIMIT, card
+
+    checks = [{"id": f"check_{i}", "status": "passed", "summary": "s" * 300} for i in range(11)]
+    review = [{"id": f"F{i}", "severity": "medium", "where": "src/a.py:1", "claim": "c" * 300, "reply": "r" * 300, "label": "chưa xác minh"} for i in range(1, 16)]
+    payload = {"ticket": "SI-7", "stage_title": "Làm", "title": "t" * 200, "summary": "x " * 1000, "checks": checks, "review": review, "access": ["db"], "min": 2}
+    text, _buttons = card({"id": 1, "kind": "approve_stage", "payload": payload})
+    assert len(text) <= LIMIT
+    assert "<b>F1</b>" in text and "điểm khác (xem trên web)" in text and "check_0" in text
+    short, _ = card({"id": 1, "kind": "approve_stage", "payload": {**payload, "summary": "ok", "checks": checks[:2], "review": review[:2]}})
+    assert "khác (xem trên web)" not in short and "<b>F2</b>" in short
+
+
 def test_ac10_gate_items_labels() -> None:
     from actoroffice.channels.tg_format import review_lines
     from actoroffice.services.review import evaluate, gate_items
@@ -524,6 +567,8 @@ async def test_ac11_last_review_for_the_pr_stage(office: Office, runtime: FakeRu
     await run_review(office, runtime, ticket_id, work, reviewer(findings(("medium", "b"), ("low", "c"))), reviewer(findings()))
     review = await office.stages.last_review(ticket_id)
     assert [(r["id"], r["reply"]) for r in review] == [("F1", "không sửa: lý do")]
+    await office.db.execute("UPDATE stage_runs SET outcome = 'rejected' WHERE ticket_id = ? AND stage = 'build'", (ticket_id,))
+    assert await office.stages.last_review(ticket_id) == []  # a build sent back is not what the pr stage shows
 
 
 def test_ac13_build_prompt_and_tool() -> None:

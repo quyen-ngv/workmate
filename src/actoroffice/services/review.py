@@ -193,6 +193,9 @@ class ReviewService:
             raise ReviewError("wontfix needs a reason in note: why the finding is not fixed")
         ticket = await office.tickets.get(ticket_id)
         srun = await office.stages.current_run(ticket)
+        if srun is not None and srun.finished_at is not None:
+            # The gate card and /stage already show this run's answers; they must not change behind them.
+            raise ReviewError("this stage is already finished: review findings can only be answered before stage_complete passes")
         findings = (srun.review.get("findings") or []) if srun else []
         finding = next((f for f in findings if str(f.get("id")).upper() == fid.strip().upper()), None)
         if srun is None or finding is None:

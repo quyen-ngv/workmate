@@ -244,7 +244,7 @@ class StageService:
         """Medium/high findings of the last finished stage run that was reviewed (the build stage, read at pr)."""
         for run in reversed(await self.runs(ticket_id)):
             check = next((c for c in run.checks if c.get("id") == "review_clean"), None)
-            if run.finished_at and check is not None:
+            if run.stage == "build" and run.finished_at and run.outcome == StageOutcome.COMPLETED.value and check is not None:
                 return gate_items(check.get("data"))
         return []
 

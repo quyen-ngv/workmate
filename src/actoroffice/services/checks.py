@@ -676,20 +676,22 @@ async def check_ac_coverage(ctx: CheckContext) -> CheckResult:
     acs = list(ac_blocks(requirements))
     if not acs:
         return CheckResult(id="ac_coverage", status="skipped", summary="requirements không có AC đánh số")
-    git = _git_ctx(ctx)
-    if git is None:
-        return CheckResult(id="ac_coverage", status="skipped", summary="không phải git worktree")
     tagged = review_ids(requirements)
     review = [a for a in acs if a in tagged]
     tested = [a for a in acs if a not in tagged]
-    globs = (ctx.project.profile.get("test_glob") if ctx.project else None) or DEFAULT_TEST_GLOBS
-    added = await added_lines(*git)
-    text = "\n".join(line for f, lines in added.items() if is_test(f, globs) for _, line in lines)
-    # "AC-1", "ac1" in test_ac1_total, @DisplayName("AC 1 …"): any non-letter may precede it
-    missing = [a for a in tested if not re.search(rf"(?i)(?<![a-z])AC[-_\s]?{a.split('-')[1]}(?!\d)", text)]
-    # an AC [review] needs no test, but the handoff must say how it was checked
+    # an AC [review] needs no test, but the handoff must say how it was checked (also outside a git worktree)
     handoff = ctx.docs.get("handoff", "")
     no_handoff = [a for a in review if handoff_line(handoff, a) is None]
+    git = _git_ctx(ctx)
+    if git is None and not no_handoff:
+        return CheckResult(id="ac_coverage", status="skipped", summary="không phải git worktree")
+    missing: list[str] = []
+    if git is not None:
+        globs = (ctx.project.profile.get("test_glob") if ctx.project else None) or DEFAULT_TEST_GLOBS
+        added = await added_lines(*git)
+        text = "\n".join(line for f, lines in added.items() if is_test(f, globs) for _, line in lines)
+        # "AC-1", "ac1" in test_ac1_total, @DisplayName("AC 1 …"): any non-letter may precede it
+        missing = [a for a in tested if not re.search(rf"(?i)(?<![a-z])AC[-_\s]?{a.split('-')[1]}(?!\d)", text)]
     data = {"missing": missing, "no_handoff": no_handoff, "review": review}
     problems = []
     if missing:

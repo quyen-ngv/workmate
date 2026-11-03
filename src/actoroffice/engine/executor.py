@@ -457,6 +457,7 @@ class Executor:
         # A turn that errors before any token, content or tool call (CLI start-up timeout, lost CLI process, API
         # overload) did nothing: run it again after a growing wait. Once the AI has worked, a re-run could repeat it.
         delays = self.office.settings.transient_retry_delays_s
+        runtime = "Kiro" if is_kiro(spec.model) else "Claude"
         watched = _CountingGate(gate)
         try:
             for attempt in range(len(delays) + 1):
@@ -472,14 +473,16 @@ class Executor:
                 if attempt == len(delays):
                     break
                 await self.office.runs.event(
-                    spec.run_id, "retry", {"attempt": attempt + 1, "of": len(delays), "delay_s": delays[attempt], "error": result.error}
+                    spec.run_id,
+                    "retry",
+                    {"attempt": attempt + 1, "of": len(delays), "delay_s": delays[attempt], "error": result.error, "runtime": runtime},
                 )
                 if not await self._wait_retry(spec.run_id, gate.ticket_id, delays[attempt]):
                     return TurnResult(status=TurnStatus.CANCELLED, error="stopped while waiting to retry")
         finally:
             self._stopped.discard(spec.run_id)
         if delays:
-            result.error = f"Claude khởi động lỗi {len(delays) + 1} lần liền: {result.error}. Bấm Thử lại ở giai đoạn."
+            result.error = f"{runtime} lỗi trước khi làm được gì {len(delays) + 1} lần liền: {result.error}. Bấm Thử lại ở giai đoạn."
         return result
 
     def stop(self, run_id: str) -> None:

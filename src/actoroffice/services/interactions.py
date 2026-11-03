@@ -19,7 +19,7 @@ from actoroffice.domain.errors import Conflict, NotFound
 from actoroffice.domain.ids import new_id, utcnow
 from actoroffice.domain.run import WakeSource
 from actoroffice.domain.work import Interaction, InteractionKind, InteractionStatus
-from actoroffice.store import Database
+from actoroffice.store import Database, Tx
 
 from .wakes import WakeService
 
@@ -180,12 +180,39 @@ class InteractionService:
         self.bus.publish("interaction.resolved", interaction=item.model_dump())
         return item
 
+    async def cancel_for_closed_tickets(self) -> int:
+        """Withdraw the gate cards and questions left pending on tickets closed earlier (before SI-29, closing kept them)."""
+        async with self.db.tx() as tx:
+            ids = await cancel_closed_ticket_cards(tx, "SELECT id FROM tickets WHERE status IN ('done', 'cancelled')", ())
+        for interaction_id in ids:
+            self._waiters.pop(interaction_id, None)
+            self.bus.publish("interaction.resolved", interaction=(await self.get(interaction_id)).model_dump())
+        return len(ids)
+
     async def cancel_for_run(self, run_id: str) -> None:
         await self.db.execute(
             "UPDATE interactions SET status = 'cancelled', resolved_at = ? WHERE run_id = ? AND status = 'pending' "
             "AND kind = 'approve_tool' AND json_extract(payload_json, '$.parked') IS NULL",
             (utcnow(), run_id),
         )
+
+
+CLOSED_TICKET_KINDS = (InteractionKind.APPROVE_STAGE.value, InteractionKind.QUESTION.value)
+
+
+async def cancel_closed_ticket_cards(tx: Tx, tickets_sql: str, params: tuple[Any, ...]) -> list[str]:
+    """Cancel the pending gate cards and questions of the tickets `tickets_sql` selects; the ids of the cancelled cards.
+
+    A closed ticket has no stage left to approve nor a run to answer; other kinds (tool approvals, proposals) stay."""
+    where = f"status = 'pending' AND kind IN ({','.join('?' * len(CLOSED_TICKET_KINDS))}) AND ticket_id IN ({tickets_sql})"
+    args = (*CLOSED_TICKET_KINDS, *params)
+    rows = await tx.fetchall(f"SELECT id FROM interactions WHERE {where}", args)
+    await tx.execute(f"UPDATE interactions SET status = 'cancelled', resolved_at = ? WHERE {where}", (utcnow(), *args))
+    return [r["id"] for r in rows]
+
+
+def interaction_from_row(row: dict[str, Any]) -> Interaction:
+    return _interaction(row)
 
 
 def _interaction(row: dict[str, Any]) -> Interaction:

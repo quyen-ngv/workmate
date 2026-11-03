@@ -95,6 +95,14 @@ class WakeService:
             (reason, wake_id),
         )
 
+    async def drop_for_ticket(self, ticket_id: int, reason: str, tx: Tx) -> None:
+        """Drop every pending wake of a ticket (it was closed: nothing is left to wake for)."""
+        await tx.execute(
+            "UPDATE wake_requests SET status = 'dropped', payload_json = json_set(payload_json, '$.dropped', ?) "
+            "WHERE ticket_id = ? AND status = 'pending'",
+            (reason, ticket_id),
+        )
+
     async def drop_unchanged(self, wake: WakeRequest, reason: str) -> bool:
         """Drop `wake` only if it is still pending with the reasons it was read with (nothing coalesced or claimed since)."""
         cur = await self.db.execute(

@@ -1063,6 +1063,7 @@ async def test_ac1_checks_treat_only_the_tagged_ac_as_review(office: Office, tmp
     testable, _ = await run_checks(office, ticket_id, repo, "ac_testable")
     assert testable.status == "passed" and testable.data["review"] == ["AC-2"]
     plan, _ = await run_checks(office, ticket_id, repo, "plan_has_ac_map")
+    assert plan.status == "passed" and plan.summary == "plan map đủ 2 AC test, 1 AC review (AC-2)"
     assert plan.data["review"] == ["AC-2"]
     coverage, _ = await run_checks(office, ticket_id, repo, "ac_coverage")
     assert coverage.status == "failed" and coverage.data["missing"] == ["AC-1"]  # the AC naming [review] mid-sentence still needs a test
@@ -1145,6 +1146,20 @@ async def test_ac7_ac_coverage_needs_handoff_line(office: Office, tmp_path: Path
     assert result.data["no_handoff"] == ["AC-2"] and result.data["missing"] == ["AC-3"]
     assert "chưa có test gắn với: AC-3" in result.summary and "AC [review] chưa có dòng cách kiểm trong handoff: AC-2" in result.summary
     assert handoff_line("| AC-2 | " + "x" * 400, "AC-2") == ("| AC-2 | " + "x" * 400)[:300]
+
+
+async def test_si29_ac1_ac_coverage_outside_git_still_needs_handoff_line(office: Office, tmp_path: Path) -> None:
+    ticket_id, _repo = await review_build(office, tmp_path, handoff="| AC-1 | test_ac1_x |\n")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    result, _ = await run_checks(office, ticket_id, plain, "ac_coverage")
+    assert result.status == "failed", result.summary
+    assert result.summary == "AC [review] chưa có dòng cách kiểm trong handoff: AC-2 (thêm dòng có AC id vào bảng AC của handoff)"
+    assert result.data["no_handoff"] == ["AC-2"]
+    # with the handoff line, only the test part is skipped
+    await set_doc(office, ticket_id, "handoff", REVIEW_HANDOFF)
+    result, _ = await run_checks(office, ticket_id, plain, "ac_coverage")
+    assert result.status == "skipped" and result.summary == "không phải git worktree"
 
 
 async def test_ac8_rules_gate_lists_review_acs(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:

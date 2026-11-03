@@ -71,7 +71,7 @@ async def test_ac1_startup_error_once_then_runs(office: Office, runtime: FakeRun
     assert first.status == RunStatus.SUCCEEDED
     retries = await events(office, first.id, "retry")
     assert [e["payload"]["attempt"] for e in retries] == [1]
-    assert retries[0]["activity"]["title"] == "Claude khởi động lỗi, thử lại lần 1"
+    assert retries[0]["activity"]["title"] == "Claude gặp lỗi, thử lại lần 1"
 
 
 async def test_ac2_startup_error_every_time_fails_after_three_calls(office: Office, runtime: FakeRuntime) -> None:
@@ -134,6 +134,43 @@ async def test_ac2_stop_while_waiting_to_retry_ends_the_wait(office: Office, run
     assert time.monotonic() - started < 5  # not the 30 s wait
     [run] = await office.runs.for_ticket(ticket.id)
     assert len(runtime.specs) == 1 and run.status == RunStatus.CANCELLED
+
+
+async def test_si29_ac4_kiro_failure_names_kiro(office: Office, runtime: FakeRuntime) -> None:
+    runtime.scripts += [startup_error] * 3
+    team = await office.teams.create_team("Billing", jira_project_key="bil")
+    team.settings.model = "kiro"
+    await office.teams.update_team(team)
+    ticket = await office.tickets.create("Export CSV", description="x")
+    await office.stages.start(ticket.key, template="quick", by="user", team_id=team.id)
+    await office.scheduler.wait_idle(timeout=20)
+
+    [run] = await office.runs.for_ticket(ticket.id)
+    assert runtime.specs[0].model == "kiro" and run.status == RunStatus.FAILED
+    assert (run.error or "").startswith("Kiro lỗi trước khi làm được gì 3 lần liền: ")
+    assert "Claude" not in (run.error or "") and "khởi động" not in (run.error or "")
+    titles = [e["activity"]["title"] for e in await events(office, run.id, "retry")]
+    assert titles == ["Kiro gặp lỗi, thử lại lần 1", "Kiro gặp lỗi, thử lại lần 2"]
+
+
+async def test_si29_ac5_chat_startup_error_once_then_replies(office: Office, runtime: FakeRuntime) -> None:
+    async def answer(ctx: TurnCtx) -> TurnResult:
+        return TurnResult(status=TurnStatus.COMPLETED, session_id=f"s-{ctx.spec.run_id}", text="Chào bạn.")
+
+    await office.install_default_positions(skills=False)
+    pos = await office.org.find_position("writer")
+    lan = await office.org.hire(pos.id, "Lan")
+    runtime.scripts += [startup_error, answer]
+    conv = await office.chat.dm(lan.id)
+    await office.chat.post_user(conv.id, "Chào Lan")
+    await office.scheduler.wait_idle(timeout=20)
+
+    assert len(runtime.specs) == 2 and runtime.specs[0].run_id == runtime.specs[1].run_id
+    run = await office.runs.get(runtime.specs[0].run_id)
+    assert run.status == RunStatus.SUCCEEDED
+    assert [e["payload"]["attempt"] for e in await events(office, run.id, "retry")] == [1]
+    msgs = await office.chat.messages(conv.id)
+    assert [(m.author_kind, m.body) for m in msgs if m.author_kind != "system"] == [("user", "Chào Lan"), ("actor", "Chào bạn.")]
 
 
 async def test_ac2_ticket_paused_while_waiting_is_not_retried(office: Office, runtime: FakeRuntime) -> None:

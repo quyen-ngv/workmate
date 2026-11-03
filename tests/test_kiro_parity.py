@@ -16,12 +16,15 @@ from actoroffice.config import Settings
 from actoroffice.domain.org import PermissionMode
 from actoroffice.runtimes.kiro_acp import KiroAcpRuntime
 
+from .seed import seed_db
+
 AGENT = [sys.executable, str(Path(__file__).parent / "fake_acp_agent.py")]
 
 
 @pytest.fixture
 async def office(tmp_path) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05, ai_model="kiro", corrective_turns=0), runtime=KiroAcpRuntime(command=AGENT))
+    seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
     yield o

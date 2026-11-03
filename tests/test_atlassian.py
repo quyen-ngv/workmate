@@ -20,6 +20,7 @@ from actoroffice.domain.work import ProjectAccess, TicketStatus
 from actoroffice.services.atlassian import Confluence, html_to_text, markdown_to_storage
 
 from .fakes import FakeRuntime, TurnCtx
+from .seed import seed_db
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -35,6 +36,7 @@ def runtime() -> FakeRuntime:
 @pytest.fixture
 async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05), runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
     yield o

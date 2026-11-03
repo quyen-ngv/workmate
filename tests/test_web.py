@@ -10,6 +10,7 @@ from actoroffice.config import Settings
 from actoroffice.web.server import create_app
 
 from .fakes import FakeRuntime
+from .seed import seed_db
 
 TOKEN = "t" * 40
 HEADERS = {"X-Requested-With": "actoroffice"}
@@ -22,6 +23,7 @@ def client(tmp_path):
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
+        seed_db(office.settings.db_path)
         await office.open()  # aiosqlite must be opened on the client's event loop
         await office.install_default_positions(skills=False)
         yield

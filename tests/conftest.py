@@ -11,10 +11,18 @@ from actoroffice.services.tickets import TicketService
 from actoroffice.services.wakes import WakeService
 from actoroffice.store import Database
 
+from . import seed
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _seed_templates(tmp_path_factory) -> None:
+    """Templates of this test process (one per xdist worker) live in its own basetemp."""
+    seed.templates_dir = tmp_path_factory.mktemp("templates")
+
 
 @pytest.fixture
 async def db(tmp_path) -> AsyncIterator[Database]:
-    database = Database(tmp_path / "test.db")
+    database = Database(seed.seed_db(tmp_path / "test.db"))
     await database.open()
     yield database
     await database.close()

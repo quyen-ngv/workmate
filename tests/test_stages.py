@@ -14,6 +14,7 @@ from actoroffice.domain.work import InteractionKind, InteractionStatus, TicketSt
 from actoroffice.runtimes.base import GateDecision
 
 from .fakes import FakeRuntime, TurnCtx
+from .seed import seed_db
 
 S = TicketStatus
 
@@ -49,6 +50,7 @@ def runtime() -> FakeRuntime:
 @pytest.fixture
 async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05), runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
     yield o

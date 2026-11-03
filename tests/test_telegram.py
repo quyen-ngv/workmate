@@ -15,6 +15,7 @@ from actoroffice.config import Settings
 from actoroffice.domain.work import InteractionKind, ProjectAccess
 
 from .fakes import FakeRuntime
+from .seed import seed_db
 
 GROUP = -100123
 
@@ -59,6 +60,7 @@ class FakeBot:
 @pytest.fixture
 async def office(tmp_path) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05), runtime=FakeRuntime(scripts=[]))
+    seed_db(o.settings.db_path)
     await o.open()
     await o.install_default_positions(skills=False)
     await o.start_notifier()

@@ -8,8 +8,8 @@ from importlib import resources
 from pathlib import Path
 
 import pytest
-import yaml
 
+from actoroffice.app import position_template
 from actoroffice.domain.org import Position
 from actoroffice.security import shell
 from actoroffice.security.policy import WAIT_LOOP_REASON, Decision, PolicyEngine, ToolCallContext, office_tool
@@ -28,7 +28,7 @@ def engine(tmp_path) -> PolicyEngine:
 
 
 def engineer() -> Position:
-    data = yaml.safe_load((resources.files("actoroffice.templates.positions") / "engineer.yaml").read_text(encoding="utf-8"))
+    data = position_template((resources.files("actoroffice.templates.positions") / "engineer.yaml").read_text(encoding="utf-8"))
     return Position(id="pos", **data)
 
 

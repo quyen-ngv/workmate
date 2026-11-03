@@ -31,12 +31,17 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.17.3",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Parallel by default (one process per CPU); `-n0` runs in one process. See tests/seed.py for the shared templates.
+addopts = "-n auto"
+# Keep only the tmp dirs of failed tests, so a session does not have to sweep hundreds of old git repos first.
+tmp_path_retention_policy = "failed"
 
 [tool.ruff]
 line-length = 200

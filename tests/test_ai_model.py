@@ -14,6 +14,7 @@ from actoroffice.engine.activity import ActivityTracker
 from actoroffice.runtimes.claude_sdk import _to_turn_result
 
 from .fakes import FakeRuntime, TurnCtx
+from .seed import seed_db
 
 AI_MODEL = "claude-opus-5-5"
 
@@ -27,6 +28,7 @@ def runtime() -> FakeRuntime:
 async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     settings = Settings(data_dir=tmp_path / "home", approval_wait_s=0.05, corrective_turns=0, ai_model=AI_MODEL)
     o = Office(settings, runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.install_default_positions(skills=False)
     await o.start_notifier()
@@ -82,6 +84,7 @@ async def test_ac1_other_actors_keep_their_model(office, runtime):
 
 async def test_ac1_ai_actor_without_ai_model_keeps_old_choice(tmp_path, runtime):
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05, corrective_turns=0), runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.install_default_positions(skills=False)
     await o.start_notifier()

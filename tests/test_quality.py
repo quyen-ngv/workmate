@@ -21,6 +21,7 @@ from actoroffice.runtimes.base import GateDecision
 from actoroffice.services.checks import CheckResult, parse_coverage
 
 from .fakes import FakeRuntime, TurnCtx
+from .seed import copy_repo, seed_db
 
 REQUIREMENTS = "- AC-1: Given a When b Then c\n- AC-2: Given d When e Then f\n"
 
@@ -41,6 +42,7 @@ def runtime() -> FakeRuntime:
 @pytest.fixture
 async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     o = Office(Settings(data_dir=tmp_path / "home", approval_wait_s=0.05), runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
     yield o
@@ -48,13 +50,7 @@ async def office(tmp_path, runtime) -> AsyncIterator[Office]:
 
 
 async def repo_project(office: Office, tmp_path: Path, profile: dict | None = None):
-    repo = tmp_path / "svc"
-    repo.mkdir()
-    git(repo, "init", "-q", "-b", "main")
-    (repo / "src").mkdir()
-    (repo / "src" / "app.py").write_text("def total(x):\n    return x\n", encoding="utf-8")
-    git(repo, "add", "-A")
-    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+    repo = copy_repo(tmp_path / "svc", {"src/app.py": "def total(x):\n    return x\n"})  # git init/add/commit once per process
     project = await office.projects.create("svc", path=str(repo), access=ProjectAccess.WORKTREE)
     if profile:
         project = await office.projects.configure(project.id, profile=profile)

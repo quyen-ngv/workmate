@@ -13,6 +13,7 @@ from actoroffice.config import Settings
 from actoroffice.domain.run import RunStatus, TurnResult, TurnStatus, Usage
 
 from .fakes import FakeRuntime, TurnCtx
+from .seed import seed_db
 
 INIT_TIMEOUT = "Exception: Control request timeout: initialize"
 
@@ -40,6 +41,7 @@ async def office(tmp_path, runtime, delays) -> AsyncIterator[Office]:
     # no disposition reminder: every runtime call counted below is a try of the same turn
     settings = Settings(data_dir=tmp_path / "home", approval_wait_s=0.05, corrective_turns=0, transient_retry_delays_s=delays)
     o = Office(settings, runtime=runtime)
+    seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
     yield o

@@ -150,12 +150,14 @@ Goal: a pull request people can review and merge.
   connected, the branch itself is reviewed on this machine: do not ask for a PR URL and do not push; call
   stage_complete with the branch name, and a person merges it.
 - PR description: summary, AC → test map, check results, how to test, assumptions and known limits.
-- Do not run the test suite again: the code was tested when the build stage finished. Take the check results for
-  the PR description from the build stage (its stage_complete result and the `handoff`); the office reruns what it
-  needs at stage_complete.
+- Do not run the test suite again while the code has not changed since the build stage: it was tested when the
+  build stage finished. Take the check results for the PR description from the build stage (its stage_complete
+  result and the `handoff`); the office reruns what it needs at stage_complete.
 - stage_complete: the stage waits for a person to merge.
 - When woken with review comments ("Review mới trên PR"), read them with pr_comments, fix them on the same
-  branch, commit, reply to each comment with pr_reply, and keep the dossier current. Then end your turn.""",
+  branch, run only the tests related to what you changed (their test file, or -k; the office runs the whole suite
+  at stage_complete), commit, reply to each comment with pr_reply, and keep the dossier current. Then end your
+  turn.""",
     "produce": """\
 Goal: the deliverable the requirements describe.
 - Write the `report` (research) or `document` (doc) the approved requirements ask for. Cite every source.

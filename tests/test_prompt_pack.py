@@ -14,6 +14,7 @@ from actoroffice.engine import prompt_pack
 
 OLD = "run the project's build/test/lint"
 NO_RERUN = "Do not run the test suite again"
+REVIEW_BULLET = '- When woken with review comments ("Review mới trên PR")'
 
 
 def _prompt(template_name: str, office_runs_tests: bool, stage_id: str = "build") -> prompt_pack.StagePrompt:
@@ -62,13 +63,45 @@ def test_ac2_profile_without_test_keeps_running_the_suite(template_name: str) ->
     assert "only the tests for" not in system
 
 
+def _pr_stage(template_name: str) -> str:
+    return _prompt(template_name, office_runs_tests=True, stage_id="pr").parts["stage"]
+
+
+def _split_review_bullet(stage: str) -> tuple[str, str]:
+    """Return (the review-comment bullet, the guide without it)."""
+    start = stage.index(REVIEW_BULLET)
+    end = stage.find("\n- ", start)
+    end = len(stage) if end == -1 else end
+    return stage[start:end], stage[:start] + stage[end:]
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
 @pytest.mark.parametrize("template_name", ["code", "quick"])
-def test_ac1_pr_guide_does_not_rerun_tests(template_name: str) -> None:
-    stage = _prompt(template_name, office_runs_tests=True, stage_id="pr").parts["stage"]
+def test_ac1_pr_guide_does_not_rerun_tests_while_code_unchanged(template_name: str) -> None:
+    stage = _pr_stage(template_name)
     assert NO_RERUN in stage
     assert "handoff" in stage and "build stage" in stage
-    # apart from the warning itself, nothing tells the AI to run tests
-    assert not re.search(r"(?i)\brun\b[^.\n]*\btests?\b", stage.replace(NO_RERUN, ""))
+    assert f"{NO_RERUN} while the code has not changed since the build stage" in _flat(stage)
+
+
+@pytest.mark.parametrize("template_name", ["code", "quick"])
+def test_ac2_pr_review_fix_runs_related_tests(template_name: str) -> None:
+    bullet, _ = _split_review_bullet(_pr_stage(template_name))
+    flat = _flat(bullet)
+    assert "run only the tests related to what you changed" in flat
+    assert "the office runs the whole suite at stage_complete" in flat
+    assert flat.index("run only the tests") < flat.index("commit")
+    assert NO_RERUN not in bullet
+
+
+@pytest.mark.parametrize("template_name", ["code", "quick"])
+def test_ac3_pr_guide_outside_review_does_not_run_tests(template_name: str) -> None:
+    _, rest = _split_review_bullet(_pr_stage(template_name))
+    # apart from the warning itself and the review bullet, nothing tells the AI to run tests
+    assert not re.search(r"(?i)\brun\b[^.\n]*\btests?\b", rest.replace(NO_RERUN, ""))
 
 
 def test_ac1_base_says_run_long_commands_in_the_foreground() -> None:

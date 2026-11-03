@@ -111,6 +111,20 @@ code, pre { font-family: var(--mono); font-size: var(--fs-sm); }
 .tk.closed .name { color: var(--muted); }
 .tag-cancelled { font-size: var(--fs-xs); padding: 0 6px; border-radius: 999px; color: var(--faint); border: 1px solid var(--line); white-space: nowrap; }
 .closed-more { margin: var(--gap-1) var(--gap-4); }
+.tk.backlog { cursor: default; }
+.tk.backlog .name { color: var(--muted); }
+.dot.backlog { background: none; box-shadow: inset 0 0 0 1px var(--muted); }
+
+/* proposed tickets card (SI-24) */
+.card .proposal { border-top: 1px solid var(--line); padding-top: var(--gap-2); display: grid; gap: var(--gap-1); }
+.card .proposal.off { opacity: 0.5; }
+.card .proposal-head { display: flex; align-items: center; gap: var(--gap-2); }
+.card .proposal-head input[type="text"] { flex: 1; }
+.card .proposal textarea { min-height: 48px; resize: vertical; }
+.card .proposal input[type="text"], .card .proposal textarea, .card .proposal select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: var(--radius); padding: 2px var(--gap-1); font: inherit; font-size: var(--fs-sm); }
+.card .proposal-opts { display: flex; gap: var(--gap-1); flex-wrap: wrap; }
+.card .proposal .why { font-size: var(--fs-xs); color: var(--muted); }
+.card .proposal-warn { font-size: var(--fs-xs); color: var(--warn); background: var(--warn-bg); border-radius: var(--radius); padding: 2px var(--gap-2); }
 .badge { font-size: var(--fs-xs); padding: 1px 6px; border-radius: 999px; background: var(--needs-bg); color: var(--needs); white-space: nowrap; }
 .badge.soft { background: var(--panel-2); color: var(--muted); }
 .side-foot { border-top: 1px solid var(--line); padding: var(--gap-2); display: flex; gap: var(--gap-1); flex-wrap: wrap; }

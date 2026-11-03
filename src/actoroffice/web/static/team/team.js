@@ -20,6 +20,7 @@ const state = {
   split: localStorage.getItem("ao.split") === "1",
   side: localStorage.getItem("ao.side") || "files",
   details: {}, // key → {ticket, stage, detail}
+  drafts: {}, // proposal card id → the person's choices per proposed ticket (kept across re-renders)
   acts: {}, // run id → activities
   runTicket: {}, // run id → ticket key
 };
@@ -163,6 +164,16 @@ function renderSidebar() {
           </button>`).join("")}
         ${closed.loading ? `<div class="empty">Đang tải…</div>` : ""}
         ${closed.has_more && !closed.loading ? `<button class="btn small closed-more" data-closed-more>Xem thêm</button>` : ""}` : ""}` : "";
+  // tickets waiting in the backlog (e.g. created from a proposal card): "Bắt đầu" runs their suggested workflow
+  const backlog = (state.board.backlog || []).filter((t) => !state.team || t.team_id === state.team);
+  const backlogSection = state.board.backlog_count ? `
+      <div class="side-title">Backlog (${state.board.backlog_count})</div>
+      ${backlog.map((t) => `
+        <div class="tk backlog" title="${esc(t.title)}">
+          <span class="dot backlog"></span>
+          <span class="col"><span class="name">${esc(t.title)}</span><span class="sub">${esc(t.ticket)} · ${esc(t.template)}${t.blockers.length ? ` · chờ ${esc(t.blockers.join(", "))}` : ""}</span></span>
+          <button class="btn small" data-backlog-start="${esc(t.ticket)}" title="Chạy quy trình ${esc(t.template)}">Bắt đầu</button>
+        </div>`).join("")}` : "";
   const byTeam = {};
   for (const t of visible) (byTeam[t.team_id || ""] ||= []).push(t);
   const teamName = (id) => (teams.find((t) => t.id === id) || {}).name || "Chung";
@@ -183,6 +194,7 @@ function renderSidebar() {
               <span class="sub">${esc(t.ticket)} · ${esc(t.stage_title)}${t.activity ? " · " + esc(t.activity.title) : ""}</span></span>
             ${t.needs_viewer ? `<span class="badge">Cần bạn</span>` : `<span class="meta">${ago(t.activity?.at || t.updated_at)}</span>`}
           </button>`).join("")}`).join("") || (closed_count ? `<div class="empty">Không có việc đang làm.</div>` : `<div class="empty">Chưa có việc. Bấm + để giao việc cho AI.</div>`)}
+      ${backlogSection}
       ${closedSection}
     </div>
     <div class="side-foot">
@@ -318,6 +330,7 @@ function card(item) {
       <div class="composer inline"><textarea placeholder="${p.gate === "knowledge" ? "Bỏ mục sai: 'bỏ 2, 5'" : "Ghi chú khi trả lại…"}" data-text></textarea></div>
       <div class="opts"><button class="btn good" data-approve="1">👍 ${p.gate === "knowledge" ? "Xác nhận" : "Duyệt"}</button><button class="btn bad" data-approve="0">👎 ${p.gate === "knowledge" ? "Bỏ (theo ghi chú)" : "Trả lại"}</button></div></div>`;
   }
+  if (item.kind === "propose_tickets") return proposalCard(item);
   if (item.kind === "env_access") {
     return `<div class="card" data-card="${esc(item.id)}"><div class="who">🔑 AI xin quyền ${esc(p.level_label)} vào ${esc(p.resource)} (${esc(p.env)}) trong ${esc(p.ttl_h)}h — cần ${esc(who)}</div>
       <div class="q">${esc(p.reason)}</div><div class="opts"><button class="btn good" data-approve="1">Cho phép</button><button class="btn bad" data-approve="0">Không</button></div></div>`;
@@ -333,6 +346,61 @@ function card(item) {
         <button class="btn bad" data-approve="0">Từ chối</button></div></div>`;
   }
   return `<div class="card"><div class="who">${esc(item.kind)}</div></div>`;
+}
+
+// Proposed tickets (SI-24). The person's choices and edits live in state.drafts, so a re-render (live events)
+// keeps them; they are sent with "Tạo N ticket".
+function proposalDraft(item) {
+  return state.drafts[item.id] ||= (item.payload?.items || []).map((it) => ({
+    n: it.n, selected: true, title: it.title || "", description: it.description || "", workflow: it.workflow || "code",
+    project_id: it.project_id || "", run_now: !!it.run_now,
+  }));
+}
+
+function proposalCard(item) {
+  const p = item.payload || {};
+  const items = p.items || [];
+  const draft = proposalDraft(item);
+  const chosen = new Set(draft.filter((d) => d.selected).map((d) => d.n));
+  const projects = state.board.projects || [];
+  const option = (value, label, on) => `<option value="${esc(value)}" ${on ? "selected" : ""}>${esc(label)}</option>`;
+  const rows = items.map((it, i) => {
+    const d = draft[i];
+    const lost = (it.depends_on || []).filter((n) => !chosen.has(n));
+    const deps = [...(it.depends_on || []).map((n) => `mục ${n}`), ...(it.blocked_by || [])];
+    const choices = projects.some((x) => x.id === d.project_id) ? projects : [...projects, { id: d.project_id, name: it.project || "—" }];
+    return `<div class="proposal ${d.selected ? "" : "off"}" data-n="${esc(it.n)}">
+      <label class="proposal-head"><input type="checkbox" data-p="selected" ${d.selected ? "checked" : ""} aria-label="Chọn mục ${esc(it.n)}"><b>${esc(it.n)}.</b><input type="text" data-p="title" value="${esc(d.title)}" aria-label="Tiêu đề"></label>
+      <textarea data-p="description" rows="3" aria-label="Mô tả / AC">${esc(d.description)}</textarea>
+      <div class="why">Vì sao: ${esc(it.why)}</div>
+      <div class="proposal-opts">
+        <select data-p="workflow" aria-label="Quy trình">${option("code", "code (đầy đủ)", d.workflow === "code")}${option("quick", "quick (sửa nhỏ)", d.workflow === "quick")}</select>
+        <select data-p="project_id" aria-label="Dự án">${choices.map((x) => option(x.id, x.name, x.id === d.project_id)).join("")}</select>
+        <select data-p="run_now" aria-label="Chạy ngay hay để backlog">${option("1", "Chạy ngay", d.run_now)}${option("0", "Để backlog", !d.run_now)}</select>
+      </div>
+      ${deps.length ? `<div class="why">Phụ thuộc: ${esc(deps.join(", "))}</div>` : ""}
+      ${d.selected && lost.length ? `<div class="proposal-warn">⚠ Bỏ phụ thuộc vào ${esc(lost.map((n) => `"${items[n - 1]?.title || n}"`).join(", "))} (không được chọn)</div>` : ""}
+    </div>`;
+  }).join("");
+  return `<div class="card proposals" data-card="${esc(item.id)}" data-proposal>
+    <div class="who">📋 ${esc(p.proposed_by)} đề xuất ${items.length} ticket — owner hoặc lead duyệt</div>${rows}
+    <div class="opts"><button class="btn good" data-propose-create ${chosen.size ? "" : "disabled"}>Tạo ${chosen.size} ticket</button><button class="btn bad" data-propose-drop>Bỏ hết</button></div></div>`;
+}
+
+// An edit on a proposal card: kept in the draft; a checkbox re-renders the pane (count, warnings).
+function proposalInput(e) {
+  const el = e.target;
+  const box = el.closest?.("[data-proposal]");
+  if (!box || !el.dataset.p) return;
+  const row = el.closest("[data-n]");
+  const d = (state.drafts[box.dataset.card] || []).find((x) => String(x.n) === row.dataset.n);
+  if (!d) return;
+  const field = el.dataset.p;
+  d[field] = field === "selected" ? el.checked : field === "run_now" ? el.value === "1" : el.value;
+  if (field === "selected") {
+    const key = el.closest("[data-pane]")?.dataset.pane;
+    if (key) renderPane(key);
+  }
 }
 
 // Repos without a code host: the office merges the branch, tests the merge result and passes the merge gate.
@@ -634,6 +702,12 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (ds.closedMore !== undefined) return act(() => loadClosed(state.closed.items.length));
+  if (ds.backlogStart) return act(async () => {
+    await api(`/api/tickets/${encodeURIComponent(ds.backlogStart)}/backlog/start`, { method: "POST" });
+    toast(`Đã bắt đầu ${ds.backlogStart}`);
+    await loadBoard();
+    openTicket(ds.backlogStart);
+  });
   if (ds.reopenSend) return act(async () => {
     const stage = $("[data-reopen-stage]").value;
     const text = $("[data-reopen-text]").value.trim();
@@ -697,6 +771,18 @@ document.addEventListener("click", (e) => {
     if (ds.answerText !== undefined && note) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { answer: note } }); await refresh(key); });
     if (ds.remember) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: true, remember: ds.remember } }); toast("Đã ghi nhớ: lần sau không hỏi lại"); await refresh(key); });
     if (ds.approve !== undefined) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: ds.approve === "1", note: note || undefined } }); await refresh(key); });
+    if (ds.proposeCreate !== undefined) return act(async () => {
+      const items = (state.drafts[id] || []).map((d) => ({ ...d, title: d.title.trim(), project_id: d.project_id || null }));
+      const r = await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: true, items } });
+      delete state.drafts[id];
+      toast(`Đã tạo ${(r.response?.created || []).join(", ")}`);
+      for (const e of r.response?.errors || []) toast(e, true);
+      await refresh(key);
+    });
+    if (ds.proposeDrop !== undefined) {
+      if (!confirm("Bỏ hết các ticket được đề xuất?")) return;
+      return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: false } }); delete state.drafts[id]; toast("Đã bỏ đề xuất"); await refresh(key); });
+    }
   }
   if (ds.revoke) return act(async () => { await api(`/api/grants/${ds.revoke}/revoke`, { method: "POST" }); renderSide(); });
   if (ds.createTask !== undefined) return act(async () => {
@@ -736,7 +822,10 @@ document.addEventListener("click", (e) => {
   });
 });
 
+document.addEventListener("input", proposalInput);
+
 document.addEventListener("change", (e) => {
+  proposalInput(e);
   const id = e.target.dataset?.permMode;
   if (id) act(async () => { await api(`/api/projects/${id}/permissions`, { method: "POST", body: { mode: e.target.value } }); toast("Đã đổi quyền của AI cho dự án"); await pageSetup(); });
 });

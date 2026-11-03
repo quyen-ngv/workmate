@@ -134,6 +134,7 @@ class InteractionKind(StrEnum):
     APPROVE_ACCESS = "approve_access"  # an actor needs to change files of a read-only project; the user decides
     ENV_ACCESS = "env_access"  # the AI asks for time-limited access to a shared environment; a Dev/Lead decides
     APPROVE_STAGE = "approve_stage"  # a stage gate: people with the right role approve the stage's documents
+    PROPOSE_TICKETS = "propose_tickets"  # the AI proposes a list of tickets; an owner or lead approves it once
 
 
 class InteractionStatus(StrEnum):

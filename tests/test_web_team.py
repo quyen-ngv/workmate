@@ -346,3 +346,89 @@ def test_team_page_and_knowledge_api(client):  # noqa: F811
     from actoroffice.web.server import Answer
 
     assert Answer(approved=False, note="thiếu AC").note == "thiếu AC"
+
+
+# ---- SI-24: proposed tickets and the Backlog list ------------------------------------------------------------
+
+
+def _propose(office: Office, c: TestClient, *, ticket_key: str | None = None) -> tuple[str, str | None]:
+    """The AI proposes ITEMS from a ticket session (ticket_key) or from its DM; returns (card id, DM id)."""
+    from actoroffice.tools.proposal_tools import propose_tickets
+
+    from .test_propose_tickets import ITEMS, ctx_for
+
+    async def propose() -> tuple[str, str | None]:
+        conv = None
+        if ticket_key:
+            ctx = await ctx_for(office, ticket_id=(await office.tickets.get(ticket_key)).id)
+        else:
+            conv = (await office.chat.dm((await office.ensure_ai()).id)).id
+            ctx = await ctx_for(office, conversation=conv)
+        await propose_tickets({"items": ITEMS}, ctx)
+        [card] = [i for i in await office.interactions.pending() if i.kind.value == "propose_tickets"]
+        return card.id, conv
+
+    return c.portal.call(propose)
+
+
+def test_ac10_ticket_detail_has_pending_proposal(office_client) -> None:
+    office, c = office_client
+    login(c)
+    task = c.post("/api/tasks", json={"title": "Nghiên cứu backlog", "template": "research"}, headers=HEADERS).json()
+    card_id, _ = _propose(office, c, ticket_key=task["key"])
+    [card] = [i for i in c.get(f"/api/tickets/{task['key']}").json()["pending"] if i["kind"] == "propose_tickets"]
+    assert card["id"] == card_id
+    second = card["payload"]["items"][1]
+    assert {"n", "title", "why", "description", "workflow", "project_id", "project", "run_now", "depends_on"} <= set(second)
+    assert second["depends_on"] == [1] and second["run_now"] is False
+    board = c.get("/api/board", headers=HEADERS).json()
+    assert any(p["id"] == second["project_id"] for p in board["projects"])  # the card's project choices
+    edits = [{"n": 1, "selected": True, "title": "Hàng đợi (sửa)"}, {"n": 3, "selected": False}]
+    r = c.post(f"/api/interactions/{card_id}/answer", json={"approved": True, "items": edits}, headers=HEADERS)
+    assert r.status_code == 200 and len(r.json()["response"]["created"]) == 2 and r.json()["response"]["dropped"] == [3]
+    again = c.post(f"/api/interactions/{card_id}/answer", json={"approved": True}, headers=HEADERS)
+    assert again.status_code == 409  # a double click creates nothing more
+    assert any("Đã tạo 2 ticket" in cm["body"] for cm in c.get(f"/api/tickets/{task['key']}").json()["comments"])
+
+
+def test_ac10_bad_edit_is_rejected_and_card_stays(office_client) -> None:
+    office, c = office_client
+    login(c)
+    card_id, _ = _propose(office, c)
+    r = c.post(f"/api/interactions/{card_id}/answer", json={"approved": True, "items": [{"n": 1, "workflow": "research"}]}, headers=HEADERS)
+    assert r.status_code == 422 and "mục 1" in r.json()["error"]
+    assert c.get(f"/api/interactions/{card_id}").json()["status"] == "pending"
+
+
+def test_ac11_chat_proposal_approved_posts_created_list(office_client) -> None:
+    office, c = office_client
+    login(c)
+    card_id, conv = _propose(office, c)
+    keys = c.post(f"/api/interactions/{card_id}/answer", json={"approved": True}, headers=HEADERS).json()["response"]["created"]
+    assert len(keys) == 3
+
+    async def messages() -> list[str]:
+        return [m.body for m in await office.chat.messages(conv)]
+
+    bodies = c.portal.call(messages)
+    assert any(all(k in b for k in keys) and "Đã tạo 3 ticket" in b for b in bodies)
+
+
+def test_ac13_board_backlog_and_start(office_client) -> None:
+    office, c = office_client
+    login(c)
+    card_id, _ = _propose(office, c)
+    k1, k2, k3 = c.post(f"/api/interactions/{card_id}/answer", json={"approved": True}, headers=HEADERS).json()["response"]["created"]
+    board = c.get("/api/board", headers=HEADERS).json()
+    assert board["backlog_count"] == 2
+    assert [(b["ticket"], b["template"], b["blockers"]) for b in board["backlog"]] == [(k2, "quick", [k1]), (k3, "code", [])]
+    assert k1 in [t["ticket"] for t in board["tickets"]]
+
+    started = c.post(f"/api/tickets/{k3}/backlog/start", headers=HEADERS)
+    assert started.status_code == 200 and started.json()["stage"] == "understand" and started.json()["status"] == "todo"
+    board = c.get("/api/board", headers=HEADERS).json()
+    assert board["backlog_count"] == 1 and k3 in [t["ticket"] for t in board["tickets"]]
+    # A-3: still blocked by k1 → enters its workflow, waits in blocked
+    blocked = c.post(f"/api/tickets/{k2}/backlog/start", headers=HEADERS).json()
+    assert blocked["status"] == "blocked" and blocked["stage_template"] == "quick" and blocked["stage"]
+    assert c.post(f"/api/tickets/{k3}/backlog/start", headers=HEADERS).status_code == 409

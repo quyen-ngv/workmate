@@ -886,6 +886,7 @@ function cardBody(item) {
           : doneLine(item.status === "answered" ? "Đã bỏ" : item.status),
       ]);
   }
+  if (item.kind === "propose_tickets") return proposalCard(item, answer);
   if (item.kind === "approve_automation") {
     let verdict = item.status;
     if (item.response) verdict = item.response.approved ? "Đã duyệt và bật" : "Đã từ chối";
@@ -929,6 +930,60 @@ function cardBody(item) {
       ] : doneLine(`${(item.response && item.response.answered_by) || ""} trả lời: ${item.response ? item.response.answer : item.status}`));
   }
   return h("div", { class: "card", text: item.kind });
+}
+
+// A list of proposed tickets (SI-24): choose, edit, run now or backlog per item, then create them in one go.
+function proposalCard(item, answer) {
+  const p = item.payload || {};
+  const items = p.items || [];
+  const head = h("div", { class: "title", text: `${p.proposed_by || ""} đề xuất ${items.length} ticket` });
+  if (item.status !== "pending") {
+    const r = item.response || {};
+    const done = r.approved
+      ? h("div", { class: "done" }, "Đã tạo ", (r.created || []).map((k, i) => [i ? ", " : "", h("a", { href: `#/t/${k}`, text: k })]))
+      : h("div", { class: "done", text: item.status === "answered" ? "Đã bỏ hết" : item.status });
+    return h("div", { class: "card ask" }, head, done);
+  }
+  const rows = items.map((it) => {
+    const sel = h("input", { type: "checkbox", checked: true, "aria-label": `Chọn mục ${it.n}` });
+    const title = h("input", { type: "text", value: it.title || "" });
+    const desc = h("textarea", { rows: 3 });
+    desc.value = it.description || "";
+    const workflow = h("select", {}, [["code", "code (đầy đủ)"], ["quick", "quick (sửa nhỏ)"]].map(([v, l]) => h("option", { value: v, text: l, selected: v === it.workflow })));
+    const projects = S.projects.some((x) => x.id === it.project_id) ? S.projects : [...S.projects, { id: it.project_id || "", name: it.project || "—" }];
+    const project = h("select", {}, projects.map((x) => h("option", { value: x.id, text: x.name, selected: x.id === it.project_id })));
+    const runNow = h("select", {}, h("option", { value: "1", text: "Chạy ngay", selected: it.run_now }), h("option", { value: "0", text: "Để backlog", selected: !it.run_now }));
+    const deps = [...(it.depends_on || []).map((n) => `mục ${n}`), ...(it.blocked_by || [])];
+    const warn = h("div", { class: "proposal-warn", hidden: true });
+    const node = h("div", { class: "proposal" },
+      h("label", { class: "proposal-head" }, sel, h("b", { text: `${it.n}.` }), title),
+      desc,
+      h("div", { class: "reason", text: `Vì sao: ${it.why || ""}` }),
+      h("div", { class: "row-inline" }, workflow, project, runNow),
+      deps.length ? h("div", { class: "sub", text: `Phụ thuộc: ${deps.join(", ")}` }) : null,
+      warn);
+    return { it, sel, title, desc, workflow, project, runNow, warn, node };
+  });
+  const create = h("button", { class: "btn primary" });
+  const update = () => {
+    const chosen = new Set(rows.filter((r) => r.sel.checked).map((r) => r.it.n));
+    for (const r of rows) {
+      r.node.classList.toggle("off", !r.sel.checked);
+      const lost = (r.it.depends_on || []).filter((n) => !chosen.has(n));
+      r.warn.hidden = !(r.sel.checked && lost.length);
+      r.warn.textContent = lost.length ? `⚠ Bỏ phụ thuộc vào ${lost.map((n) => `"${(items[n - 1] || {}).title}"`).join(", ")} (không được chọn)` : "";
+    }
+    create.textContent = `Tạo ${chosen.size} ticket`;
+    create.disabled = !chosen.size;
+  };
+  rows.forEach((r) => r.sel.addEventListener("change", update));
+  update();
+  create.addEventListener("click", () => answer({
+    approved: true,
+    items: rows.map((r) => ({ n: r.it.n, selected: r.sel.checked, title: r.title.value.trim(), description: r.desc.value, workflow: r.workflow.value, project_id: r.project.value || null, run_now: r.runNow.value === "1" })),
+  }));
+  return h("div", { class: "card ask proposals" }, head, rows.map((r) => r.node),
+    h("div", { class: "actions" }, create, h("button", { class: "btn", text: "Bỏ hết", onclick: () => answer({ approved: false }) })));
 }
 
 // ---- composer with @mention autocomplete ----------------------------------------------------

@@ -243,6 +243,14 @@ class TeamService:
             return True
         return bool(await self.roles_for(user_id, ticket) & set(wanted))
 
+    async def has_role_anywhere(self, user_id: str, wanted: list[str]) -> bool:
+        """Whether the person holds one of `wanted` by default or in any team (decisions not tied to a ticket)."""
+        roles = await self.roles_for(user_id, None)
+        rows = await self.db.fetchall("SELECT roles_json FROM memberships WHERE user_id = ?", (user_id,))
+        for row in rows:
+            roles |= set(json.loads(row["roles_json"]))
+        return bool(roles & set(wanted))
+
     async def approvers(self, ticket: Ticket, policy: GatePolicy) -> list[User]:
         """Who is asked at a gate: participants holding a role, else team members holding it, else the fallback."""
         wanted = set(policy.roles)

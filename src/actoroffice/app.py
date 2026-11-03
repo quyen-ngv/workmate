@@ -48,6 +48,7 @@ from actoroffice.services.merges import MergeService
 from actoroffice.services.notices import ChatNotifier
 from actoroffice.services.org import OrgService
 from actoroffice.services.projects import ProjectService
+from actoroffice.services.proposals import ProposalService
 from actoroffice.services.prwatch import PullRequestWatcher
 from actoroffice.services.review import ReviewService
 from actoroffice.services.rules import RuleService
@@ -105,6 +106,7 @@ class Office:
         self.infra = InfraService(self)
         self.logs = LogService(self)
         self.ui = UiPreviewService(self)  # the ticket's temporary app for UI screenshots (SI-23)
+        self.proposals = ProposalService(self)  # lists of proposed tickets approved in one go (SI-24)
         self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),
@@ -277,6 +279,8 @@ class Office:
             return await self.stages.answer_gate(item, response, by=by)
         if item.kind == InteractionKind.ENV_ACCESS:
             return await self.access.answer(item, response, by=by)
+        if item.kind == InteractionKind.PROPOSE_TICKETS:
+            return await self.proposals.answer(item, response, by=by)
         if item.kind == InteractionKind.QUESTION and item.payload.get("roles") and by != LOCAL_OWNER_ID:
             ticket = await self.tickets.get(item.ticket_id) if item.ticket_id else None
             if not await self.teams.can_act(by, ticket, list(item.payload["roles"])):

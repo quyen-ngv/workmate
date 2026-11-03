@@ -237,6 +237,9 @@ async def run_argv(argv: list[str], cwd: Path, *, timeout: float, env: dict[str,
         with contextlib.suppress(Exception):
             await proc.wait()
         return 124, f"timeout after {timeout:.0f}s", time.monotonic() - started
+    except asyncio.CancelledError:
+        _kill_tree(proc.pid)  # a cancelled caller (a merge job closed with the office) leaves no process behind
+        raise
     text = out.decode("utf-8", "replace").replace("\r\n", "\n")
     return proc.returncode or 0, text[-OUTPUT_TAIL * 10 :], time.monotonic() - started
 
@@ -250,6 +253,14 @@ async def git_state(workspace: Path | None) -> tuple[str | None, bool | None]:
         return None, None
     code, status, _ = await run_argv(["git", "status", "--porcelain"], workspace, timeout=30)
     return head.strip(), code == 0 and not status.strip()
+
+
+def merge_failure(files: list[str], output: str) -> str:
+    """Why a `git merge` failed, for the people and the AI: a conflict names its files (status U); any other failure
+    (a hook, a file the merge would overwrite …) is a merge error with the tail of git's output, never a conflict."""
+    if files:
+        return "xung đột ở: " + ", ".join(files)
+    return "lỗi: " + (" ".join(output.split())[-300:] or "git không in gì")
 
 
 def _kill_tree(pid: int) -> None:
@@ -504,16 +515,20 @@ async def check_main_synced(ctx: CheckContext) -> CheckResult:
 
     The one check with a side effect: when main has commits the branch lacks and the worktree is clean, it merges
     main into the branch (a merge commit in the ticket's worktree; main itself is only read, nothing is fetched).
-    A conflict is aborted, so on failure HEAD and the worktree are as they were."""
+    A failed merge is aborted, so on failure HEAD and the worktree are as they were. A detached HEAD is never merged
+    into: the merge commit would be on no branch (SI-30)."""
     ws = ctx.workspace
     if ws is None or not (ws / ".git").exists():
         return CheckResult(id="main_synced", status="skipped", summary="không phải git worktree")
-    main = ctx.project.main_branch if ctx.project else "main"
+    if ctx.project is None:
+        return CheckResult(id="main_synced", status="skipped", summary="ticket không thuộc dự án nào nên không biết nhánh chính")
+    main = ctx.project.main_branch
     code, out, _ = await run_argv(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{main}"], ws, timeout=30)
     if code != 0:
         return CheckResult(id="main_synced", status="skipped", summary=f"repo không có nhánh chính {main}")
     main_sha = out.strip()
-    branch = (await run_argv(["git", "rev-parse", "--abbrev-ref", "HEAD"], ws, timeout=30))[1].strip()
+    code, out, _ = await run_argv(["git", "symbolic-ref", "-q", "--short", "HEAD"], ws, timeout=30)
+    branch = out.strip() if code == 0 else None  # None: HEAD is detached
     if branch == main:
         return CheckResult(id="main_synced", status="skipped", summary=f"đang làm trên chính nhánh {main}")
     code, out, _ = await run_argv(["git", "merge-base", "--is-ancestor", main_sha, "HEAD"], ws, timeout=60)
@@ -523,6 +538,14 @@ async def check_main_synced(ctx: CheckContext) -> CheckResult:
                            data={"main": main, "main_sha": main_sha})
     if code != 1:
         return CheckResult(id="main_synced", status="failed", summary=f"không so được nhánh với {main}: {out.strip()[-300:]}")
+    if branch is None:
+        head = (await run_argv(["git", "rev-parse", "--short", "HEAD"], ws, timeout=30))[1].strip()
+        return CheckResult(
+            id="main_synced", status="failed",
+            summary=f"worktree đang ở HEAD detached ({head}) nên office không merge {main} vào được. "
+                    "Hãy `git switch <nhánh của ticket>` rồi gọi stage_complete lại.",
+            data={"main": main, "main_sha": main_sha, "detached": head},
+        )
     dirty = (await run_argv(["git", "status", "--porcelain"], ws, timeout=30))[1].strip()
     if dirty:
         return CheckResult(
@@ -536,13 +559,15 @@ async def check_main_synced(ctx: CheckContext) -> CheckResult:
     if code != 0:
         files = (await run_argv(["git", "diff", "--name-only", "--diff-filter=U"], ws, timeout=30))[1].split()
         await run_argv(["git", "merge", "--abort"], ws, timeout=60)
-        listed = ", ".join(files) if files else out.strip()[-300:]
-        return CheckResult(
-            id="main_synced", status="failed",
-            summary=f"merge {main} ({main_sha[:7]}) vào nhánh bị xung đột ở: {listed}. Office đã huỷ merge, nhánh giữ nguyên. "
-                    f"Hãy chạy `git merge {main}`, giải quyết conflict, commit, rồi gọi stage_complete lại.",
-            data={"main": main, "main_sha": main_sha, "conflicts": files[:50]},
-        )
+        why = merge_failure(files, out)
+        if files:
+            summary = (f"merge {main} ({main_sha[:7]}) vào nhánh bị {why}. Office đã huỷ merge, nhánh giữ nguyên. "
+                       f"Hãy chạy `git merge {main}`, giải quyết conflict, commit, rồi gọi stage_complete lại.")
+        else:
+            summary = (f"merge {main} ({main_sha[:7]}) vào nhánh {why}. Office đã huỷ merge, nhánh giữ nguyên. "
+                       "Xem lỗi git ở trên, sửa nguyên nhân rồi gọi stage_complete lại.")
+        return CheckResult(id="main_synced", status="failed", summary=summary,
+                           data={"main": main, "main_sha": main_sha, "conflicts": files[:50]})
     merge_sha = (await run_argv(["git", "rev-parse", "HEAD"], ws, timeout=30))[1].strip()
     try:
         await ctx.office.tickets.add_comment(

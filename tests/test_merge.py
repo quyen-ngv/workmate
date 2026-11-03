@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import os
 import pkgutil
 import shutil
 import subprocess
@@ -333,6 +334,141 @@ async def test_ac7_start_twice_in_process_raises_conflict(office: Office, tmp_pa
     flag.write_text("1")
     await office.merges.wait(root.key)
     assert git(repo, "rev-list", "--merges", "--count", "main") == "1"
+
+
+# ---- SI-30 ---------------------------------------------------------------------------------------------------
+
+
+def refuse_merges(repo: Path) -> None:
+    """A pre-merge-commit hook that fails: the merge stops with no conflicted file (shared by every worktree)."""
+    hook = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "hooks" / "pre-merge-commit"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text("#!/bin/sh\necho hook says no\nexit 1\n", encoding="utf-8", newline="\n")
+    hook.chmod(0o755)
+
+
+async def another_root(office: Office, root: Ticket, title: str) -> tuple[Ticket, Path]:
+    """A second root ticket of the same project at stage pr, ready to merge: (root, worktree)."""
+    project = await office.projects.get(root.project_id or "")
+    other = await office.tickets.create(title, project_id=project.id)
+    ws = await office.workspaces.realize(other, project, await office.org.find_position("writer"), other)
+    await office.db.execute("UPDATE tickets SET stage = 'pr', stage_template = 'code' WHERE id = ?", (other.id,))
+    await office.db.execute(
+        "INSERT INTO stage_runs(ticket_id, stage, attempt, started_at, finished_at, outcome, checks_json) VALUES (?, 'pr', 1, ?, ?, 'completed', '[]')",
+        (other.id, "2026-11-03T00:00:00Z", "2026-11-03T01:00:00Z"),
+    )
+    return await office.tickets.get(other.id), ws.path
+
+
+async def test_si30_ac1_button_merge_error_is_not_called_conflict(office: Office, tmp_path: Path) -> None:
+    root, repo, ws = await at_pr(office, tmp_path)
+    commit(ws, {"leave.py": "x = 1\n"}, "leave")
+    m0 = git(repo, "rev-parse", "main")
+    refuse_merges(repo)
+
+    with pytest.raises(MergeError) as caught:
+        await office.merges.merge(root.key, by="user")
+
+    text = str(caught.value)
+    assert "lỗi" in text and "hook says no" in text and "xung đột" not in text
+    assert git(repo, "rev-parse", "main") == m0
+    assert not (office.settings.workspaces_dir / f".merge-{root.key}").exists()
+
+
+async def test_si30_ac5_second_ticket_same_repo_is_refused_at_once(office: Office, tmp_path: Path) -> None:
+    first, repo, ws1 = await at_pr(office, tmp_path)
+    commit(ws1, {"leave.py": "x = 1\n"}, "leave")
+    second, ws2 = await another_root(office, first, "Ngày lễ")
+    commit(ws2, {"holiday.py": "y = 1\n"}, "holiday")
+    flag = tmp_path / "go"
+    await use_check(office, tmp_path, "", flag=str(flag))
+
+    outcomes = await asyncio.gather(office.merges.start(first.key, by="user"), office.merges.start(second.key, by="user"),
+                                    return_exceptions=True)
+
+    refused = [o for o in outcomes if isinstance(o, BaseException)]
+    assert len(refused) == 1 and isinstance(refused[0], Conflict), outcomes
+    assert "Đang có một merge khác trên dự án này" in str(refused[0])
+    assert len(office.merges._jobs) == 1
+    winner = first if outcomes[0] == {"started": True, "root": first.key} else second
+    loser = second if winner is first else first
+    with pytest.raises(Conflict, match="Đang có một merge khác trên dự án này"):  # and again once the job runs
+        await office.merges.start(loser.key, by="user")
+    assert list(office.merges._jobs) == [winner.key]
+    audit = await office.db.fetchall("SELECT ticket_id FROM audit_log WHERE action = 'git:merge'")
+    assert loser.id not in [a["ticket_id"] for a in audit]  # a refused click writes no audit
+
+    flag.write_text("1")
+    await office.merges.wait(winner.key)
+    assert git(repo, "rev-list", "--merges", "--count", "main") == "1"
+    assert await office.merges.start(loser.key, by="user") == {"started": True, "root": loser.key}  # the job gave the repo back
+    await office.merges.wait(loser.key)
+    assert git(repo, "rev-list", "--merges", "--count", "main") == "2"
+
+
+async def test_si30_ac5_click_refused_by_checks_gives_the_repo_back(office: Office, tmp_path: Path) -> None:
+    first, repo, ws1 = await at_pr(office, tmp_path)
+    commit(ws1, {"leave.py": "x = 1\n"}, "leave")
+    empty, _ws2 = await another_root(office, first, "Chưa làm gì")
+
+    with pytest.raises(MergeError, match="không có gì mới"):
+        await office.merges.start(empty.key, by="user")
+
+    assert await office.merges.start(first.key, by="user") == {"started": True, "root": first.key}
+    await office.merges.wait(first.key)
+    assert git(repo, "rev-list", "--merges", "--count", "main") == "1"
+
+
+SPAWN = """\
+import pathlib, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+pathlib.Path(sys.argv[1]).write_text(f"{child.pid}")
+time.sleep(60)
+"""
+
+
+async def test_si30_ac6_cancelled_run_argv_kills_process_tree(tmp_path: Path) -> None:
+    import psutil
+
+    from actoroffice.services.checks import run_argv
+
+    pids = tmp_path / "pids.txt"
+    task = asyncio.get_running_loop().create_task(run_argv([sys.executable, "-c", SPAWN, str(pids)], tmp_path, timeout=120))
+    await wait_for(pids)
+    await asyncio.sleep(0.2)
+    child = psutil.Process(int(pids.read_text()))
+    tree = [child]  # the child and every process between it and this one (a venv launcher on Windows, the script)
+    for parent in child.parents():
+        if parent.pid == os.getpid():
+            break
+        tree.append(parent)
+    assert len(tree) >= 2
+    try:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        _gone, alive = psutil.wait_procs(tree, timeout=5)
+        assert not alive, alive
+    finally:
+        for p in tree:
+            with contextlib.suppress(psutil.Error):
+                p.kill()
+
+
+async def test_si30_ac7_unexpected_error_is_audited(office: Office, tmp_path: Path, monkeypatch) -> None:
+    root, repo, ws = await at_pr(office, tmp_path)
+    commit(ws, {"leave.py": "x = 1\n"}, "leave")
+
+    async def boom(*_a, **_k) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(office.merges, "_merge_locked", boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        await office.merges.merge(root.key, by="user")
+
+    audit = await office.db.fetchall("SELECT outcome, ticket_id, detail_json FROM audit_log WHERE action = 'git:merge'")
+    assert [(a["outcome"], a["ticket_id"]) for a in audit] == [("failed", root.id)]
+    assert "RuntimeError" in audit[0]["detail_json"] and "boom" in audit[0]["detail_json"]
 
 
 # ---- AC-8 ----------------------------------------------------------------------------------------------------

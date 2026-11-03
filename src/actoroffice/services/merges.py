@@ -23,7 +23,7 @@ from actoroffice.domain.stage import StageOutcome
 from actoroffice.domain.work import Project, ProjectAccess, Ticket
 from actoroffice.engine.workspace import branch_name
 from actoroffice.services.automations import kill_tree
-from actoroffice.services.checks import IDENTITY, command_list, run_argv, test_env
+from actoroffice.services.checks import IDENTITY, command_list, merge_failure, run_argv, test_env
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -48,7 +48,7 @@ class MergeRecordError(MergeError):
 class MergeService:
     def __init__(self, office: Office) -> None:
         self.office = office
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._busy: set[str] = set()  # repos with a merge reserved: from the accepted click (or merge()) to its end
         self._jobs: dict[str, asyncio.Task[None]] = {}  # root key → background merge started from the button
 
     async def status(self, key: str) -> dict[str, Any]:
@@ -104,16 +104,15 @@ class MergeService:
         if not panel["ready"]:
             raise MergeError(panel["reason"])
         project = await office.projects.get(root.project_id or "")
-        if self._lock(project).locked():
-            raise Conflict("Đang có một merge khác trên dự án này")
+        self._reserve(project)  # no await between the check and the reservation: a second click is refused here
         try:
             await self._check(root, project)
-        except MergeError as exc:
-            await self._refused(root, project, by, exc)
+        except BaseException as exc:
+            self._release(project)
+            if isinstance(exc, MergeError):
+                await self._refused(root, project, by, exc)
             raise
-        if root.key in self._jobs:  # another click got in while this one was checking
-            raise Conflict(f"Đang merge {root.key}")
-        self._jobs[root.key] = asyncio.get_running_loop().create_task(self._run_job(root, by))
+        self._jobs[root.key] = asyncio.get_running_loop().create_task(self._run_job(root, project, by))
         office.bus.publish("ticket.updated", ticket=root.model_dump())
         return {"started": True, "root": root.key}
 
@@ -130,12 +129,14 @@ class MergeService:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._jobs.clear()
+        self._busy.clear()  # a job cancelled before it ran never reached its finally
 
-    async def _run_job(self, root: Ticket, by: str) -> None:
+    async def _run_job(self, root: Ticket, project: Project, by: str) -> None:
+        """The button's merge; `start` reserved the repo, this job gives it back when it ends."""
         office = self.office
         try:
             try:
-                result = await self.merge(root.key, by=by)
+                result = await self._merge_reserved(root, project, by)
             except MergeRecordError as exc:
                 result = exc.result  # main holds the merge: still pass the gate
                 await self._say(root, f"⚠️ {exc}")
@@ -153,6 +154,7 @@ class MergeService:
                                       "Bấm \"PR đã merge\" để đi tiếp.")
         finally:
             self._jobs.pop(root.key, None)
+            self._release(project)
             with contextlib.suppress(Exception):
                 office.bus.publish("ticket.updated", ticket=(await office.tickets.get(root.id)).model_dump())
 
@@ -168,8 +170,15 @@ class MergeService:
                                        detail={"by": by, "reason": str(exc)[:1000]})
         await self._say(root, f"❌ Chưa merge được, nhánh chính giữ nguyên. {exc}")
 
-    def _lock(self, project: Project) -> asyncio.Lock:
-        return self._locks.setdefault(str(Path(project.path or "")), asyncio.Lock())
+    def _reserve(self, project: Project) -> None:
+        """Synchronous on purpose: checking and taking the repo cannot be split by another task."""
+        key = str(Path(project.path or ""))
+        if key in self._busy:
+            raise Conflict("Đang có một merge khác trên dự án này")
+        self._busy.add(key)
+
+    def _release(self, project: Project) -> None:
+        self._busy.discard(str(Path(project.path or "")))
 
     async def _target(self, key: str) -> tuple[Ticket, Project]:
         office = self.office
@@ -212,18 +221,23 @@ class MergeService:
 
     async def merge(self, key: str, *, by: str = "user") -> dict[str, Any]:
         """Merge the tree's branch into main (synchronous: the classic UI's API; the button runs it in the background)."""
-        office = self.office
         root, project = await self._target(key)
-        lock = self._lock(project)
-        if lock.locked():
-            raise Conflict("Đang có một merge khác trên dự án này")
-        async with lock:
-            try:
-                result = await self._merge_locked(root, project, by)
-            except OfficeError as exc:
-                await office.audit.record("git:merge", "failed", ticket_id=root.id, target=f"{project.name}:{branch_name(root)}",
-                                          detail={"by": by, "reason": str(exc)[:1000]})
-                raise
+        self._reserve(project)
+        try:
+            return await self._merge_reserved(root, project, by)
+        finally:
+            self._release(project)
+
+    async def _merge_reserved(self, root: Ticket, project: Project, by: str) -> dict[str, Any]:
+        """merge() once the repo is reserved; every failure before main moved is in the audit log, unexpected ones too."""
+        office = self.office
+        try:
+            result = await self._merge_locked(root, project, by)
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, OfficeError) else f"{type(exc).__name__}: {exc}"
+            await office.audit.record("git:merge", "failed", ticket_id=root.id, target=f"{project.name}:{branch_name(root)}",
+                                      detail={"by": by, "reason": reason[:1000]})
+            raise
         branch, main, commit = result["branch"], result["main"], result["commit"]
         tested = f"test `{result['tested']}` pass trên kết quả merge" if result["tested"] else "không có lệnh test, kết quả merge chưa được test"
         try:
@@ -256,8 +270,10 @@ class MergeService:
             if code != 0:
                 files = (await _git(scratch, "diff", "--name-only", "--diff-filter=U"))[1].split()
                 await _git(scratch, "merge", "--abort")
-                listed = ", ".join(files) if files else out[-500:]
-                raise MergeError(f"Merge bị xung đột ở: {listed}. Cần xử lý trên nhánh {branch} rồi merge lại.")
+                why = merge_failure(files, out)
+                if files:
+                    raise MergeError(f"Merge bị {why}. Cần xử lý trên nhánh {branch} rồi merge lại.")
+                raise MergeError(f"Merge {branch} vào {main} {why}.")
             sha = (await _git(scratch, "rev-parse", "HEAD"))[1].strip()
             tested = await self._test(project, scratch)
             if await office.runs.for_tree_running(root.id):

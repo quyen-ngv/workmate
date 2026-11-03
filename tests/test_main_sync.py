@@ -129,6 +129,7 @@ async def test_ac3_conflict_aborts_and_lists_files(office: Office, tmp_path: Pat
 
     assert result.status == "failed"
     assert "shared.py" in result.summary and "git merge main" in result.summary and "stage_complete" in result.summary
+    assert "xung đột" in result.summary  # SI-30 AC-2: a real conflict is still called one
     assert git(ws, "rev-parse", "HEAD") == head
     assert subprocess.run(["git", "-C", str(ws), "rev-parse", "-q", "--verify", "MERGE_HEAD"], capture_output=True).returncode != 0
     assert git(ws, "status", "--porcelain") == ""
@@ -281,6 +282,75 @@ async def test_ac11_skipped_cases(office: Office, tmp_path: Path, case: str) -> 
     assert result.status == "skipped" and result.summary
     assert {p: git(p, "rev-parse", "HEAD") for p in (repo, ws)} == before
     assert git(ws, "status", "--porcelain") == "" and git(repo, "status", "--porcelain") == ""
+
+
+# ---- SI-30 ------------------------------------------------------------------------------------------------------------
+
+
+def refuse_merges(path: Path) -> None:
+    """A pre-merge-commit hook that fails: the merge stops with no conflicted file (shared by every worktree)."""
+    common = Path(git(path, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    hook = common / "hooks" / "pre-merge-commit"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text("#!/bin/sh\necho hook says no\nexit 1\n", encoding="utf-8", newline="\n")
+    hook.chmod(0o755)
+
+
+def merging(path: Path) -> bool:
+    return subprocess.run(["git", "-C", str(path), "rev-parse", "-q", "--verify", "MERGE_HEAD"], capture_output=True).returncode == 0
+
+
+async def test_si30_ac1_merge_error_is_not_called_conflict(office: Office, tmp_path: Path) -> None:
+    ticket, _project, repo, ws = await at_build(office, tmp_path)
+    head = git(ws, "rev-parse", "HEAD")
+    commit(repo, {"holiday.py": "y = 2\n"}, "holiday on main")
+    refuse_merges(repo)
+
+    result = await synced(office, ticket, ws)
+
+    assert result.status == "failed"
+    assert "merge" in result.summary and "lỗi" in result.summary and "hook says no" in result.summary
+    assert "xung đột" not in result.summary and "giải quyết conflict" not in result.summary
+    assert git(ws, "rev-parse", "HEAD") == head
+    assert not merging(ws) and git(ws, "status", "--porcelain") == ""
+
+
+async def test_si30_ac3_detached_head_fails_without_merging(office: Office, tmp_path: Path) -> None:
+    ticket, _project, repo, ws = await at_build(office, tmp_path)
+    git(ws, "switch", "-q", "--detach")
+    head = git(ws, "rev-parse", "HEAD")
+    commit(repo, {"holiday.py": "y = 2\n"}, "holiday on main")
+    merges = git(repo, "rev-list", "--all", "--merges", "--count")
+
+    result = await synced(office, ticket, ws)
+
+    assert result.status == "failed", result.summary
+    assert "detached" in result.summary and "git switch" in result.summary and "stage_complete" in result.summary
+    assert git(ws, "rev-parse", "HEAD") == head
+    assert git(repo, "rev-list", "--all", "--merges", "--count") == merges
+    assert not (ws / "holiday.py").exists()
+
+
+async def test_si30_ac3_detached_up_to_date_still_passes(office: Office, tmp_path: Path) -> None:
+    ticket, _project, _repo, ws = await at_build(office, tmp_path)
+    git(ws, "switch", "-q", "--detach")
+    head = git(ws, "rev-parse", "HEAD")
+
+    result = await synced(office, ticket, ws)
+
+    assert result.status == "passed", result.summary
+    assert git(ws, "rev-parse", "HEAD") == head
+
+
+async def test_si30_ac4_no_project_is_skipped(office: Office, tmp_path: Path) -> None:
+    ticket, _project, repo, ws = await at_build(office, tmp_path)
+    head = git(ws, "rev-parse", "HEAD")
+    commit(repo, {"holiday.py": "y = 2\n"}, "holiday on main")
+
+    result = await synced(office, ticket.model_copy(update={"project_id": None}), ws)
+
+    assert result.status == "skipped" and "dự án" in result.summary
+    assert git(ws, "rev-parse", "HEAD") == head and not (ws / "holiday.py").exists()
 
 
 # ---- AC-12 ------------------------------------------------------------------------------------------------------------

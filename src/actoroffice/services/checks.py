@@ -38,7 +38,8 @@ THEN = re.compile(r"\b(then|thì)\b", re.IGNORECASE)
 OPTION = re.compile(r"(?im)^\s*(?:#+\s*|[-*]\s*|\d+[.)]\s*)?(?:\*\*)?(?:phương án|option|approach|cách)\s*[A-Z0-9]")
 # "AC-5 [review]: …": checked by a person at the gate instead of a test; only spaces may sit between id and tag
 REVIEW_TAG = re.compile(r"\bAC[-\s]?(\d+)(?!\d)[ \t]*\[review\]", re.IGNORECASE)
-HOW_TO_CHECK = re.compile(r"(?im)\bcách kiểm\s*(?:\*\*)?\s*:\s*(?:\*\*)?[ \t]*(.*)$")
+# Same line only: an empty "Cách kiểm:" must not take the text of the next line
+HOW_TO_CHECK = re.compile(r"(?im)\bcách kiểm[ \t]*(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?[ \t]*(.*)$")
 NO_HANDOFF_LINE = "chưa ghi cách kiểm"
 
 

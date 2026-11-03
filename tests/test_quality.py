@@ -978,6 +978,10 @@ async def test_ac2_ac_testable_requires_cach_kiem(office: Office, tmp_path: Path
     assert how_to_check("- **Cách kiểm:** đọc diff\n") == "đọc diff"
     assert how_to_check("cách kiểm: chạy lệnh\n") == "chạy lệnh"
     assert how_to_check("Cách kiểm:\n") is None and how_to_check("Given x") is None
+    # An empty line must not borrow the next line (heading or bullet of the next section)
+    assert how_to_check("Cách kiểm:\n## Ghi chú\n") is None
+    assert how_to_check("- **Cách kiểm:**\n- AC-3: Given a When b Then c\n") is None
+    assert how_to_check("Cách kiểm:  \n\n  đọc diff\n") is None
 
 
 async def test_ac3_review_ac_still_needs_given_when_then(office: Office, tmp_path: Path) -> None:

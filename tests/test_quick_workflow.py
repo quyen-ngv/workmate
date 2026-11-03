@@ -15,6 +15,7 @@ from actoroffice.domain.stage import StageRun, default_templates
 from actoroffice.domain.work import InteractionKind, Ticket, TicketStatus
 from actoroffice.engine import prompt_pack
 from actoroffice.engine.prompt_pack import REVIEW_REPLY
+from actoroffice.services.stages import StageError
 
 from .fakes import FakeRuntime, TurnCtx
 
@@ -162,7 +163,7 @@ async def test_people_switch_the_workflow_and_not_after_the_pr(office: Office) -
     await office.stages.start(ticket.id, template="quick", by="user")
     full = await office.stages.switch_template(ticket.id, "code", reason="có quyết định nghiệp vụ", by="user")
     assert (full.stage_template, full.stage) == ("code", "understand")
-    with pytest.raises(Exception):
+    with pytest.raises(StageError):
         await office.stages.switch_template(ticket.id, "automation", reason="x", by="user")
     await office.db.execute("UPDATE tickets SET stage = 'pr' WHERE id = ?", (ticket.id,))
     with pytest.raises(Exception, match="pull request"):

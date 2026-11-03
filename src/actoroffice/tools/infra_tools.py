@@ -259,7 +259,13 @@ INFRA_TOOLS: list[ToolDef] = [
         db_query,
         read_only=True,
     ),
-    ToolDef("redis_scan", "List Redis keys matching a pattern (SCAN, capped).", schema({**RES, "pattern": {"type": "string"}, "limit": {"type": "integer"}}, required=["resource"]), redis_scan, read_only=True),
+    ToolDef(
+        "redis_scan",
+        "List Redis keys matching a pattern (SCAN, capped).",
+        schema({**RES, "pattern": {"type": "string"}, "limit": {"type": "integer"}}, required=["resource"]),
+        redis_scan,
+        read_only=True,
+    ),
     ToolDef("redis_get", "Read one Redis key (type, TTL, value capped).", schema({**RES, "key": {"type": "string"}}, required=["resource", "key"]), redis_get, read_only=True),
     ToolDef(
         "kafka_peek",
@@ -290,7 +296,13 @@ INFRA_TOOLS: list[ToolDef] = [
         logs_cluster,
         read_only=True,
     ),
-    ToolDef("logs_errors", "Errors and stack traces of a service grouped by exception and top frame.", schema(_when({**RES, "service": {"type": "string"}}), required=["resource", "service"]), logs_errors, read_only=True),
+    ToolDef(
+        "logs_errors",
+        "Errors and stack traces of a service grouped by exception and top frame.",
+        schema(_when({**RES, "service": {"type": "string"}}), required=["resource", "service"]),
+        logs_errors,
+        read_only=True,
+    ),
     ToolDef(
         "logs_trace",
         "Every log line of one request across services (needs the request/trace id you sent, e.g. X-Request-ID).",

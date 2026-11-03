@@ -7,6 +7,7 @@ in total. A rate-limit warning drops the cap to 1; a rejection pauses until the 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -95,10 +96,8 @@ class Scheduler:
             except Exception:
                 log.exception("scheduler tick failed")
             self._kick.clear()
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._kick.wait(), poll_s)
-            except TimeoutError:
-                pass
 
     async def tick(self) -> list[str]:
         started: list[str] = []
@@ -155,9 +154,8 @@ class Scheduler:
             return False
         if ticket.paused:
             return False  # stays pending until someone resumes the ticket
-        if ticket.stage and only_comments(wake.payload.get("reasons", [])) and await office.stages.waits_for_card(ticket):
-            return False  # the stage is done and its gate card is open: the comments reach the AI after the answer
-        return True
+        # The stage is done and its gate card is open: the comments reach the AI after the answer.
+        return not (ticket.stage and only_comments(wake.payload.get("reasons", [])) and await office.stages.waits_for_card(ticket))
 
     async def _execute(self, wake: WakeRequest, run_id: str, kind: str) -> RunStatus:
         try:

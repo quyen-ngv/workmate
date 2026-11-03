@@ -74,7 +74,7 @@ async def test_labelled_issues_become_staged_tickets_and_changes_are_mirrored(of
     t7 = await office.tickets.get(created[0])
     assert t7.jira_key == "BIL-7" and t7.jira_url == "https://acme.atlassian.net/browse/BIL-7"
     assert t7.stage == "understand" and t7.stage_template == "code" and t7.owner_user_id == lan.id and t7.team_id == team.id
-    assert "Khách muốn hoàn tiền.\n\nTrong 30 ngày." == t7.description
+    assert t7.description == "Khách muốn hoàn tiền.\n\nTrong 30 ngày."
     assert (await office.tickets.get(created[1])).stage_template == "research"
     assert await office.jira.sync() == []  # idempotent
 

@@ -7,6 +7,7 @@ import subprocess
 import pytest
 
 from actoroffice.channels import tg_format as fmt
+from actoroffice.domain.errors import PolicyDenied
 from actoroffice.domain.work import InteractionKind, ProjectAccess, TicketStatus
 from actoroffice.engine.workspace import WorkspaceManager
 from actoroffice.tools.chat_tools import propose_ticket
@@ -62,7 +63,7 @@ async def test_access_can_only_be_one_of_the_offered_modes(office, tmp_path):
     minh = await hire(office, "dev", "Minh")
     await project_access_request({"reason": "x"}, await ctx_for(office, minh, conversation=(await office.chat.dm(minh.id, project.id)).id))
     [card] = [i for i in await office.interactions.pending() if i.kind == InteractionKind.APPROVE_ACCESS]
-    with pytest.raises(Exception):
+    with pytest.raises(PolicyDenied):
         await office.answer(card.id, {"approved": True, "access": "worktree"})
     await office.answer(card.id, {"approved": False})
     assert (await office.projects.get(project.id)).access == ProjectAccess.READ_ONLY

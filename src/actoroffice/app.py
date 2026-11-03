@@ -14,9 +14,10 @@ from actoroffice.config import Settings
 from actoroffice.core.events import EventBus
 from actoroffice.domain.chat import MessageKind
 from actoroffice.domain.errors import NotFound, PolicyDenied
-from actoroffice.domain.team import LOCAL_OWNER_ID
 from actoroffice.domain.ids import new_id
+from actoroffice.domain.knowledge import SkillRef, SkillScope
 from actoroffice.domain.org import Actor, Position
+from actoroffice.domain.team import LOCAL_OWNER_ID
 from actoroffice.domain.work import Interaction, InteractionKind, Priority, ProjectAccess
 from actoroffice.engine.executor import Executor
 from actoroffice.engine.reaper import reap_orphans
@@ -30,29 +31,28 @@ from actoroffice.runtimes.router import RuntimeRouter
 from actoroffice.security.audit import AuditLog
 from actoroffice.security.policy import FOLDER_MODE_RULE, PolicyEngine
 from actoroffice.security.redact import Redactor
+from actoroffice.services.access import AccessService
+from actoroffice.services.approvals_recheck import ApprovalRecheck
+from actoroffice.services.atlassian import Atlassian
 from actoroffice.services.automations import AutomationService
 from actoroffice.services.chat import ChatService
-from actoroffice.services.approvals_recheck import ApprovalRecheck
-from actoroffice.services.interactions import InteractionService
-from actoroffice.services.access import AccessService
-from actoroffice.services.atlassian import Atlassian
-from actoroffice.services.jira import JiraMirror
 from actoroffice.services.infra import InfraService
+from actoroffice.services.interactions import InteractionService
+from actoroffice.services.jira import JiraMirror
 from actoroffice.services.knowledge import KnowledgeService
 from actoroffice.services.logs import LogService
-from actoroffice.services.prwatch import PullRequestWatcher
-from actoroffice.services.review import ReviewService
 from actoroffice.services.memory import MemoryService
 from actoroffice.services.merges import MergeService
 from actoroffice.services.notices import ChatNotifier
+from actoroffice.services.org import OrgService
 from actoroffice.services.projects import ProjectService
+from actoroffice.services.prwatch import PullRequestWatcher
+from actoroffice.services.review import ReviewService
 from actoroffice.services.rules import RuleService
-from actoroffice.domain.knowledge import SkillRef, SkillScope
+from actoroffice.services.runs import RunService
 from actoroffice.services.skills import SkillService, split_front_matter
 from actoroffice.services.stages import StageService
 from actoroffice.services.teams import TeamService
-from actoroffice.services.org import OrgService
-from actoroffice.services.runs import RunService
 from actoroffice.services.tickets import TicketService
 from actoroffice.services.wakes import WakeService
 from actoroffice.store import Database

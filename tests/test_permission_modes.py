@@ -155,11 +155,11 @@ def test_split_respects_quotes_and_redirects():
 def test_remembered_prefixes_never_cover_a_whole_interpreter():
     from actoroffice.security.policy import command_prefix
 
-    assert command_prefix("py -m ruff check src".split()) == "py -m ruff"
-    assert command_prefix("uvx ruff check src".split()) == "uvx ruff"
-    assert command_prefix("uv run pytest -q".split()) == "uv run pytest"
-    assert command_prefix("node build.js --prod".split()) == "node build.js"
-    assert command_prefix("kiro-cli whoami".split()) == "kiro-cli whoami"
+    assert command_prefix(["py", "-m", "ruff", "check", "src"]) == "py -m ruff"
+    assert command_prefix(["uvx", "ruff", "check", "src"]) == "uvx ruff"
+    assert command_prefix(["uv", "run", "pytest", "-q"]) == "uv run pytest"
+    assert command_prefix(["node", "build.js", "--prod"]) == "node build.js"
+    assert command_prefix(["kiro-cli", "whoami"]) == "kiro-cli whoami"
     assert command_prefix(["py"]) is None and command_prefix(["node"]) is None
 
 

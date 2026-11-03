@@ -621,7 +621,10 @@ async def test_ports_changes_and_artifacts(office: Office, runtime: FakeRuntime,
 def test_coverage_report_parsers(tmp_path: Path) -> None:
     jacoco = '<report><package name="com/acme"><sourcefile name="Refund.java"><line nr="3" ci="2"/><line nr="4" ci="0"/></sourcefile></package></report>'
     assert parse_coverage("jacoco", jacoco, tmp_path) == {"com/acme/Refund.java": {3: True, 4: False}}
-    cobertura = '<coverage><packages><package><classes><class filename="src/a.py"><lines><line number="1" hits="1"/><line number="2" hits="0"/></lines></class></classes></package></packages></coverage>'
+    cobertura = (
+        '<coverage><packages><package><classes><class filename="src/a.py">'
+        '<lines><line number="1" hits="1"/><line number="2" hits="0"/></lines></class></classes></package></packages></coverage>'
+    )
     assert parse_coverage("cobertura", cobertura, tmp_path) == {"src/a.py": {1: True, 2: False}}
 
 

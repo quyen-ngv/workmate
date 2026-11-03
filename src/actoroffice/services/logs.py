@@ -16,7 +16,6 @@ from __future__ import annotations
 import glob
 import json
 import re
-from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -137,10 +136,11 @@ class LogService:
 
     def _files(self, resource: Resource, service: str, query: str, since: datetime, until: datetime, level: str | None, limit: int) -> list[LogLine]:
         patterns = resource.config.get("paths") or {}
-        if service in ("*", ""):  # a trace crosses services: read every configured service's files
-            globs = [g for value in patterns.values() for g in (value if isinstance(value, list) else [value])]
-        else:
-            globs = patterns.get(service) or patterns.get("*") or []
+        globs = (
+            [g for value in patterns.values() for g in (value if isinstance(value, list) else [value])]
+            if service in ("*", "")  # a trace crosses services: read every configured service's files
+            else patterns.get(service) or patterns.get("*") or []
+        )
         out: list[LogLine] = []
         for pattern in globs if isinstance(globs, list) else [globs]:
             for path in sorted(glob.glob(str(pattern), recursive=True)):
@@ -172,7 +172,7 @@ class LogService:
     async def _loki(self, resource: Resource, service: str, query: str, since: datetime, until: datetime, level: str | None, limit: int) -> list[LogLine]:
         base = str(resource.config.get("url") or "").rstrip("/")
         label = resource.config.get("service_label") or "app"
-        logql = '{%s="%s"}' % (label, service)
+        logql = f'{{{label}="{service}"}}'
         if query:
             logql += f' |= "{query.replace(chr(34), "")}"'
         if level:

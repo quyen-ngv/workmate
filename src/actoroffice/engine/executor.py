@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -15,19 +15,19 @@ from actoroffice.runtimes.base import TurnSpec
 from actoroffice.services.chat import handle
 from actoroffice.services.checks import command_list
 from actoroffice.services.runs import ticket_session_key
+from actoroffice.tools.atlassian_tools import ATLASSIAN_TOOLS
 from actoroffice.tools.chat_tools import CHAT_TOOLS
+from actoroffice.tools.infra_tools import INFRA_TOOLS
 from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
 from actoroffice.tools.office_tools import OFFICE_TOOLS
 from actoroffice.tools.registry import BoundTool, ToolCtx
-from actoroffice.tools.atlassian_tools import ATLASSIAN_TOOLS
-from actoroffice.tools.infra_tools import INFRA_TOOLS
 from actoroffice.tools.stage_tools import STAGE_TOOLS
 from actoroffice.tools.work_tools import CHAT_WORK_TOOLS, WORK_TOOLS
 
 from . import context, prompt_pack
+from .gate import OfficeGate
 from .watchdog import Watchdog
 from .workspace import ticket_env
-from .gate import OfficeGate
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -46,7 +46,7 @@ class Executor:
         actor = await office.org.get_actor(wake.actor_id)
         position = await office.org.get_position(actor.position_id)
         assert wake.ticket_id is not None
-        run = await office.runs.start(Run(id=run_id, actor_id=actor.id, kind=RunKind.TICKET, ticket_id=wake.ticket_id))
+        await office.runs.start(Run(id=run_id, actor_id=actor.id, kind=RunKind.TICKET, ticket_id=wake.ticket_id))
 
         change_wake = any(r.get("change") for r in wake.payload.get("reasons", []))
         try:
@@ -286,10 +286,9 @@ class Executor:
         if status != RunStatus.PARKED and all(r.get("change") for r in reasons):
             if not await office.tickets.changes_after(ticket_id, gate.seen_change_id):
                 await office.wakes.drop_unchanged(wake, "change already seen by the previous run")
-        elif status != RunStatus.FAILED and all(r.get("steer") for r in reasons):
-            # A parked run keeps the direction in its session; a failed one may not have acted on it.
-            if not await office.tickets.comments_after(ticket_id, "steer", gate.seen_steer_id):
-                await office.wakes.drop_unchanged(wake, "steer already delivered to the previous run")
+        # A parked run keeps the direction in its session; a failed one may not have acted on it.
+        elif status != RunStatus.FAILED and all(r.get("steer") for r in reasons) and not await office.tickets.comments_after(ticket_id, "steer", gate.seen_steer_id):
+            await office.wakes.drop_unchanged(wake, "steer already delivered to the previous run")
 
     async def run_chat(self, wake: WakeRequest, run_id: str) -> RunStatus:
         """One chat turn: read the new messages, reply once. Work goes through proposed tickets."""

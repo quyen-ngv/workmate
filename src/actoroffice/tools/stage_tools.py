@@ -3,6 +3,7 @@ finish or reopen a stage, keep the dossier, report plan deviations, link the pul
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from typing import Any
@@ -235,10 +236,8 @@ async def plan_deviation(args: dict[str, Any], ctx: ToolCtx) -> str:
     doc = await office.tickets.get_document(ticket.id, "dossier")
     sections = parse_dossier(doc.body if doc else "")
     sections["deviations"] = (sections.get("deviations", "") + f"\n- {what} (vì {why})").strip()
-    try:
+    with contextlib.suppress(OfficeError):
         await office.tickets.put_document(ticket.id, "dossier", render_dossier(sections), author=ctx.actor.name, base_revision=doc.revision if doc else None)
-    except OfficeError:
-        pass
     if not major:
         return "Deviation recorded. Continue."
     return await ask_human(
@@ -507,7 +506,11 @@ async def access_list(_args: dict[str, Any], ctx: ToolCtx) -> str:
     lines = []
     for r in resources:
         grant = active.get(r.id)
-        state = f"GRANTED {grant.level.value} until {grant.expires_at[:16]} → env {', '.join((grant.envelope.get('env') or {}).keys()) or grant.envelope.get('env_secret') or '(tools only)'}" if grant else "not granted"
+        if grant:
+            env = ", ".join((grant.envelope.get("env") or {}).keys()) or grant.envelope.get("env_secret") or "(tools only)"
+            state = f"GRANTED {grant.level.value} until {grant.expires_at[:16]} → env {env}"
+        else:
+            state = "not granted"
         lines.append(f"- {r.name} [{r.kind.value}, {r.env}, max {r.max_level.value}]: {state}")
     return "\n".join(lines)
 

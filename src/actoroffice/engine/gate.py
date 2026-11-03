@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from actoroffice.domain.org import Actor, PermissionMode, Position
 from actoroffice.core.stats import RunStats
+from actoroffice.domain.org import Actor, PermissionMode, Position
 from actoroffice.domain.work import InteractionKind
 from actoroffice.runtimes.base import GateDecision, GateResult
 from actoroffice.security.policy import Decision, Risk, ToolCallContext, Verdict, office_tool, suggest_rules, target_of
@@ -22,7 +22,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # Our own tools that act outside the machine: they follow the position's "external" rule (usually ask).
-ENV_DUMP = re.compile(r"^\s*(env|printenv|set|export\s+-p|declare\s+-x|Get-ChildItem\s+env:|gci\s+env:|dir\s+env:)\s*(\||$)|\becho\s+\$\w*(DSN|TOKEN|SECRET|PASSWORD|KEY)\b|\bcat\s+/proc/(self|\d+)/environ", re.IGNORECASE)
+ENV_DUMP = re.compile(
+    r"^\s*(env|printenv|set|export\s+-p|declare\s+-x|Get-ChildItem\s+env:|gci\s+env:|dir\s+env:)\s*(\||$)"
+    r"|\becho\s+\$\w*(DSN|TOKEN|SECRET|PASSWORD|KEY)\b|\bcat\s+/proc/(self|\d+)/environ",
+    re.IGNORECASE,
+)
 EXTERNAL_OFFICE_TOOLS = {"jira_comment", "pr_create", "pr_reply", "repo_fetch"}
 
 

@@ -9,6 +9,7 @@ import pytest
 from actoroffice.app import Office
 from actoroffice.channels import tg_format as fmt
 from actoroffice.channels.telegram import TelegramBridge, TelegramError
+from actoroffice.channels.tg_menu import Wizard
 from actoroffice.channels.tg_progress import Progress
 from actoroffice.config import Settings
 from actoroffice.domain.work import InteractionKind, ProjectAccess
@@ -25,6 +26,7 @@ class FakeBot:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.documents: list[tuple[int | None, str]] = []
         self.failing: set[str] = set()  # methods that answer with a Telegram error (e.g. the bot was kicked)
+        self.held: dict[int, asyncio.Event] = {}  # chat id → sendMessage to it waits until the event is set
         self._next = 100
 
     async def call(self, method: str, **params: Any) -> Any:
@@ -32,6 +34,8 @@ class FakeBot:
             await asyncio.sleep(0.05)
             return []
         self.calls.append((method, params))
+        if method == "sendMessage" and params.get("chat_id") in self.held:
+            await self.held[params["chat_id"]].wait()
         if method in self.failing:
             raise TelegramError("Forbidden: bot was kicked from the supergroup chat", 403)
         self._next += 1
@@ -262,6 +266,36 @@ async def test_ac9_switch_forgets_live_progress(office, bot):
     office.bus.publish("run.finished", run_id="run_live", status="succeeded", error=None, run={"usage": {}, "stats": {}})
     await asyncio.sleep(0.2)
     assert not bot.sent("editMessageText")  # message ids of the old group are never edited in the new one
+
+
+async def test_ac1_ac2_start_in_new_group_while_unbind_notifies_keeps_new_group(office, bot):
+    await hire(office, "ba", "Hoa")
+    await bind(office, bot)
+    release = bot.held[GROUP] = asyncio.Event()
+    unbind = asyncio.create_task(office.telegram.unbind())
+    await until(lambda: any(p["chat_id"] == GROUP and "chuyển sang" in p["text"] for p in bot.sent()))
+    assert not unbind.done()  # the notice to the old group is still on its way
+    await office.telegram.handle_update(tg_message("/start", chat=NEW_GROUP))
+    assert office.telegram.chat_id == NEW_GROUP
+    office.telegram._runs["run_new"] = (NEW_GROUP, 555, "tin ở group mới")
+    flush = asyncio.create_task(asyncio.sleep(30))
+    office.telegram.progress.runs["run_new"] = Progress("run_new", 5, "Hoa", chat=False, message_id=556, flush=flush)
+    release.set()
+    await unbind
+    assert office.telegram.chat_id == NEW_GROUP and await bound_state(office) == str(NEW_GROUP)
+    assert "run_new" in office.telegram._runs and "run_new" in office.telegram.progress.runs and not flush.cancelled()
+    flush.cancel()
+
+
+async def test_ac3_unbind_without_concurrent_start_clears_everything(office, bot):
+    await bind(office, bot)
+    office.telegram._runs["run_old"] = (GROUP, 555, "tin ở group cũ")
+    office.telegram.menus.wizards[1] = Wizard("project", message_id=557)
+    bot.failing.add("sendMessage")
+    await office.telegram.unbind()
+    assert bot.sent()[-1]["chat_id"] == GROUP and "chuyển sang" in bot.sent()[-1]["text"]
+    assert office.telegram.chat_id is None and await bound_state(office) is None
+    assert not office.telegram._runs and not office.telegram.progress.runs and not office.telegram.menus.wizards
 
 
 # ---- messages both ways ---------------------------------------------------------------------------

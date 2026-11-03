@@ -608,21 +608,25 @@ class TelegramBridge:
     async def unbind(self) -> None:
         """Forget the bound group (the bot stays in it, its topics are kept): until /start in a group, the bot is
         silent everywhere. Live messages of the old group are dropped: message ids are per chat, so editing them
-        later would hit another message in the new group."""
+        later would hit another message in the new group.
+
+        Memory and DB are cleared before the notice is sent: a /start in another group handled while the notice
+        is on its way binds that group, and nothing here may undo it afterwards."""
         old, self.chat_id = self.chat_id, None
         if old is None:
             return
+        self._runs.clear()
+        self.progress.reset()
+        self.menus.wizards.clear()
+        self._warned = False
+        # Queued before any INSERT of a concurrent _bind (aiosqlite runs statements in order).
+        await self.office.db.execute("DELETE FROM telegram_state WHERE key = 'chat_id'")
         with contextlib.suppress(TelegramError):  # e.g. the bot was kicked: the switch still goes on
             await self.api.call(
                 "sendMessage",
                 chat_id=old,
                 text="🔀 Văn phòng đã chuyển sang một group Telegram khác. Tin nhắn ở đây không còn được chuyển tới văn phòng.",
             )
-        await self.office.db.execute("DELETE FROM telegram_state WHERE key = 'chat_id'")
-        self._runs.clear()
-        self.progress.reset()
-        self.menus.wizards.clear()
-        self._warned = False
         log.info("telegram: unbound from group %s; send /start in the new group to bind", old)
 
     async def _set_commands(self) -> None:

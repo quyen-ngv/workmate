@@ -500,7 +500,12 @@ class StageService:
         if not (workspace / ".git").exists():
             return
         project = await office.projects.get(ticket.project_id) if ticket.project_id else None
-        files = await changed_files(workspace, project.main_branch if project else "main")
+        base = project.main_branch if project else "main"
+        merges = [p for p in await office.tickets.work_products(root.id) if p["kind"] == "merge" and p["metadata"].get("sha")]
+        if merges:
+            # Merged by the office: main already holds the branch, so diff against main as it was before the merge.
+            base = f"{merges[-1]['metadata']['sha']}^1"
+        files = await changed_files(workspace, base)
         stale = await office.knowledge.mark_stale(team_id=ticket.team_id, changed_files=files)
         if stale:
             await office.tickets.add_comment(ticket.id, f"⚠️ {len(stale)} ghi chú kiến thức có thể đã cũ sau thay đổi này: #{', #'.join(map(str, stale))}", author_kind="system", author_id=None)

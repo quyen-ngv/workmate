@@ -151,13 +151,7 @@ class CheckRunner:
         return CheckResult(id=check_id, status="passed", summary=f"{rule.id} {rule.title}", output_ref=ref)
 
     def _env(self, ctx: CheckContext) -> dict[str, str]:
-        keep = ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "LANG", "JAVA_HOME", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA")
-        env = {k: v for k, v in os.environ.items() if k in keep}
-        env["GIT_CEILING_DIRECTORIES"] = str(self.office.settings.workspaces_dir.resolve())
-        env["CI"] = "1"
-        env["PYTHONUTF8"] = "1"  # Windows pipes default to the ANSI code page; tools printing Vietnamese would crash
-        env["PYTHONIOENCODING"] = "utf-8"
-        return env
+        return test_env(self.office)
 
     def _save(self, ctx: CheckContext, check_id: str, text: str) -> str | None:
         if not ctx.run_id:
@@ -167,6 +161,17 @@ class CheckRunner:
         name = f"check-{re.sub(r'[^a-z0-9]+', '-', check_id.lower())}.txt"
         (folder / name).write_text(self.office.redact(text[-200_000:]), encoding="utf-8")
         return name
+
+
+def test_env(office: Office) -> dict[str, str]:
+    """Environment of the project's own commands (repo checks, the test of a merge): a short allow-list, no secrets."""
+    keep = ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "LANG", "JAVA_HOME", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA")
+    env = {k: v for k, v in os.environ.items() if k in keep}
+    env["GIT_CEILING_DIRECTORIES"] = str(office.settings.workspaces_dir.resolve())
+    env["CI"] = "1"
+    env["PYTHONUTF8"] = "1"  # Windows pipes default to the ANSI code page; tools printing Vietnamese would crash
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 
 def command_list(profile: dict[str, Any], key: str) -> list[list[str]]:

@@ -267,6 +267,14 @@ function card(item) {
   return `<div class="card"><div class="who">${esc(item.kind)}</div></div>`;
 }
 
+// Repos without a code host: the office merges the branch, tests the merge result and passes the merge gate.
+function mergeButton(m) {
+  if (!m?.available) return "";
+  const label = m.running ? "Đang merge…" : `Merge vào ${esc(m.main)}`;
+  const title = m.ready ? `Merge ${m.branch} vào ${m.main}, chạy test trên kết quả merge rồi qua cổng merge` : m.reason;
+  return `<button class="btn small primary" data-merge="${esc(m.main)}" title="${esc(title)}"${m.ready ? "" : " disabled"}>${label}</button>`;
+}
+
 function renderPane(key) {
   const el = $(`.pane[data-pane="${CSS.escape(key)}"]`);
   const d = state.details[key];
@@ -293,6 +301,7 @@ function renderPane(key) {
         <span class="pane-controls">
           ${st.status === "paused" ? `<button class="btn small" data-cmd="resume">▶ Tiếp</button>` : `<button class="btn small" data-cmd="pause">⏸ Dừng</button>`}
           <button class="btn small" data-cmd="retry" title="Làm lại giai đoạn">↻</button>
+          ${mergeButton(d.stage?.merge)}
           ${t.stage === "pr" ? `<button class="btn small" data-cmd="merged">PR đã merge</button>` : ""}
           ${t.stage_template === "code" && ["understand", "plan"].includes(t.stage) ? `<button class="btn small" data-cmd="quick" title="Việc nhỏ: 1 ghi chú ngắn, 1 lần duyệt">⇄ Sửa nhỏ</button>` : ""}
           ${t.stage_template === "quick" && ["scope", "build"].includes(t.stage) ? `<button class="btn small" data-cmd="full" title="Quy trình đầy đủ: requirements, plan, kiến thức">⇄ Đầy đủ</button>` : ""}
@@ -561,6 +570,10 @@ document.addEventListener("click", (e) => {
   if (ds.saveBitbucket !== undefined) return act(async () => { await api("/api/setup/bitbucket", { method: "POST", body: { email: conn("bb_email"), token: conn("bb_token"), workspace: conn("bb_workspace") } }); toast("Bitbucket OK"); await pageSetup(); });
   const pane = t.closest("[data-pane]");
   const key = pane?.dataset.pane;
+  if (ds.merge && key) {
+    if (!confirm(`Merge nhánh của ${key} vào ${ds.merge}? Office chạy test trên kết quả merge; test lỗi hoặc xung đột thì ${ds.merge} giữ nguyên.`)) return;
+    return act(async () => { await api(`/api/tickets/${key}/merge/start`, { method: "POST" }); toast("Đang merge, kết quả sẽ hiện ở timeline"); await refresh(key); });
+  }
   if (ds.cmd && key) return act(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: ds.cmd } }); await refresh(key); });
   if (ds.send !== undefined && key) {
     const box = $("[data-steer]", pane);

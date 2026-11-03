@@ -203,6 +203,7 @@ class Office:
     async def close(self) -> None:
         await self.scheduler.shutdown()
         await self.automations.shutdown()
+        await self.merges.close()
         for task in self._tasks:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

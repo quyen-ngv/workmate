@@ -95,6 +95,15 @@ class WakeService:
             (reason, wake_id),
         )
 
+    async def drop_unchanged(self, wake: WakeRequest, reason: str) -> bool:
+        """Drop `wake` only if it is still pending with the reasons it was read with (nothing coalesced or claimed since)."""
+        cur = await self.db.execute(
+            "UPDATE wake_requests SET status = 'dropped', payload_json = json_set(payload_json, '$.dropped', ?) "
+            "WHERE id = ? AND status = 'pending' AND coalesced = ?",
+            (reason, wake.id, wake.coalesced),
+        )
+        return cur.rowcount == 1
+
 
 def only_comments(reasons: list[dict[str, Any]]) -> bool:
     """The wake only carries comments or directions from people (no change, answer, stage move or continuation)."""

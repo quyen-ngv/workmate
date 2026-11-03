@@ -182,6 +182,25 @@ async def test_ac5_newer_steer_keeps_wake(office: Office, runtime: FakeRuntime, 
     assert "Direction from Minh: S2" in prompts[0]
 
 
+async def test_ac5_drop_keeps_a_wake_that_changed_meanwhile(office: Office, people) -> None:
+    """The run reads the wake, then awaits: a steer coalesced or a claim in between must keep the wake (R-3)."""
+    ticket_id = await started(office, people)
+    ai = await office.ensure_ai()
+    await office.db.execute("UPDATE wake_requests SET status = 'done' WHERE ticket_id = ?", (ticket_id,))
+    await office.wakes.enqueue(ai.id, WakeSource.COMMENT, ticket_id=ticket_id, payload={"steer": "S1"})
+    seen = await office.wakes.pending_for(ai.id, ticket_id)
+    assert seen is not None
+    await office.wakes.enqueue(ai.id, WakeSource.COMMENT, ticket_id=ticket_id, payload={"steer": "S2"})
+    assert not await office.wakes.drop_unchanged(seen, "x")
+    current = await office.wakes.pending_for(ai.id, ticket_id)
+    assert current is not None and current.id == seen.id
+    async with office.db.tx() as tx:
+        assert await office.wakes.claim(current.id, "run_x", tx)
+    assert not await office.wakes.drop_unchanged(current, "x")
+    row = await office.db.fetchone("SELECT status FROM wake_requests WHERE id = ?", (current.id,))
+    assert row["status"] == "claimed"
+
+
 def test_only_comments() -> None:
     assert only_comments([{"steer": "a"}, {"comment_id": 3}])
     assert not only_comments([])
@@ -297,6 +316,38 @@ async def test_ac8_change_wake_opens_new_attempt_and_cancels_card(office: Office
     assert [r.attempt for r in await office.stages.runs(ticket_id) if r.stage == "build"] == [1, 2]
     assert (await office.interactions.get(card.id)).status == InteractionStatus.CANCELLED
     assert await stage_cards(office, ticket_id) == []
+
+
+async def test_ac11_external_gate_follow_up_runs_in_the_same_attempt(office: Office, runtime: FakeRuntime) -> None:
+    """Regression: a pr waiting for its merge (external gate) still answers comments in the same attempt."""
+    from actoroffice.domain.stage import StageDef, StageTemplate
+    from actoroffice.domain.team import TeamSettings
+
+    stages = [StageDef(id="pr", gate="merge"), StageDef(id="close")]
+    team = await office.teams.create_team("T", settings=TeamSettings(stage_templates={"code": StageTemplate(name="code", stages=stages)}))
+    ticket = await office.tickets.create("PR", description="x")
+    await office.db.execute("UPDATE tickets SET stage = 'pr', stage_template = 'code', team_id = ? WHERE id = ?", (team.id, ticket.id))
+    outcomes: list[str] = []
+    prompts: list[str] = []
+
+    async def open_pr(ctx: TurnCtx) -> TurnResult:
+        outcomes.append(await ctx.office("stage_complete", {"summary": "PR #1"}))
+        return ok(ctx)
+
+    async def follow_up(ctx: TurnCtx) -> TurnResult:
+        prompts.append(ctx.spec.prompt)
+        await ctx.office("ticket_set_status", {"status": "in_review", "comment": "đã trả lời, chờ merge"})
+        return ok(ctx)
+
+    runtime.scripts += [open_pr, follow_up]
+    await office.tickets.assign(ticket.id, (await office.ensure_ai()).id, by="user")
+    await office.scheduler.wait_idle(timeout=20)
+    assert "external gate 'merge'" in outcomes[0]
+    await office.tickets.add_comment(ticket.id, "Sửa tên nhánh", author_kind="user", author_id=LOCAL_OWNER_ID)
+    await office.scheduler.wait_idle(timeout=20)
+    assert "Sửa tên nhánh" in prompts[0]
+    assert [r.attempt for r in await office.stages.runs(ticket.id) if r.stage == "pr"] == [1]
+    assert await ticket_runs(office, ticket.id) == 2
 
 
 # ---- BR-5: a new stage run withdraws the stale gate cards --------------------------------------------------------

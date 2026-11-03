@@ -282,13 +282,14 @@ class Executor:
         reasons = wake.payload.get("reasons", []) if wake else []
         if wake is None or not reasons:
             return
+        # drop_unchanged: a reason coalesced (or a claim) during the awaits below keeps the wake.
         if status != RunStatus.PARKED and all(r.get("change") for r in reasons):
             if not await office.tickets.changes_after(ticket_id, gate.seen_change_id):
-                await office.wakes.drop(wake.id, "change already seen by the previous run")
+                await office.wakes.drop_unchanged(wake, "change already seen by the previous run")
         elif status != RunStatus.FAILED and all(r.get("steer") for r in reasons):
             # A parked run keeps the direction in its session; a failed one may not have acted on it.
             if not await office.tickets.comments_after(ticket_id, "steer", gate.seen_steer_id):
-                await office.wakes.drop(wake.id, "steer already delivered to the previous run")
+                await office.wakes.drop_unchanged(wake, "steer already delivered to the previous run")
 
     async def run_chat(self, wake: WakeRequest, run_id: str) -> RunStatus:
         """One chat turn: read the new messages, reply once. Work goes through proposed tickets."""

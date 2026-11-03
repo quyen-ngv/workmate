@@ -27,10 +27,10 @@ from actoroffice.domain.stage import default_templates
 from actoroffice.domain.work import ProjectAccess
 from actoroffice.engine import prompt_pack
 from actoroffice.engine.browser import Action, BrowserError, PlaywrightBrowser, ShotResult, is_loopback, parse_actions
-from actoroffice.engine.workspace import ticket_env
+from actoroffice.engine.workspace import PORT_BASE, PORTS_PER_TICKET, ticket_env
 from actoroffice.services import ui_preview
 from actoroffice.services.checks import review_ids, ui_evidence_markdown, ui_ids
-from actoroffice.services.ui_preview import listeners
+from actoroffice.services.ui_preview import free_port, listeners
 from actoroffice.tools.registry import ToolCtx, ToolError
 from actoroffice.tools.stage_tools import ui_screenshot
 
@@ -104,7 +104,10 @@ async def ui_ticket(office: Office, tmp_path: Path, profile: dict[str, Any] | No
     if profile:
         project = await office.projects.configure(project.id, profile=profile)
     # Each test DB starts at ticket 1: a ticket id of its own gives each test its own port block (parallel workers)
+    # (and one whose block the machine lets us bind: Windows reserves some port ranges)
     seq = 100 + zlib.crc32(str(tmp_path).encode()) % 1800
+    while free_port({f"AO_PORT_{i}": str(PORT_BASE + ((seq + 1) % 2000) * PORTS_PER_TICKET + i) for i in range(PORTS_PER_TICKET)}) is None:
+        seq = 100 + (seq + 37) % 1800
     await office.db.execute("INSERT OR REPLACE INTO sqlite_sequence(name, seq) VALUES ('tickets', ?)", (seq,))
     ticket = await office.tickets.create("Hoàn tiền", description="x", project_id=project.id)
     await office.db.execute("UPDATE tickets SET stage = ?, stage_template = ? WHERE id = ?", (stage, template, ticket.id))
@@ -126,7 +129,7 @@ def gone(pid: int) -> bool:
 
 def listening(port: int) -> list[str]:
     """Addresses something listens on at this TCP port (machine-wide: a venv launcher on Windows hides its child's sockets)."""
-    return listeners(port)
+    return listeners(port) or []
 
 
 def has_chrome() -> bool:
@@ -215,7 +218,7 @@ async def test_ac2_app_listening_beyond_loopback_is_refused(office: Office, tmp_
     office.ui.browser = browser
     seen: list[int] = []
 
-    def exposed(port: int) -> list[str]:
+    def exposed(port: int, _pid: int | None = None) -> list[str]:
         seen.append(port)
         return ["0.0.0.0", "127.0.0.1"]  # what an app started with --host 0.0.0.0 shows (no real socket opened to the LAN)
 
@@ -227,6 +230,31 @@ async def test_ac2_app_listening_beyond_loopback_is_refused(office: Office, tmp_
     assert error["metadata"]["ac"] == "AC-2" and "0.0.0.0" in error["metadata"]["reason"]
     assert ui_preview.is_loopback_ip("::1") and ui_preview.is_loopback_ip("127.0.0.1") and not ui_preview.is_loopback_ip("::")
     assert not ui_preview.is_loopback_ip("192.168.1.5") and not ui_preview.is_loopback_ip("")
+
+
+async def test_ac2_listen_address_unknown_is_refused(office: Office, tmp_path: Path, monkeypatch) -> None:
+    """No permission to list sockets machine-wide (macOS without root): the app's own process tree is read; when
+    that is refused too the check fails closed instead of letting the app through."""
+    ticket, project, repo = await ui_ticket(office, tmp_path, ui_profile())
+
+    def denied(*_a: Any, **_k: Any) -> Any:
+        raise psutil.AccessDenied()
+
+    monkeypatch.setattr(psutil, "net_connections", denied)
+    preview = await office.ui.ensure("run-a", ticket, project, repo)  # fallback: the app's own sockets
+    try:
+        assert listeners(preview.port, preview.proc.pid) == ["127.0.0.1"]
+        assert listeners(preview.port) is None  # no pid to fall back on
+    finally:
+        await office.ui.stop_run("run-a")
+
+    monkeypatch.setattr(psutil.Process, "net_connections", denied)
+    office.ui.browser = FakeBrowser()
+    with pytest.raises(ToolError, match="không kiểm được app chỉ nghe 127.0.0.1"):
+        await ui_screenshot({"ac": "AC-2", "caption": "x"}, await tool_ctx(office, ticket.id, repo))
+    assert office.ui.running("run-ui-1") is None and office.ui.browser.calls == []
+    [error] = await ui_errors(office, ticket.id)
+    assert error["metadata"]["ac"] == "AC-2"
 
 
 async def test_ac2_stop_run_kills_app_and_removes_data(office: Office, tmp_path: Path) -> None:

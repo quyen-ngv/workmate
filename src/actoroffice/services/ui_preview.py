@@ -113,14 +113,20 @@ def free_port(env: dict[str, str]) -> int | None:
     return None
 
 
-def listeners(port: int) -> list[str]:
-    """Addresses something listens on at this TCP port. Windows may report another process's listening socket
-    with status NONE: a bound socket without a remote end counts too. Empty when the system does not tell."""
+def listeners(port: int, pid: int | None = None) -> list[str] | None:
+    """Addresses something listens on at this TCP port: machine-wide, else (no permission, e.g. macOS without root)
+    from the sockets of process `pid` and its children. None when the system tells neither. Windows may report
+    another process's listening socket with status NONE: a bound socket without a remote end counts too."""
     try:
-        conns = psutil.net_connections(kind="tcp")
+        conns = list(psutil.net_connections(kind="tcp"))
     except psutil.Error:
-        log.warning("cannot list listening sockets to check the UI preview on port %s", port)
-        return []
+        if pid is None:
+            return None
+        try:
+            parent = psutil.Process(pid)
+            conns = [c for p in (parent, *parent.children(recursive=True)) for c in p.net_connections(kind="tcp")]
+        except psutil.Error:
+            return None
     return sorted({c.laddr.ip for c in conns if c.laddr and c.laddr.port == port and not c.raddr and c.status in (psutil.CONN_LISTEN, psutil.CONN_NONE)})
 
 
@@ -233,7 +239,11 @@ class UiPreviewService:
         except OSError as exc:
             raise UiEnvError(f"không chạy được lệnh start {argv[0]}: {exc}") from exc
         await self._wait(preview, timeout)
-        exposed = [ip for ip in await asyncio.to_thread(listeners, preview.port) if not is_loopback_ip(ip)]
+        addresses = await asyncio.to_thread(listeners, preview.port, preview.proc.pid if preview.proc else None)
+        if not addresses:
+            # a security check that cannot run must not pass: the app may be open to the network
+            raise UiEnvError("không kiểm được app chỉ nghe 127.0.0.1 (hệ thống không cho đọc danh sách socket đang nghe)", preview.tail())
+        exposed = [ip for ip in addresses if not is_loopback_ip(ip)]
         if exposed:
             # the app holds the sign-in token: it must not be reachable from the network (R3)
             raise UiEnvError(f"app nghe trên {', '.join(exposed)} thay vì chỉ 127.0.0.1: sửa lệnh start (vd. --host 127.0.0.1)", preview.tail())

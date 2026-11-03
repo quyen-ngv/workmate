@@ -576,9 +576,10 @@ def test_ac13_build_prompt_and_tool() -> None:
 
     from .test_prompt_pack import _prompt
 
-    code_build = _prompt("code", office_runs_tests=True).parts["stage"]
-    assert "review_reply" in code_build and "a wontfix needs a reason" in code_build
-    for template_name, stage_id in (("quick", "build"), ("code", "pr"), ("code", "plan")):
+    for template_name in ("code", "quick"):  # SI-11: the quick workflow's build is reviewed too
+        build = _prompt(template_name, office_runs_tests=True).parts["stage"]
+        assert "review_reply" in build and "a wontfix needs a reason" in build
+    for template_name, stage_id in (("quick", "pr"), ("code", "pr"), ("code", "plan")):
         assert "review_reply" not in _prompt(template_name, office_runs_tests=True, stage_id=stage_id).parts["stage"]
     tool = next(t for t in STAGE_TOOLS if t.name == "review_reply")
     assert tool.input_schema["properties"]["action"]["enum"] == ["fixed", "wontfix"]

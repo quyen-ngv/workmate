@@ -171,7 +171,7 @@ class PolicyEngine:
         if tool in WRITE_TOOLS:
             return self._file_access(tool, args, ctx, write=True)
         if tool in SHELL_TOOLS:
-            return self._shell(str(args.get("command", "")), ctx)
+            return self._shell(str(args.get("command", "")), ctx, "ps" if tool == "PowerShell" else "sh")
         if tool in WEB_TOOLS:
             rule = ctx.position.policy.web
             return Verdict(_decision(rule), Risk.READ, f"web access is '{rule}' for this position", taints=True)
@@ -221,7 +221,7 @@ class PolicyEngine:
 
     # ---- shell ----------------------------------------------------------------------------
 
-    def _shell(self, command: str, ctx: ToolCallContext) -> Verdict:
+    def _shell(self, command: str, ctx: ToolCallContext, dialect: str = "sh") -> Verdict:
         cmd = command.strip()
         for pattern in HARD_DENY_COMMANDS:
             if pattern.search(cmd):
@@ -241,7 +241,7 @@ class PolicyEngine:
                 "Do not write files through the shell (heredoc or > redirection). Use the Write tool to create a file "
                 "and Edit to change one, then run each command on its own (no && chains).",
             )
-        if shell.wait_loop(cmd):
+        if shell.wait_loop(cmd, dialect=dialect):
             # A loop that sleeps until something happens can wait forever when that never comes (SI-6). A deny,
             # not an ask: the reason reaches the actor, and no mode or rule can let it through.
             return Verdict(Decision.DENY, Risk.EXEC, WAIT_LOOP_REASON)

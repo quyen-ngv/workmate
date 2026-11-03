@@ -228,7 +228,7 @@ def test_newlines_inside_quotes_are_text_and_outside_they_split(engine, ws):
 
 def without_wait_check(monkeypatch, engine: PolicyEngine, tool: str, command: str, c: ToolCallContext):
     """The verdict the command got before SI-6: the same policy with the wait-loop check switched off."""
-    monkeypatch.setattr(shell, "wait_loop", lambda _command: False)
+    monkeypatch.setattr(shell, "wait_loop", lambda _command, *_args, **_kwargs: False)
     try:
         return engine.decide(tool, {"command": command}, c)
     finally:
@@ -351,3 +351,126 @@ def test_ac9_ordinary_commands_unchanged(engine, ws, tool, command, monkeypatch)
     assert shell.wait_loop(command) is False, command
     verdict = engine.decide(tool, {"command": command}, c)
     assert verdict == without_wait_check(monkeypatch, engine, tool, command, c)
+
+
+# ---- SI-12: nested loops, timeout 0, ( / $( before timeout, PowerShell quoting --------------------------------
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "while true; do for f in *; do echo $f; done; sleep 5; done",
+        "until [ -s f ]; do for i in 1 2; do sleep 1; done; done",  # the sleep is in the inner loop
+        "while true; do for a in x; do for b in y; do echo $a$b; done; done; sleep 5; done",  # three levels
+        "while true; do while read l; do echo $l; done < f; sleep 2; done",
+        "for f in a b; do while true; do sleep 1; done; done",  # the wait loop is the inner one
+        "while true\ndo\n  for f in *\n  do\n    echo $f\n  done\n  sleep 5\ndone",
+        "while true; do echo done; for f in *; do echo \"done\"; done; sleep 5; done",
+        "bash -c 'while true; do for f in *; do echo $f; done; sleep 5; done'",
+        'sh -c "until [ -s f ]; do for i in 1 2; do sleep 1; done; done"',
+        # words that look like do/done are not the keywords
+        "done=0; while [ $done = 0 ]; do if [ -s f ]; then done=1; fi; sleep 5; done",
+        "while true; do ./done.sh; sleep 5; done",
+        "while true; do done.sh; do-it; sleep 1; done",
+        "until [ -s f ]; do dosomething; sleep 1; done",
+        "while true; do echo then done; sleep 5; done",
+        "while true; do echo do done; echo else done; sleep 5; done",
+        "while true; do if [ -s f ]; then echo then done; fi; sleep 5; done",
+        # never closed: judged on what is there
+        "while true; do sleep 5",
+        "while true; do for f in *; do echo $f; done; sleep 5",
+    ],
+)
+def test_ac1_nested_loop_with_sleep_is_denied(engine, ws, command):
+    assert shell.wait_loop(command) is True, command
+    verdict = engine.decide("Bash", {"command": command}, ctx(ws, "folder"))
+    assert verdict.decision == Decision.DENY and verdict.reason == WAIT_LOOP_REASON, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "while read line; do for w in $line; do echo $w; done; done < f.txt",
+        "for f in *; do while read l; do echo $l; done < $f; done; sleep 1",  # the sleep runs after the loops
+        "while read l; do echo done; done < f.txt; sleep 1",
+        "while read l; do echo \"do\"; for w in $l; do echo $w; done; done < f.txt && sleep 2",
+        "bash -c 'while read l; do for w in $l; do echo $w; done; done < f.txt'",
+        "while read l; do ./done.sh $l; done=1; done < f.txt; sleep 1",
+        "while read l; do echo $l; done < f.txt; ./do-sleep.sh",
+        "while read l; do echo $l",  # never closed, no sleep
+    ],
+)
+def test_ac1_nested_loop_without_sleep_is_unchanged(engine, ws, command, monkeypatch):
+    c = ctx(ws)
+    assert shell.wait_loop(command) is False, command
+    verdict = engine.decide("Bash", {"command": command}, c)
+    assert verdict == without_wait_check(monkeypatch, engine, "Bash", command, c)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'timeout 0 bash -c "while true; do sleep 5; done"',  # GNU timeout 0: no limit
+        "timeout 0s sh -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout -k 5 0 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout --kill-after 5 0 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout --signal KILL 0 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout -vk 5 0 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout 5; while true; do sleep 1; done",  # timeout.exe just waits, it wraps nothing
+        "timeout 5 && bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout /t 5 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "X=$(timeout 5 cat f) bash -c 'until [ -s f ]; do sleep 5; done'",  # the timeout bounds only cat
+    ],
+)
+def test_ac2_timeout_without_a_bound_is_denied(engine, ws, command):
+    assert shell.wait_loop(command) is True, command
+    verdict = engine.decide("Bash", {"command": command}, ctx(ws, "folder"))
+    assert verdict.decision == Decision.DENY and verdict.reason == WAIT_LOOP_REASON, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        '(timeout 300 bash -c "while true; do sleep 5; done")',
+        'x=$(timeout 300 bash -c "until [ -s f ]; do sleep 5; done")',
+        "echo $( timeout 1.5m sh -c 'until [ -s f ]; do sleep 5; done' )",
+        "timeout --kill-after=5 300 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout --kill-after 5 300 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout --preserve-status -s TERM 300 bash -c 'until [ -s f ]; do sleep 5; done'",
+    ],
+)
+def test_ac2_timeout_inside_subshell_bounds_the_loop(engine, ws, command, monkeypatch):
+    c = ctx(ws, "folder")
+    assert shell.wait_loop(command) is False, command
+    verdict = engine.decide("Bash", {"command": command}, c)
+    assert verdict.reason != WAIT_LOOP_REASON
+    assert verdict == without_wait_check(monkeypatch, engine, "Bash", command, c)
+
+
+@pytest.mark.parametrize(
+    ("tool", "command"),
+    [
+        ("PowerShell", 'Copy-Item out.xml "C:\\build\\"; while ($true) { Start-Sleep 5 }'),
+        ("PowerShell", "Copy-Item out.xml 'C:\\build\\'; do { Start-Sleep 1 } until (Test-Path x)"),
+        ("PowerShell", 'Write-Host "say ""hi"" C:\\tmp\\"; while ($true) { Start-Sleep 5 }'),
+        ("Bash", "pwsh -c 'Copy-Item a \"C:\\build\\\"; while ($true) { Start-Sleep 5 }'"),
+    ],
+)
+def test_ac3_powershell_backslash_is_no_escape(engine, ws, tool, command):
+    verdict = engine.decide(tool, {"command": command}, ctx(ws, "folder"))
+    assert verdict.decision == Decision.DENY and verdict.reason == WAIT_LOOP_REASON, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Select-String -Pattern 'while (1) { Start-Sleep 1 }' a.ps1",
+        "Write-Host \"it`\"s while (1) { Start-Sleep 1 }\"",  # `" is PowerShell's escaped quote
+        "Write-Host 'it''s while (1) { Start-Sleep 1 }'",
+        'Get-ChildItem "C:\\build\\" | Where-Object { $_.Name -like \'while*\' }',
+    ],
+)
+def test_ac3_powershell_quoted_loops_are_not_denied(engine, ws, command, monkeypatch):
+    c = ctx(ws)
+    assert shell.wait_loop(command, dialect="ps") is False, command
+    verdict = engine.decide("PowerShell", {"command": command}, c)
+    assert verdict == without_wait_check(monkeypatch, engine, "PowerShell", command, c)

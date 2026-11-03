@@ -367,6 +367,14 @@ def test_ac9_ordinary_commands_unchanged(engine, ws, tool, command, monkeypatch)
         "while true; do echo done; for f in *; do echo \"done\"; done; sleep 5; done",
         "bash -c 'while true; do for f in *; do echo $f; done; sleep 5; done'",
         'sh -c "until [ -s f ]; do for i in 1 2; do sleep 1; done; done"',
+        # words that look like do/done are not the keywords
+        "done=0; while [ $done = 0 ]; do if [ -s f ]; then done=1; fi; sleep 5; done",
+        "while true; do ./done.sh; sleep 5; done",
+        "while true; do done.sh; do-it; sleep 1; done",
+        "until [ -s f ]; do dosomething; sleep 1; done",
+        # never closed: judged on what is there
+        "while true; do sleep 5",
+        "while true; do for f in *; do echo $f; done; sleep 5",
     ],
 )
 def test_ac1_nested_loop_with_sleep_is_denied(engine, ws, command):
@@ -383,6 +391,9 @@ def test_ac1_nested_loop_with_sleep_is_denied(engine, ws, command):
         "while read l; do echo done; done < f.txt; sleep 1",
         "while read l; do echo \"do\"; for w in $l; do echo $w; done; done < f.txt && sleep 2",
         "bash -c 'while read l; do for w in $l; do echo $w; done; done < f.txt'",
+        "while read l; do ./done.sh $l; done=1; done < f.txt; sleep 1",
+        "while read l; do echo $l; done < f.txt; ./do-sleep.sh",
+        "while read l; do echo $l",  # never closed, no sleep
     ],
 )
 def test_ac1_nested_loop_without_sleep_is_unchanged(engine, ws, command, monkeypatch):

@@ -390,7 +390,8 @@ def _where(raw: str, place: Place, cwd: Path | None) -> str:
 # Where a shell keyword can start a command: the start, after a separator, or after then/do/else.
 _CMD_START = r"(?:^|[;&|\n({]|\b(?:then|do|else|elif)\b)\s*"
 _BASH_LOOP = re.compile(_CMD_START + r"(?:until|while)\s")
-_DO_DONE = re.compile(r"\b(?:do|done)\b")
+# The keyword is a whole word: `done=1`, `./done.sh`, `do-it` are not.
+_DO_DONE = re.compile(r"(?<![\w./-])(?:do|done)(?=[\s;&|()<>]|$)")
 _KEYWORD_BEFORE = re.compile(r"(?:^|[;&|\n(){}]|\b(?:then|do|else|elif))[ \t]*$")
 _BASH_SLEEP = re.compile(_CMD_START + r"sleep\b")
 _PS_START = r"(?:^|[;\n{}]|&&|\|\|)\s*"

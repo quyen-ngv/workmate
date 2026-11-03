@@ -624,6 +624,59 @@ def test_ac11_real_heredoc_still_denied(engine, ws, command):
     assert verdict.decision == Decision.DENY and verdict.reason.startswith(FILE_WRITE_REASON), command
 
 
+@pytest.mark.parametrize("command", ["echo a #'\nid; echo '", "echo a;#'\nid", "echo a\t#'\nid #'"])
+def test_si36_ac1_quote_in_comment_does_not_hide_next_line(engine, ws, command):
+    # bash: `#` starting a word is a comment, its `'` opens nothing, so `id` on the next line runs
+    parts = shell.split(command)
+    assert parts is None or ["id"] in [p.argv for p in parts], command
+    c = ctx(ws)
+    c.allow_rules = ["Bash(echo *)"]
+    assert decide(engine, c, command) != Decision.ALLOW, command
+
+
+def test_si36_ac1_comment_then_next_line_is_its_own_command():
+    parts = shell.split("echo a #'x\nid")
+    assert [p.argv for p in parts] == [["echo", "a"], ["id"]]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # an escaped separator does not end the word, so this `#` is text and its `'` opens a quote in bash too
+        "echo \\;#'\nid; echo '",
+        "echo a\\ #'\nid; echo '",
+    ],
+)
+def test_si36_ac1_escaped_char_before_hash_is_not_a_comment(engine, ws, command):
+    parts = shell.split(command)
+    assert parts is not None and len(parts) == 1 and parts[0].argv[0] == "echo", command
+
+
+@pytest.mark.parametrize(
+    ("command", "argv"),
+    [
+        ("echo a # note", [["echo", "a"]]),
+        ("echo a # note\nls", [["echo", "a"], ["ls"]]),
+        ("echo 'a #b'", [["echo", "a #b"]]),
+        ('echo "a #b"', [["echo", "a #b"]]),
+        ("echo a#b", [["echo", "a#b"]]),
+        ("echo $# x", [["echo", "$#", "x"]]),
+    ],
+)
+def test_si36_ac2_comments_and_text_hashes(engine, ws, command, argv):
+    assert [p.argv for p in shell.split(command)] == argv
+    assert decide(engine, ctx(ws), command) == Decision.ALLOW, command
+
+
+@pytest.mark.parametrize(
+    ("command", "argv"),
+    [("echo a # note", ["echo", "a", "#", "note"]), ("echo a #'x'\nls", ["echo", "a", "#x", ";", "ls"])],
+)
+def test_si36_ac3_powershell_keeps_hash_as_text(command, argv):
+    parts = shell.split(command, "ps")
+    assert [tok for p in parts for tok in [*p.argv, ";"]][:-1] == argv
+
+
 def test_ac12_powershell_unchanged(engine, ws):
     command = """uv run python -c 'print("$(x)")'"""
     assert engine.decide("PowerShell", {"command": command}, ctx(ws)).decision == Decision.ASK

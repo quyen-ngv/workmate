@@ -118,7 +118,7 @@ def split(command: str, dialect: str = "sh") -> list[Command] | None:
             return None
     elif NOT_SPLITTABLE.search(command):
         return None
-    command = _newlines_as_separators(command)
+    command = _newlines_as_separators(command, dialect)
     if command is None:
         return None
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()")
@@ -195,11 +195,14 @@ def specials_are_text(command: str) -> bool | None:
     return None if quote else True
 
 
-def _newlines_as_separators(command: str) -> str | None:
+def _newlines_as_separators(command: str, dialect: str = "sh") -> str | None:
     """A newline outside quotes ends a command (like `;`); inside quotes it is text (a multi-line commit message).
-    None when a backslash-newline continuation or an unbalanced quote makes it unclear."""
+    In sh a `#` that starts a word outside quotes is a comment up to the newline and is dropped, so a quote inside
+    it (`echo a #'⏎id`) does not hide the next line. None when a backslash-newline continuation or an unbalanced
+    quote makes it unclear."""
     out: list[str] = []
     quote = ""
+    escaped = False  # the previous character was escaped, so it does not end a word
     i = 0
     while i < len(command):
         ch = command[i]
@@ -208,12 +211,19 @@ def _newlines_as_separators(command: str) -> str | None:
                 return None
             out += [ch, command[i + 1]]
             i += 2
+            escaped = True
             continue
+        word_start = i == 0 or (not escaped and command[i - 1] in " \t\r\n;&|()<>")
+        escaped = False
         if quote:
             if ch == quote:
                 quote = ""
         elif ch in "'\"":
             quote = ch
+        elif ch == "#" and dialect == "sh" and word_start:
+            end = command.find("\n", i)
+            i = len(command) if end < 0 else end
+            continue
         elif ch in "\r\n":
             out.append(" ; " if ch == "\n" else " ")
             i += 1

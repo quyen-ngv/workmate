@@ -389,7 +389,9 @@ def _where(raw: str, place: Place, cwd: Path | None) -> str:
 
 # Where a shell keyword can start a command: the start, after a separator, or after then/do/else.
 _CMD_START = r"(?:^|[;&|\n({]|\b(?:then|do|else|elif)\b)\s*"
-_BASH_LOOP = re.compile(_CMD_START + r"(?:until|while)\s.*?[;\n]\s*do\b(?P<body>.*?)[;&\n]\s*done\b", re.DOTALL)
+_BASH_LOOP = re.compile(_CMD_START + r"(?:until|while)\s")
+_DO_DONE = re.compile(r"\b(?:do|done)\b")
+_KEYWORD_BEFORE = re.compile(r"(?:^|[;&|\n(){}]|\b(?:then|do|else|elif))[ \t]*$")
 _BASH_SLEEP = re.compile(_CMD_START + r"sleep\b")
 _PS_START = r"(?:^|[;\n{}]|&&|\|\|)\s*"
 _PS_WHILE = re.compile(_PS_START + r"while\s*\(", re.IGNORECASE)
@@ -397,15 +399,24 @@ _PS_DO = re.compile(_PS_START + r"do\s*\{", re.IGNORECASE)
 _PS_DO_END = re.compile(r"\s*(?:until|while)\s*\(", re.IGNORECASE)
 _PS_SLEEP = re.compile(r"(?<![\w$-])(?:start-sleep|sleep)\b", re.IGNORECASE)
 # A quoted string that another shell runs: bash -c '…', sh -lc "…", powershell -NoProfile -Command "…"
-_LAUNCH = re.compile(r"(?<![\w-])(?:bash|sh|zsh|dash|powershell|pwsh)(?:\.exe)?(?:\s+\S+)*?\s+-(?:[a-z]*c|command)\s*$", re.IGNORECASE)
-_BOUNDED = re.compile(r"^\s*(?:[A-Za-z_]\w*=\S*\s+)*timeout\s")
+_LAUNCH = re.compile(
+    r"(?<![\w-])(?P<program>bash|sh|zsh|dash|powershell|pwsh)(?:\.exe)?(?:\s+\S+)*?\s+-(?:[a-z]*c|command)\s*$",
+    re.IGNORECASE,
+)
+# `timeout [options] N[smhd] <command>` with N > 0. GNU timeout 0 never stops the command, and Windows'
+# timeout.exe (`timeout /t 5`) only waits: neither bounds anything.
+_BOUNDED = re.compile(
+    r"^\s*(?:[A-Za-z_]\w*=\S*\s+)*timeout"
+    r"(?:\s+(?:-[ks]\s*\S+|--[a-z-]+(?:=\S+)?|-[a-z]+))*\s+(?P<n>\d+(?:\.\d+)?)[smhd]?\s"
+)
 
 
-def wait_loop(command: str, depth: int = 0) -> bool:
+def wait_loop(command: str, depth: int = 0, dialect: str = "sh") -> bool:
     """True when the command waits in a loop that nothing bounds: `until/while …; do … sleep …; done` (sh) or
     `while (…) { Start-Sleep … }`, `do { … sleep … } until/while (…)` (PowerShell). Keywords count only outside
-    quotes; a string run by `bash -c` / `powershell -Command` is looked into, unless `timeout N` wraps that command."""
-    masked, strings = _mask_quotes(command)
+    quotes (`dialect` "ps": PowerShell quoting, where `\\` is no escape); a string run by `bash -c` /
+    `powershell -Command` is looked into, unless `timeout N` (N > 0) wraps that command."""
+    masked, strings = _mask_quotes(command, dialect)
     if _sh_wait(masked) or _ps_wait(masked):
         return True
     if depth >= 3:
@@ -413,19 +424,35 @@ def wait_loop(command: str, depth: int = 0) -> bool:
     for start, inner in strings:
         segment = re.split(r"[;&|\n]", masked[:start])[-1]
         launch = _LAUNCH.search(segment)
-        if launch and not _BOUNDED.match(segment[: launch.start()]) and wait_loop(inner, depth + 1):
+        if launch is None or _bounded(segment[: launch.start()]):
+            continue
+        inner_dialect = "ps" if launch.group("program").lower() in ("powershell", "pwsh") else "sh"
+        if wait_loop(inner, depth + 1, inner_dialect):
             return True
     return False
 
 
-def _mask_quotes(command: str) -> tuple[str, list[tuple[int, str]]]:
-    """The command with every quoted string blanked out, and the strings: (where it starts, its text)."""
+def _bounded(prefix: str) -> bool:
+    """`prefix` is the command before `bash -c`; inside `(…)` / `$(…)` only the text after the last `(` counts,
+    and none of it may close a bracket (`X=$(timeout 5 cat f) bash -c …` is not bounded)."""
+    prefix = prefix.rsplit("(", 1)[-1]
+    if ")" in prefix:
+        return False
+    m = _BOUNDED.match(prefix)
+    return m is not None and float(m.group("n")) > 0
+
+
+def _mask_quotes(command: str, dialect: str = "sh") -> tuple[str, list[tuple[int, str]]]:
+    """The command with every quoted string blanked out, and the strings: (where it starts, its text).
+    sh escapes with `\\` (outside quotes and inside "…"); ps escapes with a backtick and doubles a quote
+    inside a string: 'it''s', "say ""hi"" "."""
+    esc = "`" if dialect == "ps" else "\\"
     out = list(command)
     strings: list[tuple[int, str]] = []
     i = 0
     while i < len(command):
         ch = command[i]
-        if ch == "\\":
+        if ch == esc:
             i += 2
             continue
         if ch not in "'\"":
@@ -433,9 +460,14 @@ def _mask_quotes(command: str) -> tuple[str, list[tuple[int, str]]]:
             continue
         start, text = i, []
         i += 1
-        while i < len(command) and command[i] != ch:
-            if ch == '"' and command[i] == "\\" and i + 1 < len(command):
-                i += 1  # \" \\ \$ inside double quotes
+        while i < len(command):
+            if command[i] == ch:
+                if dialect == "ps" and command[i + 1 : i + 2] == ch:
+                    i += 1  # '' or "" inside a PowerShell string
+                else:
+                    break
+            elif ch == '"' and command[i] == esc and i + 1 < len(command):
+                i += 1  # \" \\ \$ (sh) or `" `$ (ps) inside double quotes
             text.append(command[i])
             i += 1
         end = min(i + 1, len(command))
@@ -446,7 +478,27 @@ def _mask_quotes(command: str) -> tuple[str, list[tuple[int, str]]]:
 
 
 def _sh_wait(masked: str) -> bool:
-    return any(_BASH_SLEEP.search(m.group("body")) for m in _BASH_LOOP.finditer(masked))
+    """A `until/while … do … done` loop whose body (nested loops included) runs `sleep`. The body ends at the
+    `done` that pairs with the loop's `do`, counting the do/done of the loops inside it."""
+    for m in _BASH_LOOP.finditer(masked):
+        level, body_start = 0, None
+        for kw in _DO_DONE.finditer(masked, m.end()):
+            if not _KEYWORD_BEFORE.search(masked, 0, kw.start()):
+                continue  # `echo done`: an argument, not the keyword
+            level += 1 if kw.group() == "do" else -1
+            if level < 0:
+                break
+            if level == 1 and kw.group() == "do" and body_start is None:
+                body_start = kw.start()  # from the `do` itself, so `do sleep` counts as sleep at a command start
+            if level == 0 and body_start is not None:
+                if _BASH_SLEEP.search(masked, body_start, kw.start()):
+                    return True
+                break
+        else:
+            # Never closed: bash would reject it, but judge what is there rather than let it through.
+            if body_start is not None and _BASH_SLEEP.search(masked, body_start):
+                return True
+    return False
 
 
 def _ps_wait(masked: str) -> bool:

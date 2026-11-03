@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -15,19 +15,19 @@ from actoroffice.runtimes.base import TurnSpec
 from actoroffice.services.chat import handle
 from actoroffice.services.checks import command_list
 from actoroffice.services.runs import ticket_session_key
+from actoroffice.tools.atlassian_tools import ATLASSIAN_TOOLS
 from actoroffice.tools.chat_tools import CHAT_TOOLS
+from actoroffice.tools.infra_tools import INFRA_TOOLS
 from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
 from actoroffice.tools.office_tools import OFFICE_TOOLS
 from actoroffice.tools.registry import BoundTool, ToolCtx
-from actoroffice.tools.atlassian_tools import ATLASSIAN_TOOLS
-from actoroffice.tools.infra_tools import INFRA_TOOLS
 from actoroffice.tools.stage_tools import STAGE_TOOLS
 from actoroffice.tools.work_tools import CHAT_WORK_TOOLS, WORK_TOOLS
 
 from . import context, prompt_pack
+from .gate import OfficeGate
 from .watchdog import Watchdog
 from .workspace import ticket_env
-from .gate import OfficeGate
 
 if TYPE_CHECKING:
     from actoroffice.app import Office

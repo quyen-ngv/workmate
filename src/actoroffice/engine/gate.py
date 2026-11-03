@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from actoroffice.domain.org import Actor, PermissionMode, Position
 from actoroffice.core.stats import RunStats
+from actoroffice.domain.org import Actor, PermissionMode, Position
 from actoroffice.domain.work import InteractionKind
 from actoroffice.runtimes.base import GateDecision, GateResult
 from actoroffice.security.policy import Decision, Risk, ToolCallContext, Verdict, office_tool, suggest_rules, target_of

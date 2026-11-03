@@ -10,7 +10,6 @@ from actoroffice.domain.ids import new_id, utcnow
 from actoroffice.domain.org import Actor, ActorStatus, Position
 from actoroffice.store import Database
 
-
 # Default names offered when hiring (one word each: the name is also the @mention handle).
 DEFAULT_NAMES = (
     "Emma", "Liam", "Olivia", "Noah", "Ava", "Ethan", "Mia", "Lucas", "Sophia", "Mason", "Chloe", "Jack", "Grace",

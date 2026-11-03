@@ -8,7 +8,6 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-
 import httpx
 import pytest
 

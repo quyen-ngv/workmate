@@ -82,6 +82,8 @@ GIT_NETWORK = {"push", "pull", "fetch", "clone", "ls-remote", "submodule", "remo
 SAFE_TARGETS = {"/dev/null", "nul", "NUL", "$null", "/dev/stdout", "/dev/stderr"}
 NOT_SPLITTABLE = re.compile(r"`|\$\(|<\(|>\(|<<")
 CONTINUATION = re.compile(r"\\[\r\n]")  # bash removes backslash-newline: `$\⏎(` is `$(`
+ANSI_C = re.compile(r"\$'")  # bash: in `$'\''` the `\'` does not end the string
+PS_COMMENT = re.compile(r"#")  # PowerShell: any `#` may open a comment (its token ends differ from bash)
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 OPERATORS = {"&&", "||", ";", "|", "&", "|&"}
 RANGE = re.compile(r"[\d,;$p]+")  # numbers and sed-style ranges (195,260p)
@@ -111,14 +113,16 @@ class Place:
 def split(command: str, dialect: str = "sh") -> list[Command] | None:
     """The commands of a chain, or None when the line cannot be split safely (substitution, heredoc, subshell,
     unbalanced quotes, ANSI-C quoting). In sh, `$(`, backticks and `<<` that are only text (quoted or escaped,
-    see specials_are_text) do not count; PowerShell is judged on the whole text."""
+    see specials_are_text) do not count; PowerShell is judged on the whole text and never split when it holds a `#`
+    (a comment may start after a space, `,`, `{`, `<` …), since this lexer does not follow PowerShell comments."""
     if dialect == "sh":
         literal = specials_are_text(command)
-        if literal is None or (not literal and (NOT_SPLITTABLE.search(command) or CONTINUATION.search(command))):
-            return None
-    elif NOT_SPLITTABLE.search(command):
+        whole_text = NOT_SPLITTABLE.search(command) or CONTINUATION.search(command) or ANSI_C.search(command)
+        if literal is None or (not literal and whole_text):
+            return None  # the scan stops early (`#`, `${`), so `$'…'` behind it is checked on the whole text
+    elif NOT_SPLITTABLE.search(command) or PS_COMMENT.search(command):
         return None
-    command = _newlines_as_separators(command)
+    command = _newlines_as_separators(command, dialect)
     if command is None:
         return None
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()")
@@ -195,11 +199,14 @@ def specials_are_text(command: str) -> bool | None:
     return None if quote else True
 
 
-def _newlines_as_separators(command: str) -> str | None:
+def _newlines_as_separators(command: str, dialect: str = "sh") -> str | None:
     """A newline outside quotes ends a command (like `;`); inside quotes it is text (a multi-line commit message).
-    None when a backslash-newline continuation or an unbalanced quote makes it unclear."""
+    In sh a `#` that starts a word outside quotes is a comment up to the newline and is dropped, so a quote inside
+    it (`echo a #'⏎id`) does not hide the next line. None when a backslash-newline continuation or an unbalanced
+    quote makes it unclear."""
     out: list[str] = []
     quote = ""
+    escaped = False  # the previous character was escaped, so it does not end a word
     i = 0
     while i < len(command):
         ch = command[i]
@@ -208,12 +215,19 @@ def _newlines_as_separators(command: str) -> str | None:
                 return None
             out += [ch, command[i + 1]]
             i += 2
+            escaped = True
             continue
+        word_start = i == 0 or (not escaped and command[i - 1] in " \t\r\n;&|()<>")
+        escaped = False
         if quote:
             if ch == quote:
                 quote = ""
         elif ch in "'\"":
             quote = ch
+        elif ch == "#" and dialect == "sh" and word_start:
+            end = command.find("\n", i)
+            i = len(command) if end < 0 else end
+            continue
         elif ch in "\r\n":
             out.append(" ; " if ch == "\n" else " ")
             i += 1

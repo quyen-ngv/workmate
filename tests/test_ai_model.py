@@ -93,6 +93,19 @@ async def test_ac1_ai_actor_without_ai_model_keeps_old_choice(tmp_path, runtime)
         await o.close()
 
 
+async def test_ac1_switching_runtime_never_resumes_the_other_runtimes_session(office, runtime):
+    ai = await hire(office, office.settings.ai_name)
+    conv = await office.chat.dm(ai.id)
+    for model, text in ((AI_MODEL, "một"), ("kiro", "hai"), (AI_MODEL, "ba"), ("kiro", "bốn")):
+        office.settings.ai_model = model
+        await office.chat.post_user(conv.id, text)
+        await office.scheduler.wait_idle(timeout=10)
+    first, kiro, back, kiro_again = runtime.specs
+    assert kiro.model == "kiro" and kiro.resume_session_id is None
+    assert back.resume_session_id == f"sess-{first.run_id}"
+    assert kiro_again.resume_session_id == f"sess-{kiro.run_id}"
+
+
 async def test_ac2_team_model_overrides_ai_model_on_stage_turns(office, runtime):
     await run_stage_ticket(office, "haiku")
     assert runtime.specs and runtime.specs[0].model == "haiku"

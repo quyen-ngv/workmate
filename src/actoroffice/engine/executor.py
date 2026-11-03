@@ -13,6 +13,7 @@ from actoroffice.domain.errors import Conflict, OfficeError
 from actoroffice.domain.run import Run, RunKind, RunStatus, TurnResult, TurnStatus, Usage, WakeRequest, WakeSource
 from actoroffice.domain.work import InteractionKind, InteractionStatus, Ticket, TicketStatus
 from actoroffice.runtimes.base import TurnSpec
+from actoroffice.runtimes.router import is_kiro
 from actoroffice.services.chat import handle
 from actoroffice.services.checks import command_list
 from actoroffice.services.runs import ticket_session_key
@@ -73,11 +74,18 @@ class Executor:
             read_dirs = list(ws.read_dirs)
             if stage_run is not None:
                 read_dirs += await self._reference_dirs(ticket, project)
+            team = await office.teams.get_team(ticket.team_id) if stage_run is not None and ticket.team_id else None
+            if stage_run is not None:
+                model = office.settings.ai_model or actor.model or position.model or office.settings.default_model
+                model = (team.settings.model if team else None) or model
+            else:
+                model = _model_for(office, actor, position)
             session_key = ticket_session_key(actor.id, ticket.id)
             if stage_run is not None:
                 # One session per stage attempt: a new stage (or a retry) starts fresh from the dossier.
                 session_key += f":{stage_run.stage}:{stage_run.attempt}"
                 await office.db.execute("UPDATE runs SET stage_run_id = ? WHERE id = ?", (stage_run.id, run_id))
+            session_key += _runtime_suffix(model)
             resume = await office.runs.get_session(session_key, str(ws.path))
             changes = await office.tickets.changes_after(ticket.id, 0)
             gate = OfficeGate(
@@ -113,10 +121,7 @@ class Executor:
                 system, prompt = pack.system, pack.turn
                 replaced = {t.name for t in INFRA_TOOLS}
                 tools = [t for t in tools if t.name not in replaced] + STAGE_TOOLS + ATLASSIAN_TOOLS + INFRA_TOOLS
-                model = office.settings.ai_model or actor.model or position.model or office.settings.default_model
-                if ticket.team_id:
-                    team = await office.teams.get_team(ticket.team_id)
-                    model = team.settings.model or model
+                if team is not None:
                     mcp_servers = dict(team.settings.mcp_servers)
             else:
                 prompt = context.ticket_prompt(
@@ -137,7 +142,6 @@ class Executor:
                     skills=office.skills.for_actor(actor, position),
                     memories=await office.memory.context_for(actor, f"{ticket.title} {ticket.description}"),
                 )
-                model = _model_for(office, actor, position)
             spec = TurnSpec(
                 run_id=run_id,
                 prompt=prompt,
@@ -313,7 +317,8 @@ class Executor:
             else:
                 cwd = office.settings.workspaces_dir / f"chat-{conv.id}"
                 cwd.mkdir(parents=True, exist_ok=True)
-            session_key = f"{actor.id}:c{conv.id}"
+            model = _model_for(office, actor, position)
+            session_key = f"{actor.id}:c{conv.id}" + _runtime_suffix(model)
             resume = await office.runs.get_session(session_key, str(cwd))
             since = await office.chat.last_actor_message_id(conv.id, actor.id)
             history = await office.chat.messages(conv.id, after_id=since) if since else await office.chat.messages(conv.id, limit=30)
@@ -345,7 +350,7 @@ class Executor:
                     skills=office.skills.for_actor(actor, position),
                     memories=await office.memory.context_for(actor, " ".join(m.body for m in history[-5:])),
                 ),
-                model=_model_for(office, actor, position),
+                model=model,
                 tools=["Read", "Glob", "Grep"],
                 coding_preset=False,  # chat never needs the coding preset: about half the base tokens
                 resume_session_id=resume,
@@ -632,6 +637,11 @@ def _model_for(office: Office, actor: Actor, position: Position) -> str:
     if actor.name == office.settings.ai_name and office.settings.ai_model:
         return office.settings.ai_model
     return actor.model or position.model or office.settings.default_model
+
+
+def _runtime_suffix(model: str) -> str:
+    """Claude and Kiro sessions live apart: a session of one runtime is never resumed on the other."""
+    return ":kiro" if is_kiro(model) else ""
 
 
 def _tokens(usage: Usage) -> int:

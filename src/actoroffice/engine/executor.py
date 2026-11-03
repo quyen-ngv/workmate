@@ -203,8 +203,8 @@ class Executor:
             if status != RunStatus.CANCELLED:
                 # Answers that arrived while this run was still going have not been seen yet.
                 await self._rewake_if_answered(run_id, actor.id, ticket.id)
-            if gate is not None and status != RunStatus.PARKED:
-                await self._drop_seen_changes(actor.id, ticket.id, gate.seen_change_id)
+            if gate is not None:
+                await self._drop_seen(actor.id, ticket.id, gate, status)
         return status
 
     async def _ran_before(self, stage_run_id: int, wake: WakeRequest) -> bool:
@@ -275,14 +275,20 @@ class Executor:
             office_runs_tests=bool(command_list((project.profile if project else None) or {}, "test")),
         )
 
-    async def _drop_seen_changes(self, actor_id: str, ticket_id: int, seen: int) -> None:
-        """A change delivered mid-run (gate interrupt) needs no second wake."""
-        wake = await self.office.wakes.pending_for(actor_id, ticket_id)
+    async def _drop_seen(self, actor_id: str, ticket_id: int, gate: OfficeGate, status: RunStatus) -> None:
+        """A change or a direction delivered mid-run (gate interrupt) needs no second wake."""
+        office = self.office
+        wake = await office.wakes.pending_for(actor_id, ticket_id)
         reasons = wake.payload.get("reasons", []) if wake else []
-        if wake and reasons and all(r.get("change") for r in reasons):
-            latest = await self.office.tickets.changes_after(ticket_id, seen)
-            if not latest:
-                await self.office.wakes.drop(wake.id, "change already seen by the previous run")
+        if wake is None or not reasons:
+            return
+        if status != RunStatus.PARKED and all(r.get("change") for r in reasons):
+            if not await office.tickets.changes_after(ticket_id, gate.seen_change_id):
+                await office.wakes.drop(wake.id, "change already seen by the previous run")
+        elif status != RunStatus.FAILED and all(r.get("steer") for r in reasons):
+            # A parked run keeps the direction in its session; a failed one may not have acted on it.
+            if not await office.tickets.comments_after(ticket_id, "steer", gate.seen_steer_id):
+                await office.wakes.drop(wake.id, "steer already delivered to the previous run")
 
     async def run_chat(self, wake: WakeRequest, run_id: str) -> RunStatus:
         """One chat turn: read the new messages, reply once. Work goes through proposed tickets."""

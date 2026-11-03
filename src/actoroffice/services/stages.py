@@ -156,6 +156,10 @@ class StageService:
     # ---- stage runs -----------------------------------------------------------------------------------
 
     async def _open_run(self, ticket_id: int, stage: str) -> StageRun:
+        # A new stage run (next stage, redo, retry, reopen, switch, new attempt) makes every open gate card stale.
+        for item in await self.office.interactions.pending(ticket_id=ticket_id):
+            if item.kind == InteractionKind.APPROVE_STAGE:
+                await self.office.interactions.cancel(item.id)
         row = await self.office.db.fetchone(
             "SELECT COALESCE(MAX(attempt), 0) AS n FROM stage_runs WHERE ticket_id = ? AND stage = ?", (ticket_id, stage)
         )
@@ -199,6 +203,16 @@ class StageService:
         if not stage.gate:
             return False
         return (await self.office.teams.gate_policy(ticket, stage.gate)).external
+
+    async def waits_for_card(self, ticket: Ticket) -> bool:
+        """Done and waiting for a gate card (the stage's gate or gate rules): comments wait for the answer."""
+        current = await self.current_run(ticket)
+        if current is None or current.outcome != StageOutcome.COMPLETED.value or await self._waits_outside(ticket):
+            return False
+        return any(
+            i.kind == InteractionKind.APPROVE_STAGE and i.payload.get("stage") == ticket.stage
+            for i in await self.office.interactions.pending(ticket_id=ticket.id)
+        )
 
     async def runs(self, ticket_id: int) -> list[StageRun]:
         rows = await self.office.db.fetchall("SELECT * FROM stage_runs WHERE ticket_id = ? ORDER BY id", (ticket_id,))
@@ -539,9 +553,6 @@ class StageService:
                 "UPDATE stage_runs SET finished_at = ?, outcome = ?, summary = ? WHERE id = ?",
                 (utcnow(), StageOutcome.SWITCHED.value, reason[:2000], current.id),
             )
-        for item in await office.interactions.pending(ticket_id=ticket.id):
-            if item.kind.value == "approve_stage":
-                await office.interactions.cancel(item.id)
         if run_id:
             self.finished_runs.add(run_id)
         first = tpl.stages[0]

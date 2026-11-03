@@ -96,6 +96,11 @@ class WakeService:
         )
 
 
+def only_comments(reasons: list[dict[str, Any]]) -> bool:
+    """The wake only carries comments or directions from people (no change, answer, stage move or continuation)."""
+    return bool(reasons) and all(r.get("steer") or r.get("comment_id") for r in reasons) and not any(r.get("change") for r in reasons)
+
+
 def _wake(row: dict[str, Any]) -> WakeRequest:
     return WakeRequest(
         id=row["id"],

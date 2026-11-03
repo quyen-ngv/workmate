@@ -210,6 +210,35 @@ async def test_code_ticket_goes_through_stages_with_role_gates(office: Office, r
     assert len({spec.resume_session_id for spec in runtime.specs if spec.resume_session_id}) <= 1
 
 
+async def test_ac8_merge_gate_lists_review_acs(office: Office, runtime: FakeRuntime, people) -> None:
+    from actoroffice.domain.stage import GatePolicy
+    from actoroffice.domain.team import TeamSettings
+
+    team = await office.teams.create_team("Merge nội bộ", settings=TeamSettings(gates={"merge": GatePolicy(roles=["dev"], fallback="owner", external=False)}))
+    ticket = await office.tickets.create("Hoàn tiền", description="x")
+    await office.db.execute(
+        "UPDATE tickets SET stage = 'pr', stage_template = 'code', team_id = ?, pr_url = 'https://bitbucket.org/acme/billing/pull-requests/7' WHERE id = ?",
+        (team.id, ticket.id),
+    )
+    requirements = REQUIREMENTS + "- AC-3 [review]: Given README, When đọc, Then có mục hoàn tiền.\n  Cách kiểm: đọc diff\n"
+    await office.tickets.put_document(ticket.id, "requirements", requirements, author="Copilot", base_revision=None)
+    await office.tickets.put_document(ticket.id, "handoff", "| AC-3 | đã đọc diff README |\n", author="Copilot", base_revision=None)
+    outcomes: list[str] = []
+
+    async def open_pr(ctx: TurnCtx) -> TurnResult:
+        outcomes.append(await ctx.office("stage_complete", {"summary": "PR #7"}))
+        return done(ctx)
+
+    runtime.scripts.append(open_pr)
+    await office.tickets.assign(ticket.id, (await office.ensure_ai()).id, by="user")
+    await office.scheduler.wait_idle(timeout=20)
+    assert "gate 'merge'" in outcomes[0] and "external" not in outcomes[0]
+    [gate] = await pending(office, InteractionKind.APPROVE_STAGE, ticket.id)
+    assert gate.payload["review_acs"] == [
+        {"id": "AC-3", "title": "AC-3 [review]: Given README, When đọc, Then có mục hoàn tiền.", "how": "đọc diff", "done": "| AC-3 | đã đọc diff README |"}
+    ]
+
+
 async def test_ai_cannot_mark_a_staged_ticket_done(office: Office, runtime: FakeRuntime, people) -> None:
     team, lan, *_ = people
     ticket = await office.tickets.create("Báo cáo", description="x")

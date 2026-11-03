@@ -34,7 +34,7 @@ from actoroffice.domain.stage import (
 from actoroffice.domain.team import LOCAL_OWNER_ID, ROLE_VI
 from actoroffice.domain.work import Interaction, InteractionKind, Ticket, TicketStatus
 
-from .checks import CheckResult, CheckRunner
+from .checks import CheckResult, CheckRunner, review_acs
 from .review import gate_items
 
 if TYPE_CHECKING:
@@ -262,6 +262,14 @@ class StageService:
                 return gate_items(check.get("data"))
         return []
 
+    async def review_acs(self, ticket_id: int) -> list[dict[str, str]]:
+        """AC [review] items from the latest requirements and handoff, for the gate card and the pr pane."""
+        requirements = await self.office.tickets.get_document(ticket_id, "requirements")
+        if requirements is None:
+            return []
+        handoff = await self.office.tickets.get_document(ticket_id, "handoff")
+        return review_acs(requirements.body, handoff.body if handoff else "")
+
     async def save_review(self, stage_run_id: int, review: dict[str, Any]) -> None:
         await self.office.db.execute("UPDATE stage_runs SET review_json = ? WHERE id = ?", (json.dumps(review, ensure_ascii=False), stage_run_id))
 
@@ -384,6 +392,7 @@ class StageService:
             "approvals": [],
             "rules": [{"id": r.id, "title": r.title, "roles": r.spec.get("roles")} for r in extra or []],
             "review": gate_items(next((r.data for r in results if r.id == "review_clean"), None)),
+            "review_acs": await self.review_acs(ticket.id) if stage.id in ("build", "pr") else [],
         }
         if gate == "knowledge":
             drafts = [i for i in await office.knowledge.list(ticket_id=ticket.id) if i.status == "draft"]

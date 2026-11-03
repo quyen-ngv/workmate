@@ -110,3 +110,21 @@ def test_ac1_base_says_run_long_commands_in_the_foreground() -> None:
     how_you_work = " ".join(section.split())
     assert "Run long commands (tests, builds) in the foreground, one command per call" in how_you_work
     assert "never start them in the background and wait with a sleep/until/while loop" in how_you_work
+
+
+def _stage(template_name: str, stage_id: str) -> str:
+    return " ".join(_prompt(template_name, office_runs_tests=True, stage_id=stage_id).parts["stage"].split())
+
+
+def test_ac11_stage_guides_mention_review_acs() -> None:
+    """SI-16: each stage of the code workflow says what an AC tagged [review] needs there."""
+    understand = _stage("code", "understand")
+    assert 'Tag an AC "[review]" right after its id' in understand and "process, documents" in understand and "hard to automate" in understand
+    assert '"Cách kiểm: …"' in understand and "At most half of the ACs may be [review]" in understand
+    assert "Inside an AC never write another AC's id" in understand
+    assert "An AC tagged [review] is mapped to how it will be checked by review instead of a test" in _stage("code", "plan")
+    assert "An AC tagged [review] needs no test, but the AC table of the `handoff` must have a line with its id" in _stage("code", "build")
+    for template_name in ("code", "quick"):  # the pr guide is shared: the bullet says "if any"
+        assert "ACs tagged [review], if any: list them in the PR description with how each was checked" in _stage(template_name, "pr")
+    # the quick workflow has no requirements: its scope and build guides do not mention [review]
+    assert "[review]" not in _stage("quick", "scope") and "[review]" not in _stage("quick", "build")

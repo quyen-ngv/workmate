@@ -156,6 +156,16 @@ def review_lines(items: list[dict[str, Any]], limit: int = 10, budget: int = LIM
     return fit_lines(lines, budget, len(items) - len(lines), "điểm")
 
 
+def review_ac_lines(items: list[dict[str, Any]], budget: int = LIMIT) -> str:
+    """Acceptance criteria tagged [review] of a gate card (payload `review_acs`): how to check, how it was checked."""
+    lines = [
+        f"• <b>{esc(a.get('id'))}</b> {esc(str(a.get('title') or '')[:100])}\n  Cách kiểm: {esc(str(a.get('how') or '—')[:150])}"
+        f"\n  Đã kiểm: {esc(str(a.get('done') or '')[:200])}"
+        for a in items
+    ]
+    return fit_lines(lines, budget, unit="AC")
+
+
 def fit_lines(lines: list[str], budget: int, hidden: int = 0, unit: str = "mục") -> str:
     """Keep the first lines that fit in `budget` characters; the rest (plus `hidden` already left out) become
     one "+N … khác" line, so a card never goes over Telegram's message limit."""
@@ -232,14 +242,20 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
         tail = (f"\n<b>Duyệt kèm quyền môi trường:</b> {esc(', '.join(p.get('access') or []))}" if p.get("access") else "") + (
             f"\n<i>Đã duyệt {len(approvals)}/{need}: {esc(', '.join(a.get('name', '') for a in approvals))}</i>" if need > 1 else ""
         )
-        # Checks and review findings share what is left of the message; each keeps at least half when both are long.
-        room = max(0, LIMIT - len(head) - len(tail) - 200)
-        checks = fit_lines(check_rows, room // 2 if items else room, unit="check")
-        review = review_lines(items, budget=room - len(checks))
+        # Checks, review findings and AC [review] share what is left of the message: each block gets an equal part
+        # of the room still free when its turn comes, so all of them show something when they are long.
+        acs = p.get("review_acs") or []
+        room = max(0, LIMIT - len(head) - len(tail) - 250)
+        parts = 1 + bool(items) + bool(acs)
+        checks = fit_lines(check_rows, room // parts, unit="check")
+        room -= len(checks)
+        review = review_lines(items, budget=room // (parts - 1) if acs else room) if items else ""
+        ac_block = review_ac_lines(acs, budget=room - len(review)) if acs else ""
         text = (
             head
             + (f"\n<b>Kiểm tra:</b>\n{checks}" if checks else "")
             + (f"\n<b>Điểm review:</b>\n{review}" if review else "")
+            + (f"\n<b>AC kiểm bằng review:</b>\n{ac_block}" if ac_block else "")
             + tail
         )
         if p.get("gate") == "knowledge":

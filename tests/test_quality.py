@@ -912,3 +912,183 @@ async def test_ac7_flaky_rerun_runs_twice_without_usable_result(
     result, _ = await run_checks(office, ticket_id, repo, "flaky_rerun")
     assert fake_test.runs == 2
     assert result.status == status and result.summary == summary
+
+
+# ---- SI-16: acceptance criteria checked by review ----------------------------------------------------------
+
+REVIEW_REQUIREMENTS = """\
+## Acceptance criteria
+- AC-1: Given a When b Then c. Ghi chú: chữ [review] ở giữa câu không tính.
+- AC-2 [review]: Given tài liệu When đọc Then đúng.
+  - Cách kiểm: đọc diff
+- AC-3: Given d When e Then f
+"""
+REVIEW_PLAN = "| AC-1 | test_ac1 |\n| AC-2 | review: đọc diff |\n| AC-3 | test_ac3 |\n"
+REVIEW_HANDOFF = "# AC → test\n| AC-1 | test_ac1_x |\n| AC-2 | đọc diff, khớp requirements |\n| AC-3 | test_ac3_x |\n"
+
+
+async def set_doc(office: Office, ticket_id: int, key: str, body: str) -> None:
+    doc = await office.tickets.get_document(ticket_id, key)
+    await office.tickets.put_document(ticket_id, key, body, author="Copilot", base_revision=doc.revision if doc else None)
+
+
+async def review_build(office: Office, tmp_path: Path, requirements: str = REVIEW_REQUIREMENTS, handoff: str = REVIEW_HANDOFF, tests: str = "") -> tuple[int, Path]:
+    """A ticket at build on a real git repo: requirements, plan, handoff and an untracked test file with `tests`."""
+    project = await repo_project(office, tmp_path)
+    ticket_id = await build_ticket(office, project)
+    await set_doc(office, ticket_id, "requirements", requirements)
+    await set_doc(office, ticket_id, "plan", REVIEW_PLAN)
+    await set_doc(office, ticket_id, "handoff", handoff)
+    repo = tmp_path / "svc"
+    if tests:
+        (repo / "tests").mkdir(exist_ok=True)
+        (repo / "tests" / "test_app.py").write_text(tests, encoding="utf-8")
+    return ticket_id, repo
+
+
+def test_ac1_review_tag_only_right_after_id() -> None:
+    from actoroffice.services.checks import review_ids
+
+    assert review_ids(REVIEW_REQUIREMENTS) == {"AC-2"}
+    assert review_ids("### AC-7 [Review]\nGiven…") == {"AC-7"}
+    assert review_ids("- AC-8 nhắc [review] sau chữ\n- AC-9: [review]\n- AC-10 [reviewed]\n") == set()
+
+
+async def test_ac1_checks_treat_only_the_tagged_ac_as_review(office: Office, tmp_path: Path) -> None:
+    ticket_id, repo = await review_build(office, tmp_path, tests="def test_ac3_x():\n    pass\n")
+    testable, _ = await run_checks(office, ticket_id, repo, "ac_testable")
+    assert testable.status == "passed" and testable.data["review"] == ["AC-2"]
+    plan, _ = await run_checks(office, ticket_id, repo, "plan_has_ac_map")
+    assert plan.data["review"] == ["AC-2"]
+    coverage, _ = await run_checks(office, ticket_id, repo, "ac_coverage")
+    assert coverage.status == "failed" and coverage.data["missing"] == ["AC-1"]  # the AC naming [review] mid-sentence still needs a test
+    assert coverage.data["review"] == ["AC-2"]
+
+
+async def test_ac2_ac_testable_requires_cach_kiem(office: Office, tmp_path: Path) -> None:
+    from actoroffice.services.checks import how_to_check
+
+    ticket_id, repo = await review_build(office, tmp_path, requirements=REVIEW_REQUIREMENTS.replace("  - Cách kiểm: đọc diff\n", ""))
+    result, _ = await run_checks(office, ticket_id, repo, "ac_testable")
+    assert result.status == "failed" and "AC-2" in result.summary and "Cách kiểm" in result.summary
+    assert result.data["no_how"] == ["AC-2"]
+    await set_doc(office, ticket_id, "requirements", REVIEW_REQUIREMENTS)
+    result, _ = await run_checks(office, ticket_id, repo, "ac_testable")
+    assert result.status == "passed" and result.summary == "3 AC đều kiểm thử được, 1 AC kiểm bằng review (AC-2)"
+    assert how_to_check("- **Cách kiểm:** đọc diff\n") == "đọc diff"
+    assert how_to_check("cách kiểm: chạy lệnh\n") == "chạy lệnh"
+    assert how_to_check("Cách kiểm:\n") is None and how_to_check("Given x") is None
+    # An empty line must not borrow the next line (heading or bullet of the next section)
+    assert how_to_check("Cách kiểm:\n## Ghi chú\n") is None
+    assert how_to_check("- **Cách kiểm:**\n- AC-3: Given a When b Then c\n") is None
+    assert how_to_check("Cách kiểm:  \n\n  đọc diff\n") is None
+
+
+async def test_ac3_review_ac_still_needs_given_when_then(office: Office, tmp_path: Path) -> None:
+    requirements = "- AC-1: Given a When b Then c\n- AC-2 [review]: Given tài liệu Then đúng.\n  Cách kiểm: đọc diff\n"
+    ticket_id, repo = await review_build(office, tmp_path, requirements=requirements)
+    result, _ = await run_checks(office, ticket_id, repo, "ac_testable")
+    assert result.status == "failed" and result.summary == "AC chưa ở dạng Given/When/Then: AC-2"
+
+
+@pytest.mark.parametrize(("tags", "status"), [((1, 2, 3), "failed"), ((1, 2), "passed"), ((1,), "passed")])
+async def test_ac4_review_limit_half(office: Office, tmp_path: Path, tags: tuple[int, ...], status: str) -> None:
+    lines = [f"- AC-{n}{' [review]' if n in tags else ''}: Given a When b Then c\n  Cách kiểm: đọc\n" for n in range(1, 5)]
+    ticket_id, repo = await review_build(office, tmp_path, requirements="".join(lines))
+    result, _ = await run_checks(office, ticket_id, repo, "ac_testable")
+    assert result.status == status
+    if status == "failed":
+        assert "quá nhiều AC [review]: 3/4 AC, tối đa 2" in result.summary
+
+
+async def test_ac4_single_review_ac_fails(office: Office, tmp_path: Path) -> None:
+    ticket_id, repo = await review_build(office, tmp_path, requirements="- AC-1 [review]: Given a When b Then c\n  Cách kiểm: đọc\n")
+    result, _ = await run_checks(office, ticket_id, repo, "ac_testable")
+    assert result.status == "failed" and "1/1 AC, tối đa 0" in result.summary
+
+
+async def test_ac5_plan_map_includes_review_acs(office: Office, tmp_path: Path) -> None:
+    ticket_id, repo = await review_build(office, tmp_path)
+    await set_doc(office, ticket_id, "plan", "| AC-1 | test_ac1 |\n| AC-3 | test_ac3 |\n")
+    result, _ = await run_checks(office, ticket_id, repo, "plan_has_ac_map")
+    assert result.status == "failed" and result.data["missing"] == ["AC-2"]
+    await set_doc(office, ticket_id, "plan", REVIEW_PLAN)
+    result, _ = await run_checks(office, ticket_id, repo, "plan_has_ac_map")
+    assert result.status == "passed" and result.summary == "plan map đủ 2 AC test, 1 AC review (AC-2)"
+
+
+async def test_ac5_plan_map_summary_without_review_acs(office: Office, tmp_path: Path) -> None:
+    ticket_id, repo = await review_build(office, tmp_path, requirements=REQUIREMENTS)
+    await set_doc(office, ticket_id, "plan", "AC-1, AC-2")
+    result, _ = await run_checks(office, ticket_id, repo, "plan_has_ac_map")
+    assert result.status == "passed" and result.summary == "plan map đủ 2 AC test, 0 AC review"
+
+
+async def test_ac6_ac_coverage_skips_tests_for_review_acs(office: Office, tmp_path: Path) -> None:
+    ticket_id, repo = await review_build(office, tmp_path, tests="def test_ac1_x():\n    pass\n\n\ndef test_ac3_x():\n    pass\n")
+    result, _ = await run_checks(office, ticket_id, repo, "ac_coverage")
+    assert result.status == "passed", result.summary
+    assert result.summary == "2/2 AC có test, 1 AC kiểm bằng review: AC-2"
+
+
+async def test_ac7_ac_coverage_needs_handoff_line(office: Office, tmp_path: Path) -> None:
+    from actoroffice.services.checks import handoff_line
+
+    handoff = "# AC-2 cách kiểm\n| AC-21 | khác |\n| AC-1 | test_ac1_x |\n"  # a heading and AC-21 do not count for AC-2
+    ticket_id, repo = await review_build(office, tmp_path, handoff=handoff, tests="def test_ac1_x():\n    pass\n")
+    result, _ = await run_checks(office, ticket_id, repo, "ac_coverage")
+    assert result.status == "failed"
+    assert result.data["no_handoff"] == ["AC-2"] and result.data["missing"] == ["AC-3"]
+    assert "chưa có test gắn với: AC-3" in result.summary and "AC [review] chưa có dòng cách kiểm trong handoff: AC-2" in result.summary
+    assert handoff_line("| AC-2 | " + "x" * 400, "AC-2") == ("| AC-2 | " + "x" * 400)[:300]
+
+
+async def test_ac8_rules_gate_lists_review_acs(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    from actoroffice.domain.stage import StageDef, StageTemplate
+    from actoroffice.domain.team import TeamSettings
+
+    ticket_id, _repo = await review_build(office, tmp_path)
+    stages = [StageDef(id="build", outputs=["handoff"], checks=["outputs"]), StageDef(id="close")]
+    team = await office.teams.create_team("T", settings=TeamSettings(stage_templates={"code": StageTemplate(name="code", stages=stages)}))
+    await office.db.execute("UPDATE tickets SET team_id = ? WHERE id = ?", (team.id, ticket_id))
+    await office.rules.propose(
+        title="Code cần lead", body="", kind="gate", scope=f"team:{team.id}", spec={"roles": ["lead"], "when": {"paths": ["src/**"]}}, by="user", activate=True
+    )
+    outcomes: list[str] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
+        return ok(ctx)
+
+    runtime.scripts.append(work)
+    await office.tickets.assign(ticket_id, (await office.ensure_ai()).id, by="user")
+    await office.scheduler.wait_idle(timeout=30)
+    assert "gate 'rules'" in outcomes[0]
+    [item] = [i for i in await office.interactions.pending(ticket_id=ticket_id) if i.kind.value == "approve_stage"]
+    assert item.payload["review_acs"] == [
+        {"id": "AC-2", "title": "AC-2 [review]: Given tài liệu When đọc Then đúng.", "how": "đọc diff", "done": "| AC-2 | đọc diff, khớp requirements |"}
+    ]
+    await set_doc(office, ticket_id, "handoff", "| AC-1 | test_ac1_x |\n")
+    assert [a["done"] for a in await office.stages.review_acs(ticket_id)] == ["chưa ghi cách kiểm"]
+    await set_doc(office, ticket_id, "requirements", REQUIREMENTS)
+    assert await office.stages.review_acs(ticket_id) == []
+
+
+def test_ac10_telegram_card_lists_review_acs() -> None:
+    from actoroffice.channels.tg_format import LIMIT, card
+
+    acs = [{"id": "AC-2", "title": "AC-2 [review]: Given tài liệu", "how": "đọc diff", "done": "| AC-2 | đọc diff, khớp |"}]
+    checks = [{"id": "outputs", "status": "passed", "summary": "đủ"}]
+    payload = {"ticket": "SI-16", "stage_title": "Làm", "title": "t", "summary": "ok", "checks": checks, "review_acs": acs}
+    text, _ = card({"id": 1, "kind": "approve_stage", "payload": payload})
+    assert "<b>AC kiểm bằng review:</b>" in text and "<b>AC-2</b>" in text and "Cách kiểm: đọc diff" in text and "Đã kiểm: | AC-2 | đọc diff, khớp |" in text
+    plain, _ = card({"id": 1, "kind": "approve_stage", "payload": {**payload, "review_acs": []}})
+    assert "AC kiểm bằng review" not in plain
+    # every block long: the message still fits and each block shows its first item
+    checks = [{"id": f"check_{i}", "status": "passed", "summary": "s" * 300} for i in range(11)]
+    review = [{"id": f"F{i}", "severity": "medium", "where": "src/a.py:1", "claim": "c" * 300, "reply": "r" * 300, "label": ""} for i in range(1, 16)]
+    many = [{"id": f"AC-{i}", "title": "t" * 300, "how": "h" * 300, "done": "d" * 300} for i in range(1, 16)]
+    long, _ = card({"id": 1, "kind": "approve_stage", "payload": {**payload, "summary": "x " * 1000, "checks": checks, "review": review, "review_acs": many}})
+    assert len(long) <= LIMIT
+    assert "check_0" in long and "<b>F1</b>" in long and "<b>AC-1</b>" in long and "AC khác (xem trên web)" in long

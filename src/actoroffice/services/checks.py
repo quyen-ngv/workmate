@@ -36,6 +36,11 @@ GIVEN = re.compile(r"\b(given|cho|giả sử)\b", re.IGNORECASE)
 WHEN = re.compile(r"\b(when|khi)\b", re.IGNORECASE)
 THEN = re.compile(r"\b(then|thì)\b", re.IGNORECASE)
 OPTION = re.compile(r"(?im)^\s*(?:#+\s*|[-*]\s*|\d+[.)]\s*)?(?:\*\*)?(?:phương án|option|approach|cách)\s*[A-Z0-9]")
+# "AC-5 [review]: …": checked by a person at the gate instead of a test; only spaces may sit between id and tag
+REVIEW_TAG = re.compile(r"\bAC[-\s]?(\d+)(?!\d)[ \t]*\[review\]", re.IGNORECASE)
+# Same line only: an empty "Cách kiểm:" must not take the text of the next line
+HOW_TO_CHECK = re.compile(r"(?im)\bcách kiểm[ \t]*(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?[ \t]*(.*)$")
+NO_HANDOFF_LINE = "chưa ghi cách kiểm"
 
 
 class CheckResult(BaseModel):
@@ -257,15 +262,59 @@ def ac_blocks(text: str) -> dict[str, str]:
     return blocks
 
 
+def review_ids(text: str) -> set[str]:
+    """AC ids tagged [review] right after the id, anywhere in the text."""
+    return {f"AC-{m.group(1)}" for m in REVIEW_TAG.finditer(text)}
+
+
+def how_to_check(body: str) -> str | None:
+    """The text after "Cách kiểm:" in an AC body, or None when the line is missing or empty."""
+    m = HOW_TO_CHECK.search(body)
+    return (m.group(1).strip().strip("*").strip() or None) if m else None
+
+
+def handoff_line(handoff: str, ac_id: str) -> str | None:
+    """The first non-heading handoff line that names the AC (AC-1 does not match AC-11), cut to 300 chars."""
+    pattern = re.compile(rf"(?i)(?<![a-z])AC[-_\s]?{ac_id.split('-')[1]}(?!\d)")
+    for line in handoff.splitlines():
+        if not line.lstrip().startswith("#") and pattern.search(line):
+            return line.strip()[:300]
+    return None
+
+
+def review_acs(requirements: str, handoff: str) -> list[dict[str, str]]:
+    """Each AC [review]: id, first line, how it is to be checked (requirements) and how it was (handoff)."""
+    tagged = review_ids(requirements)
+    items = []
+    for key, body in ac_blocks(requirements).items():
+        if key in tagged:
+            first = body.strip().splitlines()[0].strip()[:200] if body.strip() else key
+            items.append({"id": key, "title": first, "how": how_to_check(body) or "", "done": handoff_line(handoff, key) or NO_HANDOFF_LINE})
+    return items
+
+
 async def check_ac_testable(ctx: CheckContext) -> CheckResult:
     text = ctx.docs.get("requirements", "")
     blocks = ac_blocks(text)
     if not blocks:
         return CheckResult(id="ac_testable", status="failed", summary="requirements chưa có acceptance criteria đánh số AC-1, AC-2…")
+    tagged = review_ids(text)
+    review = [k for k in blocks if k in tagged]
     weak = [k for k, body in blocks.items() if not (GIVEN.search(body) and WHEN.search(body) and THEN.search(body))]
+    no_how = [k for k in review if how_to_check(blocks[k]) is None]
+    problems = []
     if weak:
-        return CheckResult(id="ac_testable", status="failed", summary=f"AC chưa ở dạng Given/When/Then: {', '.join(weak)}", data={"weak": weak})
-    return CheckResult(id="ac_testable", status="passed", summary=f"{len(blocks)} AC đều kiểm thử được", data={"acs": list(blocks)})
+        problems.append(f"AC chưa ở dạng Given/When/Then: {', '.join(weak)}")
+    if no_how:
+        problems.append(f"AC [review] thiếu dòng 'Cách kiểm:': {', '.join(no_how)}")
+    if 2 * len(review) > len(blocks):
+        problems.append(f"quá nhiều AC [review]: {len(review)}/{len(blocks)} AC, tối đa {len(blocks) // 2} (không quá một nửa)")
+    if problems:
+        return CheckResult(id="ac_testable", status="failed", summary="; ".join(problems), data={"weak": weak, "no_how": no_how, "review": review})
+    summary = f"{len(blocks)} AC đều kiểm thử được"
+    if review:
+        summary += f", {len(review)} AC kiểm bằng review ({', '.join(review)})"
+    return CheckResult(id="ac_testable", status="passed", summary=summary, data={"acs": list(blocks), "review": review})
 
 
 async def check_plan_ac(ctx: CheckContext) -> CheckResult:
@@ -277,14 +326,20 @@ async def check_plan_ac(ctx: CheckContext) -> CheckResult:
 
 
 async def check_plan_has_ac_map(ctx: CheckContext) -> CheckResult:
-    acs = list(ac_blocks(ctx.docs.get("requirements", "")))
+    requirements = ctx.docs.get("requirements", "")
+    acs = list(ac_blocks(requirements))
     if not acs:
         return CheckResult(id="plan_has_ac_map", status="skipped", summary="requirements không có AC đánh số")
     plan = ctx.docs.get("plan", "")
+    tagged = review_ids(requirements)
+    review = [a for a in acs if a in tagged]
     missing = [a for a in acs if not re.search(rf"\bAC[-\s]?{a.split('-')[1]}\b", plan, re.IGNORECASE)]
     if missing:
-        return CheckResult(id="plan_has_ac_map", status="failed", summary=f"plan chưa map test cho: {', '.join(missing)}", data={"missing": missing})
-    return CheckResult(id="plan_has_ac_map", status="passed", summary=f"plan map đủ {len(acs)} AC")
+        return CheckResult(id="plan_has_ac_map", status="failed", summary=f"plan chưa map test cho: {', '.join(missing)}", data={"missing": missing, "review": review})
+    summary = f"plan map đủ {len(acs) - len(review)} AC test, {len(review)} AC review"
+    if review:
+        summary += f" ({', '.join(review)})"
+    return CheckResult(id="plan_has_ac_map", status="passed", summary=summary, data={"review": review})
 
 
 async def check_plan_has_options(ctx: CheckContext) -> CheckResult:
@@ -456,20 +511,36 @@ def _git_ctx(ctx: CheckContext) -> tuple[Path, str] | None:
 
 
 async def check_ac_coverage(ctx: CheckContext) -> CheckResult:
-    acs = list(ac_blocks(ctx.docs.get("requirements", "")))
+    requirements = ctx.docs.get("requirements", "")
+    acs = list(ac_blocks(requirements))
     if not acs:
         return CheckResult(id="ac_coverage", status="skipped", summary="requirements không có AC đánh số")
     git = _git_ctx(ctx)
     if git is None:
         return CheckResult(id="ac_coverage", status="skipped", summary="không phải git worktree")
+    tagged = review_ids(requirements)
+    review = [a for a in acs if a in tagged]
+    tested = [a for a in acs if a not in tagged]
     globs = (ctx.project.profile.get("test_glob") if ctx.project else None) or DEFAULT_TEST_GLOBS
     added = await added_lines(*git)
     text = "\n".join(line for f, lines in added.items() if is_test(f, globs) for _, line in lines)
     # "AC-1", "ac1" in test_ac1_total, @DisplayName("AC 1 …"): any non-letter may precede it
-    missing = [a for a in acs if not re.search(rf"(?i)(?<![a-z])AC[-_\s]?{a.split('-')[1]}(?!\d)", text)]
+    missing = [a for a in tested if not re.search(rf"(?i)(?<![a-z])AC[-_\s]?{a.split('-')[1]}(?!\d)", text)]
+    # an AC [review] needs no test, but the handoff must say how it was checked
+    handoff = ctx.docs.get("handoff", "")
+    no_handoff = [a for a in review if handoff_line(handoff, a) is None]
+    data = {"missing": missing, "no_handoff": no_handoff, "review": review}
+    problems = []
     if missing:
-        return CheckResult(id="ac_coverage", status="failed", summary=f"chưa có test gắn với: {', '.join(missing)} (đặt AC id trong tên/annotation test)", data={"missing": missing})
-    return CheckResult(id="ac_coverage", status="passed", summary=f"{len(acs)}/{len(acs)} AC có test")
+        problems.append(f"chưa có test gắn với: {', '.join(missing)} (đặt AC id trong tên/annotation test)")
+    if no_handoff:
+        problems.append(f"AC [review] chưa có dòng cách kiểm trong handoff: {', '.join(no_handoff)} (thêm dòng có AC id vào bảng AC của handoff)")
+    if problems:
+        return CheckResult(id="ac_coverage", status="failed", summary="; ".join(problems), data=data)
+    summary = f"{len(tested)}/{len(tested)} AC có test"
+    if review:
+        summary += f", {len(review)} AC kiểm bằng review: {', '.join(review)}"
+    return CheckResult(id="ac_coverage", status="passed", summary=summary, data=data)
 
 
 async def check_no_secrets(ctx: CheckContext) -> CheckResult:

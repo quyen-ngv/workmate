@@ -35,6 +35,7 @@ from actoroffice.domain.team import LOCAL_OWNER_ID, ROLE_VI
 from actoroffice.domain.work import Interaction, InteractionKind, Ticket, TicketStatus
 
 from .checks import CheckResult, CheckRunner
+from .review import gate_items
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -239,6 +240,17 @@ class StageService:
         )
         self.office.bus.publish("ticket.steps", ticket_id=ticket_id, stage_run_id=stage_run_id, steps=[s.model_dump() for s in steps])
 
+    async def last_review(self, ticket_id: int) -> list[dict[str, Any]]:
+        """Medium/high findings of the last finished stage run that was reviewed (the build stage, read at pr)."""
+        for run in reversed(await self.runs(ticket_id)):
+            check = next((c for c in run.checks if c.get("id") == "review_clean"), None)
+            if run.finished_at and check is not None:
+                return gate_items(check.get("data"))
+        return []
+
+    async def save_review(self, stage_run_id: int, review: dict[str, Any]) -> None:
+        await self.office.db.execute("UPDATE stage_runs SET review_json = ? WHERE id = ?", (json.dumps(review, ensure_ascii=False), stage_run_id))
+
     # ---- complete → checks → gate ----------------------------------------------------------------------
 
     async def template_of(self, ticket: Ticket) -> StageTemplate:
@@ -357,6 +369,7 @@ class StageService:
             ],
             "approvals": [],
             "rules": [{"id": r.id, "title": r.title, "roles": r.spec.get("roles")} for r in extra or []],
+            "review": gate_items(next((r.data for r in results if r.id == "review_clean"), None)),
         }
         if gate == "knowledge":
             drafts = [i for i in await office.knowledge.list(ticket_id=ticket.id) if i.status == "draft"]
@@ -778,4 +791,5 @@ def _stage_run(row: dict[str, Any]) -> StageRun:
         rules=json.loads(row["rules_json"] or "[]"),
         checks=json.loads(row["checks_json"] or "[]"),
         steps=[Step.model_validate(s) for s in json.loads(row["steps_json"] or "[]")],
+        review=json.loads(row["review_json"] or "{}"),
     )

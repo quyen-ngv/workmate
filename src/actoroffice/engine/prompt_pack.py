@@ -175,6 +175,11 @@ Goal: what the team learned is written down and confirmed by people.
 
 # When the project profile declares `test`, the office runs the whole suite at stage_complete (check repo:test):
 # the AI runs only the tests for what it changed instead of running everything twice.
+REVIEW_REPLY = (
+    "- The check review_clean lists the independent reviewer's findings by id (F1, F2…). Answer every medium/high\n"
+    "  finding with review_reply: fix it and reply fixed (the next round re-checks it), or reply wontfix with the\n"
+    "  reason in note (a wontfix needs a reason). The stage cannot finish while one has no reply; people see the replies."
+)
 OFFICE_RUNS_TESTS = {
     "Run the project's build/test/lint if it has them.": (
         "Run the build/lint if it has them, but only the tests for what you changed (their test file, or -k), not the\n"
@@ -328,6 +333,8 @@ def _instructions(template: StageTemplate, stage: StageDef, office_runs_tests: b
     if office_runs_tests and "repo:test" in stage.checks:
         for old, new in OFFICE_RUNS_TESTS.items():
             text = text.replace(old, new)
+    if "review_clean" in stage.checks:
+        text += "\n" + REVIEW_REPLY
     return text
 
 

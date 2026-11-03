@@ -104,6 +104,7 @@ class StageRun(BaseModel):
     rules: list[str] = Field(default_factory=list)
     checks: list[dict[str, Any]] = Field(default_factory=list)
     steps: list[Step] = Field(default_factory=list)
+    review: dict[str, Any] = Field(default_factory=dict)  # review findings with ids and replies (services/review.py)
 
 
 STAGE_TITLES = {

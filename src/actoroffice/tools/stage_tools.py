@@ -141,6 +141,15 @@ async def stage_complete(args: dict[str, Any], ctx: ToolCtx) -> str:
     return f"Checks passed. Next stage: {result['advanced_to']} (a fresh session starts it). End your turn now."
 
 
+async def review_reply(args: dict[str, Any], ctx: ToolCtx) -> str:
+    ticket = await _stage_ctx(ctx)
+    try:
+        finding = await ctx.office.review.reply(ticket.id, str(args.get("id") or ""), str(args.get("action") or ""), str(args.get("note") or ""))
+    except OfficeError as exc:
+        raise ToolError(str(exc)) from exc
+    return f"Reply saved for {finding['id']} ({finding['reply']['action']}). People see it at the gate. Call stage_complete when every medium/high finding has a reply."
+
+
 async def stage_reopen(args: dict[str, Any], ctx: ToolCtx) -> str:
     ticket = await _stage_ctx(ctx)
     try:
@@ -319,6 +328,21 @@ STAGE_TOOLS: list[ToolDef] = [
         "right people or moves to the next stage. If checks fail you get the list to fix.",
         schema({"summary": {"type": "string"}}, required=["summary"]),
         stage_complete,
+    ),
+    ToolDef(
+        "review_reply",
+        "Answer one finding of the independent review (check review_clean) by its id (F1, F2…): action fixed after you "
+        "fixed it (the next review round re-checks it), or wontfix with the reason in note. Every medium/high finding "
+        "needs a reply before the stage can finish; people see the replies at the gate.",
+        schema(
+            {
+                "id": {"type": "string"},
+                "action": {"type": "string", "enum": ["fixed", "wontfix"]},
+                "note": {"type": "string", "description": "What you changed (fixed) or why you do not fix it (wontfix, required)."},
+            },
+            required=["id", "action", "note"],
+        ),
+        review_reply,
     ),
     ToolDef(
         "stage_reopen",

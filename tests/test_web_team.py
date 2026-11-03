@@ -2,7 +2,63 @@
 
 from __future__ import annotations
 
-from .test_web import HEADERS, client, login  # noqa: F401  (fixture re-export)
+import contextlib
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+
+from actoroffice.app import Office
+from actoroffice.config import Settings
+from actoroffice.services.review import evaluate
+from actoroffice.web.server import create_app
+
+from .fakes import FakeRuntime
+from .test_web import HEADERS, TOKEN, client, login  # noqa: F401  (fixture re-export)
+
+
+@pytest.fixture
+def office_client(tmp_path):
+    """Like `client`, with the office at hand to prepare stage runs."""
+    office = Office(Settings(data_dir=tmp_path / "home"), runtime=FakeRuntime(scripts=[]))
+    app = create_app(office, TOKEN)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        await office.open()
+        await office.install_default_positions(skills=False)
+        yield
+        await office.db.close()
+
+    app.router.lifespan_context = lifespan
+    with TestClient(app, base_url="http://localhost:8765") as c:
+        yield office, c
+
+
+@pytest.mark.parametrize("severity", ["medium", "low"])
+def test_ac11_stage_api_returns_review_on_pr(office_client, severity: str) -> None:
+    office, c = office_client
+    login(c)
+    task = c.post("/api/tasks", json={"title": "Hoàn tiền", "template": "code"}, headers=HEADERS).json()
+    finding = {"id": "F1", "severity": severity, "file": "src/a.py", "line": 3, "claim": "thiếu test", "reply": {"action": "wontfix", "note": "lý do"}}
+    check = evaluate({"next": 2, "findings": [finding]}, rounds=2).model_dump()
+
+    async def finish_build() -> None:
+        ticket = await office.tickets.get(task["key"])
+        await office.db.execute(
+            "INSERT INTO stage_runs(ticket_id, stage, attempt, started_at, finished_at, outcome, checks_json) VALUES (?, 'build', 1, ?, ?, 'completed', ?)",
+            (ticket.id, "2026-11-03T00:00:00Z", "2026-11-03T01:00:00Z", json.dumps([check])),
+        )
+        await office.db.execute("UPDATE tickets SET stage = 'pr' WHERE id = ?", (ticket.id,))
+
+    c.portal.call(finish_build)
+    review = c.get(f"/api/tickets/{task['key']}/stage").json()["review"]
+    if severity == "low":
+        assert review == []  # no medium/high finding: no block on the pane
+    else:
+        assert review == [
+            {"id": "F1", "severity": "medium", "where": "src/a.py:3", "claim": "thiếu test", "reply": "không sửa: lý do", "label": "", "reviewer_note": ""}
+        ]
 
 
 def test_people_teams_tasks_board_and_controls(client):  # noqa: F811

@@ -178,6 +178,12 @@ code, pre { font-family: var(--mono); font-size: var(--fs-sm); }
 .card .opts { display: flex; gap: var(--gap-1); flex-wrap: wrap; }
 .card .opts .btn.rec { border-color: var(--accent); }
 .card ul { margin: 0; padding-left: var(--gap-4); font-size: var(--fs-sm); }
+.pane > .review { padding: var(--gap-2) var(--gap-3); border-bottom: 1px solid var(--line); font-size: var(--fs-sm); }
+.review ul { margin: 0; padding-left: var(--gap-4); display: grid; gap: var(--gap-1); }
+.review .reply { color: var(--muted); }
+.review .sev { font-size: var(--fs-xs); color: var(--warn); }
+.review .sev.high { color: var(--danger); }
+.chip.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
 .composer { border-top: 1px solid var(--line); padding: var(--gap-2); display: flex; gap: var(--gap-2); flex: none; }
 .composer textarea { flex: 1; min-height: 34px; max-height: 160px; }
 .empty { color: var(--faint); padding: var(--gap-5); text-align: center; margin: auto; }

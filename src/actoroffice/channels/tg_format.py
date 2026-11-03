@@ -144,6 +144,20 @@ def step_label(step: dict[str, Any]) -> str:
     return f"🤖 giao {step.get('actor', '')}: {step.get('prompt', '')}"
 
 
+def review_lines(items: list[dict[str, Any]], limit: int = 10) -> str:
+    """Medium/high review findings of a gate card (payload `review`), shortened for Telegram."""
+    lines = []
+    for r in items[:limit]:
+        label = f" <i>({esc(r.get('label'))})</i>" if r.get("label") else ""
+        lines.append(
+            f"• <b>{esc(r.get('id'))}</b> [{esc(r.get('severity'))}] {esc(r.get('where'))} {esc(str(r.get('claim') or '')[:100])}"
+            f" → {esc(str(r.get('reply') or '')[:200])}{label}"
+        )
+    if len(items) > limit:
+        lines.append(f"<i>+{len(items) - limit} điểm khác (xem trên web)</i>")
+    return "\n".join(lines)
+
+
 def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
     """HTML text and inline keyboard for a pending decision. Callback data: "i:<interaction id>:<choice>"."""
     p = item.get("payload") or {}
@@ -191,6 +205,7 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
             f"{icons.get(c.get('status'), '•')} {esc(c.get('id'))}: {esc(str(c.get('summary', ''))[:120])}" for c in p.get("checks") or []
         )
         docs = ", ".join(f"{esc(d['key'])} (rev {d['revision']})" for d in p.get("docs") or [])
+        review = review_lines(p.get("review") or [])
         approvals = p.get("approvals") or []
         need = int(p.get("min") or 1)
         text = (
@@ -198,6 +213,7 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
             f"<b>{esc(p.get('title'))}</b>\n{md_to_html(str(p.get('summary') or '')[:1500])}"
             + (f"\n\n<b>Tài liệu:</b> {docs}" if docs else "")
             + (f"\n<b>Kiểm tra:</b>\n{checks}" if checks else "")
+            + (f"\n<b>Điểm review:</b>\n{review}" if review else "")
             + (f"\n<b>Duyệt kèm quyền môi trường:</b> {esc(', '.join(p.get('access') or []))}" if p.get("access") else "")
             + (f"\n<i>Đã duyệt {len(approvals)}/{need}: {esc(', '.join(a.get('name', '') for a in approvals))}</i>" if need > 1 else "")
         )

@@ -95,10 +95,17 @@ async def ask_human(args: dict[str, Any], ctx: ToolCtx) -> str:
     )
 
 
+async def _stage_run(ctx: ToolCtx, ticket: Any) -> Any:
+    """The stage run this run works on. The executor opened it when the run started; after a passing stage_complete
+    it is the run just finished, and a late step_done/stage_info must not open a new attempt (which would cancel the
+    gate card people are about to answer, SI-16)."""
+    return await ctx.office.stages.current_run(ticket) or await ctx.office.stages.ensure_run(ticket)
+
+
 async def plan_steps(args: dict[str, Any], ctx: ToolCtx) -> str:
     ticket = await _stage_ctx(ctx)
     steps = [str(s) for s in args.get("steps") or []]
-    srun = await ctx.office.stages.ensure_run(ticket)
+    srun = await _stage_run(ctx, ticket)
     try:
         saved = await ctx.office.stages.set_steps(srun.id, steps)
     except OfficeError as exc:
@@ -109,7 +116,7 @@ async def plan_steps(args: dict[str, Any], ctx: ToolCtx) -> str:
 
 async def step_done(args: dict[str, Any], ctx: ToolCtx) -> str:
     ticket = await _stage_ctx(ctx)
-    srun = await ctx.office.stages.ensure_run(ticket)
+    srun = await _stage_run(ctx, ticket)
     try:
         steps = await ctx.office.stages.step_done(srun.id, int(args["index"]), str(args.get("note") or ""))
     except (OfficeError, ValueError, KeyError) as exc:
@@ -270,7 +277,7 @@ async def stage_info(_args: dict[str, Any], ctx: ToolCtx) -> str:
     ticket = await _stage_ctx(ctx)
     tpl = await office.stages.template_of(ticket)
     stage = tpl.stage(ticket.stage)
-    srun = await office.stages.ensure_run(ticket)
+    srun = await _stage_run(ctx, ticket)
     return json.dumps(
         {
             "ticket": ticket.key,

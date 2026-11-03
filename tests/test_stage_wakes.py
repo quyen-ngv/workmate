@@ -409,3 +409,26 @@ async def test_ac10_si12_sequence(office: Office, runtime: FakeRuntime, tmp_path
     row = await office.db.fetchone("SELECT COUNT(*) AS n FROM interactions WHERE ticket_id = ? AND kind = 'approve_stage'", (ticket_id,))
     assert int(row["n"]) == 1
     assert await stage_cards(office, ticket_id) == []
+
+
+async def test_a_tool_call_after_stage_complete_keeps_the_gate_card(office, runtime) -> None:
+    """SI-16: step_done right after a passing stage_complete opened a second attempt and cancelled the plan card."""
+    from actoroffice.domain.run import TurnResult, TurnStatus
+
+    ticket = await office.tickets.create("x", description="x")
+    plan = "Problem: a.\nFix: b.\n- AC-1: Given x, When y, Then z."
+
+    async def scope(ctx):
+        await ctx.office("doc_put", {"key": "plan", "body": plan, "base_revision": None})
+        await ctx.office("plan_steps", {"steps": ["viết plan"]})
+        await ctx.office("stage_complete", {"summary": "xong"})
+        await ctx.office("step_done", {"index": 1, "note": "late tick"})
+        await ctx.office("stage_info", {})
+        return TurnResult(status=TurnStatus.COMPLETED, session_id=f"s-{ctx.spec.run_id}")
+
+    runtime.scripts.append(scope)
+    await office.stages.start(ticket.id, template="quick", by="user")
+    await office.scheduler.wait_idle(timeout=30)
+    cards = [i for i in await office.interactions.pending(ticket_id=ticket.id) if i.kind.value == "approve_stage"]
+    assert len(cards) == 1 and cards[0].payload["stage"] == "scope"
+    assert [r.attempt for r in await office.stages.runs(ticket.id)] == [1]

@@ -683,14 +683,25 @@ def test_si36_ansi_c_quoting_behind_an_early_stop_is_unsplit(engine, ws, command
     assert decide(engine, c, command) != Decision.ALLOW, command
 
 
-@pytest.mark.parametrize("command", ["echo a # note", "Write-Host a #'\nRemove-Item x; '", "echo a <# x #> b", "#x"])
-def test_si36_ac3_powershell_comment_is_unsplit(command):
-    # PowerShell comments start at `#` too; the line is judged on the whole text
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo a # note",
+        "Write-Host a #'\nRemove-Item x; '",
+        "echo a,#'\nb; Remove-Item x; #'",
+        "echo {#'\n}; Remove-Item x; #'",
+        "echo a <# x #> b",
+        "#x",
+        "echo a#b; ls",
+    ],
+)
+def test_si36_ac3_powershell_hash_is_unsplit(engine, ws, command):
+    # PowerShell comments start at `#` after more token ends than bash has; the line is judged on the whole text
     assert shell.split(command, "ps") is None
-
-
-def test_si36_ac3_powershell_hash_inside_a_word_still_splits():
-    assert [p.argv for p in shell.split("echo a#b; ls", "ps")] == [["echo", "a#b"], ["ls"]]
+    c = ctx(ws)
+    c.allow_rules = ["Bash(echo *)", "PowerShell(echo *)"]
+    if "Remove-Item" in command:
+        assert engine.decide("PowerShell", {"command": command}, c).decision != Decision.ALLOW, command
 
 
 def test_ac12_powershell_unchanged(engine, ws):

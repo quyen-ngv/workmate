@@ -83,7 +83,7 @@ SAFE_TARGETS = {"/dev/null", "nul", "NUL", "$null", "/dev/stdout", "/dev/stderr"
 NOT_SPLITTABLE = re.compile(r"`|\$\(|<\(|>\(|<<")
 CONTINUATION = re.compile(r"\\[\r\n]")  # bash removes backslash-newline: `$\⏎(` is `$(`
 ANSI_C = re.compile(r"\$'")  # bash: in `$'\''` the `\'` does not end the string
-PS_COMMENT = re.compile(r"(?:^|[\s;&|()<>])#")  # PowerShell: a comment, whose quotes hide nothing
+PS_COMMENT = re.compile(r"#")  # PowerShell: any `#` may open a comment (its token ends differ from bash)
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 OPERATORS = {"&&", "||", ";", "|", "&", "|&"}
 RANGE = re.compile(r"[\d,;$p]+")  # numbers and sed-style ranges (195,260p)
@@ -113,8 +113,8 @@ class Place:
 def split(command: str, dialect: str = "sh") -> list[Command] | None:
     """The commands of a chain, or None when the line cannot be split safely (substitution, heredoc, subshell,
     unbalanced quotes, ANSI-C quoting). In sh, `$(`, backticks and `<<` that are only text (quoted or escaped,
-    see specials_are_text) do not count; PowerShell is judged on the whole text and never split when it may hold a
-    comment (`#` starting a word, `<#`), since this lexer does not follow PowerShell quoting inside it."""
+    see specials_are_text) do not count; PowerShell is judged on the whole text and never split when it holds a `#`
+    (a comment may start after a space, `,`, `{`, `<` …), since this lexer does not follow PowerShell comments."""
     if dialect == "sh":
         literal = specials_are_text(command)
         whole_text = NOT_SPLITTABLE.search(command) or CONTINUATION.search(command) or ANSI_C.search(command)

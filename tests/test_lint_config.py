@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import io
+import json
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tomllib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -60,7 +63,7 @@ def test_ac2_ruff_config_matches_the_agreed_rules() -> None:
 
 
 def test_ac3_ruff_check_src_and_tests_is_clean() -> None:
-    result = subprocess.run([ruff(), "check", "src", "tests"], cwd=ROOT, capture_output=True, text=True)
+    result = subprocess.run([ruff(), "check", "src", "tests"], cwd=ROOT, capture_output=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout[-3000:]
 
 
@@ -85,6 +88,30 @@ async def test_ac4_loki_query_keeps_its_logql(office) -> None:
     until = datetime.now(UTC)
     await office.logs.fetch(resource, service="orders", query='bo"om', since=until - timedelta(hours=1), until=until, level="ERROR")
     assert seen == ['{svc="orders"} |= "boom" |~ "(?i)ERROR"']
+
+
+# The .py files SI-14 changed (git diff 1665252...88b9166): each must have had a finding under the new config.
+BASE = "1665252"
+SI14_FILES = {
+    "src/actoroffice/app.py", "src/actoroffice/channels/telegram.py", "src/actoroffice/engine/executor.py",
+    "src/actoroffice/engine/gate.py", "src/actoroffice/engine/scheduler.py", "src/actoroffice/services/logs.py",
+    "src/actoroffice/services/org.py", "src/actoroffice/tools/chat_tools.py", "src/actoroffice/tools/infra_tools.py",
+    "src/actoroffice/tools/office_tools.py", "src/actoroffice/tools/stage_tools.py",
+    "tests/fake_acp_agent.py", "tests/test_atlassian.py", "tests/test_chat.py", "tests/test_enterprise.py",
+    "tests/test_flow_fixes.py", "tests/test_infra_tools.py", "tests/test_jira.py", "tests/test_knowledge.py",
+    "tests/test_permission_modes.py", "tests/test_permissions_projects.py", "tests/test_quality.py", "tests/test_quick_workflow.py",
+}
+
+
+def test_ac5_every_file_changed_for_lint_had_a_finding_at_the_base_commit(tmp_path) -> None:
+    archive = subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar", BASE, *sorted(SI14_FILES)], capture_output=True)
+    assert archive.returncode == 0, f"base commit {BASE} is not in this clone: {archive.stderr.decode(errors='replace')[:300]}"
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+        tar.extractall(tmp_path, filter="data")
+    shutil.copy(ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
+    result = subprocess.run([ruff(), "check", "src", "tests", "--output-format", "json", "--no-cache"], cwd=tmp_path, capture_output=True, encoding="utf-8")
+    flagged = {Path(f["filename"]).relative_to(tmp_path).as_posix() for f in json.loads(result.stdout)}
+    assert SI14_FILES - flagged == set()
 
 
 def test_ac6_every_noqa_names_its_rule() -> None:

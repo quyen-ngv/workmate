@@ -392,7 +392,8 @@ _CMD_START = r"(?:^|[;&|\n({]|\b(?:then|do|else|elif)\b)\s*"
 _BASH_LOOP = re.compile(_CMD_START + r"(?:until|while)\s")
 # The keyword is a whole word: `done=1`, `./done.sh`, `do-it` are not.
 _DO_DONE = re.compile(r"(?<![\w./-])(?:do|done)(?=[\s;&|()<>]|$)")
-_KEYWORD_BEFORE = re.compile(r"(?:^|[;&|\n(){}]|\b(?:then|do|else|elif))[ \t]*$")
+_SEPARATOR_BEFORE = re.compile(r"(?:^|[;&|\n(){}])[ \t]*$")
+_KEYWORD_BEFORE = re.compile(r"(?<![\w./-])(?:then|do|else|elif)[ \t]*$")
 _BASH_SLEEP = re.compile(_CMD_START + r"sleep\b")
 _PS_START = r"(?:^|[;\n{}]|&&|\|\|)\s*"
 _PS_WHILE = re.compile(_PS_START + r"while\s*\(", re.IGNORECASE)
@@ -408,7 +409,8 @@ _LAUNCH = re.compile(
 # timeout.exe (`timeout /t 5`) only waits: neither bounds anything.
 _BOUNDED = re.compile(
     r"^\s*(?:[A-Za-z_]\w*=\S*\s+)*timeout"
-    r"(?:\s+(?:-[ks]\s*\S+|--[a-z-]+(?:=\S+)?|-[a-z]+))*\s+(?P<n>\d+(?:\.\d+)?)[smhd]?\s"
+    r"(?:\s+(?:-[ks]\s*\S+|--(?:kill-after|signal)(?:=|\s+)\S+|--(?!kill-after\b|signal\b)[a-z-]+|-[a-jl-rt-z]+))*"
+    r"\s+(?P<n>\d+(?:\.\d+)?)[smhd]?\s"
 )
 
 
@@ -484,7 +486,7 @@ def _sh_wait(masked: str) -> bool:
     for m in _BASH_LOOP.finditer(masked):
         level, body_start = 0, None
         for kw in _DO_DONE.finditer(masked, m.end()):
-            if not _KEYWORD_BEFORE.search(masked, 0, kw.start()):
+            if not _at_command_start(masked, kw.start()):
                 continue  # `echo done`: an argument, not the keyword
             level += 1 if kw.group() == "do" else -1
             if level < 0:
@@ -500,6 +502,18 @@ def _sh_wait(masked: str) -> bool:
             if body_start is not None and _BASH_SLEEP.search(masked, body_start):
                 return True
     return False
+
+
+def _at_command_start(masked: str, at: int) -> bool:
+    """A word at `at` starts a command: after a separator, or after then/do/else/elif that start one themselves
+    (`echo then done` is three words of one echo)."""
+    while True:
+        if _SEPARATOR_BEFORE.search(masked, 0, at):
+            return True
+        keyword = _KEYWORD_BEFORE.search(masked, 0, at)
+        if keyword is None:
+            return False
+        at = keyword.start()
 
 
 def _ps_wait(masked: str) -> bool:

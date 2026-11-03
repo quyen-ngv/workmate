@@ -372,6 +372,9 @@ def test_ac9_ordinary_commands_unchanged(engine, ws, tool, command, monkeypatch)
         "while true; do ./done.sh; sleep 5; done",
         "while true; do done.sh; do-it; sleep 1; done",
         "until [ -s f ]; do dosomething; sleep 1; done",
+        "while true; do echo then done; sleep 5; done",
+        "while true; do echo do done; echo else done; sleep 5; done",
+        "while true; do if [ -s f ]; then echo then done; fi; sleep 5; done",
         # never closed: judged on what is there
         "while true; do sleep 5",
         "while true; do for f in *; do echo $f; done; sleep 5",
@@ -409,6 +412,9 @@ def test_ac1_nested_loop_without_sleep_is_unchanged(engine, ws, command, monkeyp
         'timeout 0 bash -c "while true; do sleep 5; done"',  # GNU timeout 0: no limit
         "timeout 0s sh -c 'until [ -s f ]; do sleep 5; done'",
         "timeout -k 5 0 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout --kill-after 5 0 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout --signal KILL 0 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout -vk 5 0 bash -c 'until [ -s f ]; do sleep 5; done'",
         "timeout 5; while true; do sleep 1; done",  # timeout.exe just waits, it wraps nothing
         "timeout 5 && bash -c 'until [ -s f ]; do sleep 5; done'",
         "timeout /t 5 bash -c 'until [ -s f ]; do sleep 5; done'",
@@ -428,6 +434,8 @@ def test_ac2_timeout_without_a_bound_is_denied(engine, ws, command):
         'x=$(timeout 300 bash -c "until [ -s f ]; do sleep 5; done")',
         "echo $( timeout 1.5m sh -c 'until [ -s f ]; do sleep 5; done' )",
         "timeout --kill-after=5 300 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout --kill-after 5 300 bash -c 'until [ -s f ]; do sleep 5; done'",
+        "timeout --preserve-status -s TERM 300 bash -c 'until [ -s f ]; do sleep 5; done'",
     ],
 )
 def test_ac2_timeout_inside_subshell_bounds_the_loop(engine, ws, command, monkeypatch):

@@ -16,6 +16,7 @@ from actoroffice.domain.ids import new_id
 from actoroffice.domain.org import ActorStatus
 from actoroffice.domain.run import RunStatus, WakeRequest
 from actoroffice.domain.work import ProjectAccess, TicketStatus
+from actoroffice.services.wakes import only_comments
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -154,6 +155,8 @@ class Scheduler:
             return False
         if ticket.paused:
             return False  # stays pending until someone resumes the ticket
+        if ticket.stage and only_comments(wake.payload.get("reasons", [])) and await office.stages.waits_for_card(ticket):
+            return False  # the stage is done and its gate card is open: the comments reach the AI after the answer
         return True
 
     async def _execute(self, wake: WakeRequest, run_id: str, kind: str) -> RunStatus:

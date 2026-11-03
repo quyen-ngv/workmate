@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import os
 import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -253,7 +254,13 @@ async def cmd_serve(office: Office, args: argparse.Namespace) -> None:
     added = await office.install_default_positions()
     if added:
         out("Vị trí mới: " + ", ".join(p.title for p in added))
-    token = load_or_create_token(settings)
+    if args.token_env:
+        # a temporary office (UI screenshots, SI-23): the token comes from the caller and is never written to disk
+        token = os.environ.get(args.token_env, "").strip()
+        if len(token) < 32:
+            raise OfficeError(f"Biến môi trường {args.token_env} cần chứa token dài ít nhất 32 ký tự")
+    else:
+        token = load_or_create_token(settings)
     await office.ensure_ai()  # the AI engineer exists from the first start (no separate init needed)
     await office.start(schedule=not args.view_only)  # --view-only: look around without the AI running
     if args.view_only:
@@ -267,7 +274,7 @@ async def cmd_serve(office: Office, args: argparse.Namespace) -> None:
     host, port = args.host or settings.web_host, args.port or settings.web_port
     server = uvicorn.Server(uvicorn.Config(create_app(office, token), host=host, port=port, log_level="warning", ws_ping_interval=20))
     url = f"http://{'localhost' if host in ('127.0.0.1', '0.0.0.0') else host}:{port}/login?t={token}&next=/team"
-    out(f"Văn phòng AI đang chạy: {url}")
+    out(f"Văn phòng AI đang chạy: {url.replace(token, f'${args.token_env}') if args.token_env else url}")
     out("(link chứa mã đăng nhập — đừng chia sẻ; Ctrl+C để dừng)")
     if not args.no_browser:
         webbrowser.open(url)
@@ -382,6 +389,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int)
     p.add_argument("--no-browser", action="store_true")
     p.add_argument("--view-only", action="store_true", help="web UI only: the scheduler does not start, the AI runs nothing")
+    p.add_argument("--token-env", metavar="NAME", help="take the sign-in token from this environment variable (not saved to disk)")
     p.set_defaults(fn=cmd_serve)
     return parser
 

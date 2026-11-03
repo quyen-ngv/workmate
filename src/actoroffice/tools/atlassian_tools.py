@@ -11,6 +11,7 @@ from typing import Any
 
 from actoroffice.domain.errors import OfficeError
 from actoroffice.domain.work import ProjectAccess
+from actoroffice.services.checks import ui_evidence_markdown
 
 from .registry import ToolCtx, ToolDef, ToolError, schema
 
@@ -143,8 +144,12 @@ async def pr_create(args: dict[str, Any], ctx: ToolCtx) -> str:
     code, out = await _git(ctx.workspace, "push", "-u", "origin", branch)
     if code != 0:
         raise ToolError(f"git push failed: {out[-800:]}")
+    description = str(args.get("description") or "")
+    evidence = ui_evidence_markdown(await office.stages.ui_evidence(ticket.id)) if ticket.stage else ""
+    if evidence:  # screenshots of the AC [ui] or why none could be taken (SI-23)
+        description = f"{description.rstrip()}\n\n{evidence}".lstrip()
     try:
-        pr = await host.pr_create(repo, branch, destination, str(args.get("title") or ticket.title), str(args.get("description") or ""))
+        pr = await host.pr_create(repo, branch, destination, str(args.get("title") or ticket.title), description)
     except OfficeError as exc:
         raise ToolError(str(exc)) from exc
     url = pr.get("url") or ""

@@ -282,6 +282,24 @@ function reviewAcList(items) {
   return `<div class="review"><div class="who">AC kiểm bằng review</div><ul>${rows}</ul></div>`;
 }
 
+const shotUrl = (key, id) => `/api/tickets/${encodeURIComponent(key)}/artifacts/${encodeURIComponent(id)}/file`;
+
+// Acceptance criteria tagged [ui]: the AI's screenshots (click for the large image), or why none could be taken.
+function uiEvidenceList(items, key) {
+  if (!(items || []).length) return "";
+  const rows = items.map((a) => {
+    const shots = (a.shots || []).map((s) => {
+      const label = s.caption || s.name;
+      return `<button class="shot" data-shot="${esc(shotUrl(key, s.id))}" data-shot-title="${esc(`${a.id} · ${label}`)}" title="${esc(label)}"><img src="${esc(shotUrl(key, s.id))}" alt="${esc(label)}" loading="lazy"></button>`;
+    }).join("");
+    const missing = (a.reasons || []).length
+      ? `<div class="reply"><span class="chip warn">⚠ không chụp được</span> ${esc(a.reasons.join("; "))}</div>`
+      : `<div class="reply"><span class="chip warn">chưa có ảnh</span></div>`;
+    return `<li><b>${esc(a.id)}</b> ${esc(a.title)}${shots ? `<div class="shots">${shots}</div>` : missing}</li>`;
+  }).join("");
+  return `<div class="review"><div class="who">Bằng chứng giao diện</div><ul>${rows}</ul></div>`;
+}
+
 function card(item) {
   const p = item.payload || {};
   const who = (p.approver_names || []).join(", ") || p.roles_label || "bạn";
@@ -295,7 +313,7 @@ function card(item) {
     const checks = (p.checks || []).map((c) => `<li>${c.status === "passed" ? "✅" : c.status === "failed" ? "❌" : "⏭"} ${esc(c.id)}: ${esc(c.summary)}</li>`).join("");
     const kb = (p.kb || []).map((k) => `<li>${esc(k)}</li>`).join("");
     return `<div class="card" data-card="${esc(item.id)}"><div class="who">✋ ${esc(p.stage_title)} xong — cần ${esc(who)} duyệt</div>
-      <div class="q">${esc(p.summary)}</div>${checks ? `<ul>${checks}</ul>` : ""}${reviewList(p.review)}${reviewAcList(p.review_acs)}${kb ? `<div class="who">Kiến thức AI ghi lại:</div><ul>${kb}</ul>` : ""}
+      <div class="q">${esc(p.summary)}</div>${checks ? `<ul>${checks}</ul>` : ""}${reviewList(p.review)}${reviewAcList(p.review_acs)}${uiEvidenceList(p.ui_evidence, p.ticket)}${kb ? `<div class="who">Kiến thức AI ghi lại:</div><ul>${kb}</ul>` : ""}
       ${(p.access || []).length ? `<div class="who">Duyệt kèm quyền: ${esc(p.access.join(", "))}</div>` : ""}
       <div class="composer inline"><textarea placeholder="${p.gate === "knowledge" ? "Bỏ mục sai: 'bỏ 2, 5'" : "Ghi chú khi trả lại…"}" data-text></textarea></div>
       <div class="opts"><button class="btn good" data-approve="1">👍 ${p.gate === "knowledge" ? "Xác nhận" : "Duyệt"}</button><button class="btn bad" data-approve="0">👎 ${p.gate === "knowledge" ? "Bỏ (theo ghi chú)" : "Trả lại"}</button></div></div>`;
@@ -362,7 +380,7 @@ function renderPane(key) {
       </div>
     </div>
     ${steps.length ? `<div class="steps">${steps.map((s, i) => `<div class="s ${s.done ? "done" : i === cur ? "cur" : ""}">${s.done ? "☑" : i === cur ? "▶" : "☐"} ${esc(s.text)}</div>`).join("")}</div>` : ""}
-    ${t.stage === "pr" || closed ? reviewList(d.stage?.review) + reviewAcList(d.stage?.review_acs) : ""}
+    ${t.stage === "pr" || closed ? reviewList(d.stage?.review) + reviewAcList(d.stage?.review_acs) + uiEvidenceList(d.stage?.ui_evidence, t.key) : ""}
     <div class="timeline">${renderTimeline(timeline(key)) || `<div class="empty">Chưa có hoạt động.</div>`}</div>
     ${pending.length ? `<div class="cards">${pending.map(card).join("")}</div>` : ""}
     ${closed ? "" : `<div class="composer"><textarea placeholder="Chỉ dẫn cho AI… Enter để gửi, Shift+Enter xuống dòng" data-steer></textarea><button class="btn primary" data-send>Gửi</button></div>`}`;
@@ -536,7 +554,7 @@ async function pageSetup() {
     <h3>Repo / dự án</h3>
     <p class="hint">Thư mục repo trên máy này. AI làm trên git worktree riêng cho mỗi việc, không sửa thẳng nhánh của bạn. Lệnh test/build để AI tự kiểm tra (để trống nếu chưa có).</p>
     ${s.projects.map((p) => projectForm(p, teamOpts)).join("")}
-    ${projectForm({ id: "", name: "", path: "", team_id: "", repo_url: "", test: "", build: "", lint: "" }, teamOpts)}
+    ${projectForm({ id: "", name: "", path: "", team_id: "", repo_url: "", test: "", build: "", lint: "", ui_seed: "", ui_start: "", ui_url: "", ui_paths: "" }, teamOpts)}
 
     <h3>Kết nối</h3>
     <p class="hint">Token được lưu trên máy chủ (thư mục secrets), không hiện lại và AI không bao giờ thấy.</p>
@@ -576,6 +594,10 @@ function projectForm(p, teamOpts) {
       <label>Lệnh test<input data-pf="test" value="${esc(p.test)}" placeholder="vd. mvn -q test"></label>
       <label>Lệnh build<input data-pf="build" value="${esc(p.build)}" placeholder="vd. mvn -q package -DskipTests"></label>
       <label>Lệnh lint<input data-pf="lint" value="${esc(p.lint)}"></label>
+      <label>Giao diện: lệnh seed<input data-pf="ui_seed" value="${esc(p.ui_seed)}" placeholder="vd. uv run python scripts/ui_seed.py" title="Chạy trước lệnh start, nhận AO_UI_PORT, AO_UI_DATA, AO_UI_TOKEN"></label>
+      <label>Giao diện: lệnh start<input data-pf="ui_start" value="${esc(p.ui_start)}" placeholder="vd. npm run dev -- --port {port}" title="Chỉ nghe 127.0.0.1; {port} và {data} được thay; token ở biến AO_UI_TOKEN"></label>
+      <label>Giao diện: URL<input data-pf="ui_url" value="${esc(p.ui_url)}" placeholder="vd. http://127.0.0.1:{port}/login?t={token}"></label>
+      <label>Giao diện: file UI (glob)<input data-pf="ui_paths" value="${esc(p.ui_paths)}" placeholder="vd. src/**/static/**, *.css"></label>
       <button class="btn primary" data-save-project="${k}">${p.id ? "Lưu" : "Thêm"}</button>
     </div>
     ${p.id ? `<div class="form perm">
@@ -603,6 +625,7 @@ document.addEventListener("click", (e) => {
   if (!t) return;
   const ds = t.dataset;
   if (ds.open) { e.preventDefault(); $("#overlay").hidden = true; openTicket(ds.open); return; }
+  if (ds.shot) { sheet(ds.shotTitle || "Ảnh chụp", `<img class="shot-full" src="${esc(ds.shot)}" alt="${esc(ds.shotTitle || "")}">`); return; }
   if (ds.team !== undefined) { state.team = ds.team || null; renderSidebar(); return; }
   if (ds.closedToggle !== undefined) {
     state.closed.open = !state.closed.open;
@@ -639,7 +662,7 @@ document.addEventListener("click", (e) => {
   if (ds.saveProject) return act(async () => {
     const box = t.closest("[data-proj]");
     const v = (n) => ($(`[data-pf="${n}"]`, box).value || "").trim();
-    const r = await api("/api/setup/project", { method: "POST", body: { id: ds.saveProject === "new" ? null : ds.saveProject, name: v("name"), path: v("path"), team_id: v("team_id") || null, repo_url: v("repo_url") || null, test: v("test"), build: v("build"), lint: v("lint") } });
+    const r = await api("/api/setup/project", { method: "POST", body: { id: ds.saveProject === "new" ? null : ds.saveProject, name: v("name"), path: v("path"), team_id: v("team_id") || null, repo_url: v("repo_url") || null, test: v("test"), build: v("build"), lint: v("lint"), ui_seed: v("ui_seed"), ui_start: v("ui_start"), ui_url: v("ui_url"), ui_paths: v("ui_paths") } });
     toast(r.imported_rules.length ? `Đã lưu · nhập ${r.imported_rules.length} quy ước từ repo` : "Đã lưu");
     await pageSetup();
   });

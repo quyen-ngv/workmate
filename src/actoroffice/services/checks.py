@@ -44,8 +44,12 @@ GIVEN = re.compile(r"\b(given|cho|giả sử)\b", re.IGNORECASE)
 WHEN = re.compile(r"\b(when|khi)\b", re.IGNORECASE)
 THEN = re.compile(r"\b(then|thì)\b", re.IGNORECASE)
 OPTION = re.compile(r"(?im)^\s*(?:#+\s*|[-*]\s*|\d+[.)]\s*)?(?:\*\*)?(?:phương án|option|approach|cách)\s*[A-Z0-9]")
-# "AC-5 [review]: …": checked by a person at the gate instead of a test; only spaces may sit between id and tag
-REVIEW_TAG = re.compile(r"\bAC[-\s]?(\d+)(?!\d)[ \t]*\[review\]", re.IGNORECASE)
+# "AC-5 [review]: …": checked by a person at the gate instead of a test; only spaces may sit between id and tag.
+# "[ui]" (SI-23) may stand before or after it: "AC-5 [ui] [review]" and "AC-5 [review] [ui]".
+REVIEW_TAG = re.compile(r"\bAC[-\s]?(\d+)(?!\d)[ \t]*(?:\[ui\][ \t]*)?\[review\]", re.IGNORECASE)
+# "AC-3 [ui]: …": a UI criterion; when UI files changed, the build stage wants a screenshot of it (check ui_evidence)
+UI_TAG = re.compile(r"\bAC[-\s]?(\d+)(?!\d)[ \t]*(?:\[review\][ \t]*)?\[ui\]", re.IGNORECASE)
+NO_SHOT = re.compile(r"(?i)không chụp được[ \t]*:[ \t]*(.+)")
 # Same line only: an empty "Cách kiểm:" must not take the text of the next line
 HOW_TO_CHECK = re.compile(r"(?im)\bcách kiểm[ \t]*(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?[ \t]*(.*)$")
 NO_HANDOFF_LINE = "chưa ghi cách kiểm"
@@ -284,6 +288,61 @@ def ac_blocks(text: str) -> dict[str, str]:
 def review_ids(text: str) -> set[str]:
     """AC ids tagged [review] right after the id, anywhere in the text."""
     return {f"AC-{m.group(1)}" for m in REVIEW_TAG.finditer(text)}
+
+
+def ui_ids(text: str) -> set[str]:
+    """AC ids tagged [ui] right after the id (or after its [review] tag), anywhere in the text."""
+    return {f"AC-{m.group(1)}" for m in UI_TAG.finditer(text)}
+
+
+def ac_id(value: Any) -> str | None:
+    """"ac-3", "AC 3", "AC-3" → "AC-3"."""
+    m = AC_RE.search(str(value or ""))
+    return f"AC-{m.group(1)}" if m else None
+
+
+def ui_evidence(text: str, handoff: str, products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each AC [ui] of `text` (requirements, or the quick plan): its screenshots (work products) and the reasons a
+    screenshot could not be taken (environment errors the tool recorded, handoff lines "AC-n … không chụp được: …")."""
+    tagged = ui_ids(text)
+    items = []
+    for key, body in ac_blocks(text).items():
+        if key not in tagged:
+            continue
+        shots = [
+            {"id": p["id"], "name": Path(str(p["ref"])).name, "caption": (p.get("metadata") or {}).get("note") or ""}
+            for p in products
+            if p["kind"] == "screenshot" and ac_id((p.get("metadata") or {}).get("ac")) == key
+        ]
+        reasons = [
+            str((p.get("metadata") or {}).get("reason") or p["ref"])
+            for p in products
+            if p["kind"] == "ui_error" and ac_id((p.get("metadata") or {}).get("ac")) == key
+        ]
+        pattern = re.compile(rf"(?i)(?<![a-z])AC[-_\s]?{key.split('-')[1]}(?!\d)")
+        for line in handoff.splitlines():
+            m = NO_SHOT.search(line)
+            if m and pattern.search(line[: m.start()]):
+                reasons.append(m.group(1).strip().rstrip("|").strip()[:300])
+        first = body.strip().splitlines()[0].strip()[:200] if body.strip() else key
+        items.append({"id": key, "title": first, "shots": shots, "reasons": list(dict.fromkeys(reasons))})
+    return items
+
+
+def ui_evidence_markdown(items: list[dict[str, Any]]) -> str:
+    """The "Bằng chứng giao diện" section of a PR description."""
+    if not items:
+        return ""
+    lines = ["## Bằng chứng giao diện"]
+    for item in items:
+        if item["shots"]:
+            shots = "; ".join(f"`{s['name']}`" + (f" ({s['caption']})" if s["caption"] else "") for s in item["shots"])
+            lines.append(f"- {item['id']}: {shots}")
+        elif item["reasons"]:
+            lines.append(f"- {item['id']}: ⚠️ không chụp được: {'; '.join(item['reasons'])}")
+        else:
+            lines.append(f"- {item['id']}: chưa có ảnh")
+    return "\n".join(lines)
 
 
 def how_to_check(body: str) -> str | None:
@@ -643,6 +702,37 @@ async def check_ac_coverage(ctx: CheckContext) -> CheckResult:
     return CheckResult(id="ac_coverage", status="passed", summary=summary, data=data)
 
 
+async def check_ui_evidence(ctx: CheckContext) -> CheckResult:
+    """When the change touches UI files (profile ui.paths), every AC [ui] has a screenshot, or a reason it could
+    not be taken (environment error recorded by ui_screenshot, or a handoff line "không chụp được: …")."""
+    ui = (ctx.project.profile.get("ui") if ctx.project else None) or {}
+    paths = [str(p) for p in ui.get("paths") or [] if str(p).strip()] if isinstance(ui, dict) else []
+    if not paths:
+        return CheckResult(id="ui_evidence", status="skipped", summary="project chưa khai báo giao diện (profile ui.paths)")
+    text = ctx.docs.get("requirements") or ctx.docs.get("plan", "")  # the quick workflow has its ACs in the plan
+    if not ui_ids(text):
+        return CheckResult(id="ui_evidence", status="skipped", summary="không có AC [ui]")
+    git = _git_ctx(ctx)
+    if git is None:
+        return CheckResult(id="ui_evidence", status="skipped", summary="không phải git worktree")
+    touched = [f for f in await changed_files(*git) if is_test(f, paths)]
+    if not touched:
+        return CheckResult(id="ui_evidence", status="skipped", summary="thay đổi không chạm file giao diện")
+    items = ui_evidence(text, ctx.docs.get("handoff", ""), await ctx.office.tickets.work_products(ctx.ticket.id))
+    missing = [i["id"] for i in items if not i["shots"] and not i["reasons"]]
+    warnings = [f"{i['id']}: {'; '.join(i['reasons'])}" for i in items if not i["shots"] and i["reasons"]]
+    shot = [i["id"] for i in items if i["shots"]]
+    data = {"missing": missing, "warnings": warnings, "shots": shot, "ui_files": touched[:30]}
+    if missing:
+        return CheckResult(
+            id="ui_evidence", status="failed", data=data,
+            summary=f"AC [ui] chưa có ảnh: {', '.join(missing)} (chụp bằng ui_screenshot với ac=…; không chụp được thì ghi 'không chụp được: <lý do>' vào handoff)",
+        )
+    if warnings:
+        return CheckResult(id="ui_evidence", status="passed", data=data, summary=f"⚠️ không chụp được ảnh cho {', '.join(w.split(':')[0] for w in warnings)}: {' | '.join(warnings)}"[:600])
+    return CheckResult(id="ui_evidence", status="passed", data=data, summary=f"{len(shot)}/{len(items)} AC [ui] có ảnh")
+
+
 async def check_no_secrets(ctx: CheckContext) -> CheckResult:
     git = _git_ctx(ctx)
     if git is None:
@@ -799,6 +889,7 @@ BUILTIN.update(
     {
         "kb_noted": check_kb_noted,
         "ac_coverage": check_ac_coverage,
+        "ui_evidence": check_ui_evidence,
         "no_secrets": check_no_secrets,
         "log_lint": check_log_lint,
         "coverage_changed_lines": check_coverage_changed_lines,

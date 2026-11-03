@@ -34,7 +34,7 @@ from actoroffice.domain.stage import (
 from actoroffice.domain.team import LOCAL_OWNER_ID, ROLE_VI
 from actoroffice.domain.work import Interaction, InteractionKind, Ticket, TicketStatus
 
-from .checks import CheckResult, CheckRunner, review_acs
+from .checks import CheckResult, CheckRunner, review_acs, ui_evidence
 from .review import gate_items
 
 if TYPE_CHECKING:
@@ -271,6 +271,16 @@ class StageService:
         handoff = await self.office.tickets.get_document(ticket_id, "handoff")
         return review_acs(requirements.body, handoff.body if handoff else "")
 
+    async def ui_evidence(self, ticket_id: int) -> list[dict[str, Any]]:
+        """AC [ui] items with their screenshots and the reasons none could be taken (SI-23): for the check, the pr
+        pane, the gate card and the PR description. ACs come from the requirements, or the plan (quick workflow)."""
+        office = self.office
+        doc = await office.tickets.get_document(ticket_id, "requirements") or await office.tickets.get_document(ticket_id, "plan")
+        if doc is None:
+            return []
+        handoff = await office.tickets.get_document(ticket_id, "handoff")
+        return ui_evidence(doc.body, handoff.body if handoff else "", await office.tickets.work_products(ticket_id))
+
     async def save_review(self, stage_run_id: int, review: dict[str, Any]) -> None:
         await self.office.db.execute("UPDATE stage_runs SET review_json = ? WHERE id = ?", (json.dumps(review, ensure_ascii=False), stage_run_id))
 
@@ -394,6 +404,7 @@ class StageService:
             "rules": [{"id": r.id, "title": r.title, "roles": r.spec.get("roles")} for r in extra or []],
             "review": gate_items(next((r.data for r in results if r.id == "review_clean"), None)),
             "review_acs": await self.review_acs(ticket.id) if stage.id in ("build", "pr") else [],
+            "ui_evidence": await self.ui_evidence(ticket.id) if stage.id in ("build", "pr") else [],
         }
         if gate == "knowledge":
             drafts = [i for i in await office.knowledge.list(ticket_id=ticket.id) if i.status == "draft"]

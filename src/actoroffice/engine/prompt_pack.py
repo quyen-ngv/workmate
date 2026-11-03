@@ -102,6 +102,9 @@ Goal: an exact, testable requirement the BA can approve.
   (process, documents) or a UI that is hard to automate: it is then checked by a person at the gate, not by a test.
   It still needs Given / When / Then and a line "Cách kiểm: …" saying how it will be checked. At most half of the
   ACs may be [review]. Inside an AC never write another AC's id: the text after it is counted as that other AC.
+- Tag an AC "[ui]" right after its id (e.g. "AC-4 [ui]: …", with [review] too: "AC-4 [ui] [review]: …") when it
+  is about what people see in the user interface: the build stage then needs a screenshot of it. [ui] does not
+  change the test rule: an AC [ui] still needs a test unless it is also [review].
 - Dossier: context (why, who asked, current behaviour with file references), requirements (short summary),
   qa (every question → answer → who answered).
 - When no blocking question is open: stage_complete. The BA approves (or sends it back with a note).""",
@@ -124,16 +127,18 @@ Goal: one short note a Dev approves in one click (small, clear change).
   user stories, options or KPIs.
 - Write the document `plan` in at most 15 lines: Problem (with file:line) · Fix (what you will change) · Files ·
   How it is checked (a test, or for UI a manual check / screenshot) · AC-1 … AC-3, one line each
-  (Given … When … Then …).
+  (Given … When … Then …). Tag an AC about what people see in the UI "[ui]" right after its id (AC-2 [ui]: …).
 - If it turns out bigger or needs a decision from people, call stage_switch(template="code", reason) instead.
 - stage_complete: a Dev approves (or sends it back with a note).""",
     "quick:build": """\
 Goal: the change the approved plan describes, checked and committed.
 - Make the change with Edit/Write in your working directory. Keep it as small as the plan.
-- Add or update a test when that area has tests; for a UI or CSS change say how a person checks it (and take a
-  screenshot if you can run the page).
+- Add or update a test when that area has tests; for a UI or CSS change say how a person checks it.
+- For each AC tagged [ui] take a screenshot with ui_screenshot (ac = its id, a caption, actions to reach the
+  state). If the environment cannot take it (the tool records its error), write the line
+  "AC-n: không chụp được: <lý do>" in a short `handoff` document (doc_put); people see it before the merge.
 - Run the project's build/test/lint if it has them. Commit with a clear message (no push to the main branch).
-- No handoff document and no plan_steps needed: say what changed and how to check it in the stage_complete summary.""",
+- No handoff document and no plan_steps needed (only the line above when a screenshot failed): say what changed and how to check it in the stage_complete summary.""",
     "design": """\
 Goal: an automation design the people can approve.
 - Read the approved `requirements`. Write the document `plan`: what triggers the flow (schedule/event), its steps
@@ -149,6 +154,10 @@ Goal: working, tested changes that follow the approved plan.
 - Write the document `handoff`: what changed, how to run, how to test, AC → test map, known limits.
 - An AC tagged [review] needs no test, but the AC table of the `handoff` must have a line with its id saying how
   you checked it (people confirm it at the gate).
+- For each AC tagged [ui] take at least one screenshot with ui_screenshot (ac = its id, a caption, the actions that
+  bring the page to the state the AC describes); the office starts the app and keeps the images with the AC. If
+  the environment cannot take it (the tool records its error), write "AC-n: không chụp được: <lý do>" on the AC's
+  line in the `handoff`. The check ui_evidence wants one of the two when UI files changed.
 - For an automation: write and test the script, then save it with automation_save (people approve it).
 - stage_complete runs the checks (tests changed, build, test, lint…). Fix failures and call it again.""",
     "pr": """\

@@ -134,6 +134,7 @@ def _code() -> StageTemplate:
                     "steps_done",
                     "tests_changed",
                     "ac_coverage",
+                    "ui_evidence",  # SI-23: screenshots of the AC [ui] when UI files changed
                     "no_secrets",
                     "log_lint",
                     "repo:build",
@@ -157,7 +158,7 @@ def _quick() -> StageTemplate:
         name="quick",
         stages=[
             StageDef(id="scope", outputs=["plan"], checks=["outputs", "plan_ac"], gate="plan"),
-            StageDef(id="build", checks=["main_synced", "no_secrets", "log_lint", "repo:build", "repo:test", "repo:lint", "review_clean"]),
+            StageDef(id="build", checks=["main_synced", "ui_evidence", "no_secrets", "log_lint", "repo:build", "repo:test", "repo:lint", "review_clean"]),
             StageDef(id="pr", checks=["pr_linked"], gate="merge"),
         ],
     )

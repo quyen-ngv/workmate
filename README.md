@@ -200,3 +200,31 @@ uv run ruff check src tests         # rules and line length are set in pyproject
 
 The project profile's lint command (web Cài đặt → "Lệnh lint") should be `uv run ruff check src tests`, so the
 `repo:lint` check runs it at the build stage. There is no auto-formatter (`ruff format` is not used).
+
+## UI evidence (screenshots taken by the AI)
+
+Acceptance criteria tagged `[ui]` (e.g. `AC-4 [ui]: …`, also `AC-4 [ui] [review]`) need a screenshot at the build
+stage when the change touches the project's UI files. The AI takes it with the office tool `ui_screenshot`: the
+office starts the project's app on this machine, opens the page in headless Chrome/Edge (only localhost; requests
+to other hosts are blocked), runs the clicks/fills/waits and keeps the PNG with the AC. People see the images in
+the pr pane, on the gate card and in the PR description. The check `ui_evidence` fails when an AC `[ui]` has no
+image and no reason ("không chụp được: …" in the handoff, or an environment error the tool recorded).
+
+The browser is driven by playwright with the installed Chrome or Edge (nothing is downloaded):
+`uv sync --extra ui` (it is also in the dev group). Without it the tool reports an environment error.
+
+Set it up in web Cài đặt → the project's "Giao diện" fields. The commands get `AO_UI_PORT`, `AO_UI_DATA` (a fresh
+temporary folder) and `AO_UI_TOKEN` (random each start) in their environment; `{port}` and `{data}` are replaced in
+their arguments, `{token}` only in the URL. The app must listen on 127.0.0.1 only. For actor-office itself:
+
+| Field | Value |
+|---|---|
+| Lệnh seed | `uv run python scripts/ui_seed.py` |
+| Lệnh start | `uv run actoroffice --home {data} serve --host 127.0.0.1 --port {port} --view-only --no-browser --token-env AO_UI_TOKEN` |
+| URL | `http://127.0.0.1:{port}/login?t={token}&next=/team` |
+| File UI | `src/**/static/**` |
+
+`scripts/ui_seed.py` fills the temporary folder with a team, people and tickets at understand, build (gate card),
+pr (review, AC `[review]`, AC `[ui]` with an image and one with a reason), done and cancelled. `serve --token-env`
+takes the sign-in token from that variable and never writes it to `secrets/web_token`. The app is stopped and its
+folder deleted when the AI's turn ends. Wait time: `profile.timeouts.ui` (default 60 s).

@@ -56,6 +56,7 @@ from actoroffice.services.skills import SkillService, split_front_matter
 from actoroffice.services.stages import StageService
 from actoroffice.services.teams import TeamService
 from actoroffice.services.tickets import TicketService
+from actoroffice.services.ui_preview import UiPreviewService
 from actoroffice.services.wakes import WakeService
 from actoroffice.store import Database
 
@@ -103,6 +104,7 @@ class Office:
         self.knowledge = KnowledgeService(self)
         self.infra = InfraService(self)
         self.logs = LogService(self)
+        self.ui = UiPreviewService(self)  # the ticket's temporary app for UI screenshots (SI-23)
         self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),
@@ -204,6 +206,7 @@ class Office:
         await self.scheduler.shutdown()
         await self.automations.shutdown()
         await self.merges.close()
+        await self.ui.close()
         for task in self._tasks:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

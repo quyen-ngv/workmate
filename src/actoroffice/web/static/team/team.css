@@ -193,6 +193,11 @@ code, pre { font-family: var(--mono); font-size: var(--fs-sm); }
 .review .sev { font-size: var(--fs-xs); color: var(--warn); }
 .review .sev.high { color: var(--danger); }
 .chip.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+.review .shots { display: flex; flex-wrap: wrap; gap: var(--gap-2); margin-top: var(--gap-1); }
+.review .shot { padding: 0; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--bg); cursor: zoom-in; line-height: 0; }
+.review .shot:hover { border-color: var(--accent); }
+.review .shot img { display: block; max-width: 220px; max-height: 140px; border-radius: var(--radius); }
+.shot-full { display: block; max-width: 100%; height: auto; margin: 0 auto; border: 1px solid var(--line); border-radius: var(--radius); }
 .composer { border-top: 1px solid var(--line); padding: var(--gap-2); display: flex; gap: var(--gap-2); flex: none; }
 .composer textarea { flex: 1; min-height: 34px; max-height: 160px; }
 .empty { color: var(--faint); padding: var(--gap-5); text-align: center; margin: auto; }

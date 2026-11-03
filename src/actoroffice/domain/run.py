@@ -49,6 +49,7 @@ class Usage(BaseModel):
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    model: str = ""  # the model that answered (reported by the runtime, else the one asked for)
 
     @classmethod
     def from_sdk(cls, raw: dict[str, Any] | None) -> Usage:

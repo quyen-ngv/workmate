@@ -102,9 +102,11 @@ class ActivityTracker:
             status = str(payload.get("status"))
             return Activity(
                 kind="usage",
-                title=f"Hết lượt ({status}) · {tokens / 1000:.1f}k tok" + (f" · ${payload['cost_usd']:.3f}" if payload.get("cost_usd") else ""),
+                title=f"Hết lượt ({status}) · {tokens / 1000:.1f}k tok"
+                + (f" · ${payload['cost_usd']:.3f}" if payload.get("cost_usd") else "")
+                + (f" · {usage['model']}" if usage.get("model") else ""),
                 status="error" if status in ("error", "max_turns") else "ok",
-                fields={"tokens": tokens, "status": status},
+                fields={"tokens": tokens, "status": status, "model": usage.get("model") or ""},
             )
         if kind == "retry":
             return Activity(

@@ -131,6 +131,36 @@ async def seed(office: Office) -> None:
     await office.db.execute("UPDATE tickets SET status = ? WHERE id = ?", (TicketStatus.DONE.value, done))
     cancelled = await ticket("Xuất báo cáo PDF (huỷ)", "plan")
     await office.db.execute("UPDATE tickets SET status = ? WHERE id = ?", (TicketStatus.CANCELLED.value, cancelled))
+    await proposals(office, team.id)
+
+
+PROPOSED = [
+    {"title": "Hàng đợi tuần tự theo dự án", "why": "17 ticket viết tay chạy song song rồi xung đột (loop log)", "description": "AC-1: ticket cùng dự án chạy lần lượt", "workflow": "code"},
+    {"title": "Thẻ đề xuất trên web team", "why": "team.js chưa có thẻ cho danh sách đề xuất", "description": "AC-1: thẻ liệt kê từng mục", "workflow": "quick", "depends_on": [1]},
+    {"title": "Hướng dẫn dùng propose_tickets", "why": "README chưa nói cách duyệt danh sách", "description": "AC-1: README có mục mới"},
+]
+
+
+async def proposals(office: Office, team_id: str) -> None:
+    """SI-24: a research ticket with a pending proposal card, the same card in the AI's chat, and a backlog."""
+    from actoroffice.domain.chat import MessageKind
+
+    ai = await office.ensure_ai()
+    research = await office.tickets.create("Nghiên cứu: từ brainstorm tới backlog", description="Brainstorm", created_by="user")
+    await office.stages.start(research.id, template="research", by=LOCAL_OWNER_ID, team_id=team_id)
+    await office.db.execute("UPDATE tickets SET stage = 'produce' WHERE id = ?", (research.id,))
+    await office.stages.ensure_run(await office.tickets.get(research.id))
+    await office.proposals.propose(PROPOSED, actor_id=ai.id, actor_name=ai.name, run_id=None, ticket_id=research.id, conversation_id=None)
+
+    dm = await office.chat.dm(ai.id)
+    card, _ = await office.proposals.propose(PROPOSED, actor_id=ai.id, actor_name=ai.name, run_id=None, ticket_id=None, conversation_id=dm.id)
+    await office.chat.post_system(dm.id, "Copilot đề xuất 3 ticket", kind=MessageKind.INTERACTION, meta={"interaction_id": card.id})
+
+    # an approved list from an earlier chat: item 1 runs, items 2 and 3 wait in the Backlog
+    earlier, _ = await office.proposals.propose(
+        [{**p, "title": f"{p['title']} (đợt trước)"} for p in PROPOSED], actor_id=ai.id, actor_name=ai.name, run_id=None, ticket_id=None, conversation_id=None
+    )
+    await office.answer(earlier.id, {"approved": True}, by=LOCAL_OWNER_ID)
 
 
 async def main() -> int:

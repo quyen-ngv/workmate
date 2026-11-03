@@ -11,17 +11,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fnmatch
+import logging
 import os
 import re
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import psutil
 from pydantic import BaseModel
 
+from actoroffice.domain.dossier import SYNC_SECTION, parse_dossier, render_dossier, set_sync_line, sync_line
 from actoroffice.domain.errors import OfficeError
 from actoroffice.domain.stage import StageDef, StageRun
 from actoroffice.domain.work import Project, Ticket
@@ -29,7 +32,12 @@ from actoroffice.domain.work import Project, Ticket
 if TYPE_CHECKING:
     from actoroffice.app import Office
 
+log = logging.getLogger(__name__)
+
 OUTPUT_TAIL = 4000
+# Used only when the repo has no identity of its own (as for a fresh project, services/projects.py)
+IDENTITY = ["-c", "user.name=actor-office", "-c", "user.email=office@localhost", "-c", "commit.gpgsign=false"]
+NOT_SYNCED = "chưa cập nhật theo nhánh chính"
 DEFAULT_TEST_GLOBS = ["**/test/**", "**/tests/**", "**/__tests__/**", "**/*_test.*", "**/*.test.*", "**/*.spec.*", "**/test_*", "**/*Test.*", "**/*Tests.*", "**/spec/**"]
 AC_RE = re.compile(r"\bAC[-\s]?(\d+)\b", re.IGNORECASE)
 GIVEN = re.compile(r"\b(given|cho|giả sử)\b", re.IGNORECASE)
@@ -82,11 +90,17 @@ class CheckRunner:
         docs = {d.key: d.body for d in await office.tickets.list_documents(ticket.id)}
         ctx = CheckContext(office, ticket, stage, stage_run, workspace, project, run_id, docs)
         results: list[CheckResult] = []
+        not_synced = False
         for check_id in only if only is not None else stage.checks:
-            try:
-                result = await self._one(check_id, ctx)
-            except Exception as exc:  # a broken check must never pass silently
-                result = CheckResult(id=check_id, status="failed", summary=f"check crashed: {type(exc).__name__}: {exc}")
+            if not_synced and check_id.startswith("repo:"):
+                # The branch lacks main's new commits: building or testing it now would test old code (SI-21)
+                result = CheckResult(id=check_id, status="skipped", summary=f"{NOT_SYNCED} (xem check main_synced)")
+            else:
+                try:
+                    result = await self._one(check_id, ctx)
+                except Exception as exc:  # a broken check must never pass silently
+                    result = CheckResult(id=check_id, status="failed", summary=f"check crashed: {type(exc).__name__}: {exc}")
+            not_synced = not_synced or (check_id == "main_synced" and result.failed)
             results.append(result)
             if run_id:
                 await office.runs.event(run_id, "check", result.model_dump())
@@ -424,6 +438,86 @@ async def check_pr_linked(ctx: CheckContext) -> CheckResult:
     return CheckResult(id="pr_linked", status="failed", summary="chưa có link PR (pr_link)")
 
 
+async def check_main_synced(ctx: CheckContext) -> CheckResult:
+    """Bring the ticket's branch up to date with the local main branch before the build stage's other checks (SI-21).
+
+    The one check with a side effect: when main has commits the branch lacks and the worktree is clean, it merges
+    main into the branch (a merge commit in the ticket's worktree; main itself is only read, nothing is fetched).
+    A conflict is aborted, so on failure HEAD and the worktree are as they were."""
+    ws = ctx.workspace
+    if ws is None or not (ws / ".git").exists():
+        return CheckResult(id="main_synced", status="skipped", summary="không phải git worktree")
+    main = ctx.project.main_branch if ctx.project else "main"
+    code, out, _ = await run_argv(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{main}"], ws, timeout=30)
+    if code != 0:
+        return CheckResult(id="main_synced", status="skipped", summary=f"repo không có nhánh chính {main}")
+    main_sha = out.strip()
+    branch = (await run_argv(["git", "rev-parse", "--abbrev-ref", "HEAD"], ws, timeout=30))[1].strip()
+    if branch == main:
+        return CheckResult(id="main_synced", status="skipped", summary=f"đang làm trên chính nhánh {main}")
+    code, out, _ = await run_argv(["git", "merge-base", "--is-ancestor", main_sha, "HEAD"], ws, timeout=60)
+    if code == 0:
+        await _record_sync(ctx, main, main_sha)
+        return CheckResult(id="main_synced", status="passed", summary=f"nhánh đã có mọi commit của {main} ({main_sha[:7]})",
+                           data={"main": main, "main_sha": main_sha})
+    if code != 1:
+        return CheckResult(id="main_synced", status="failed", summary=f"không so được nhánh với {main}: {out.strip()[-300:]}")
+    dirty = (await run_argv(["git", "status", "--porcelain"], ws, timeout=30))[1].strip()
+    if dirty:
+        return CheckResult(
+            id="main_synced", status="failed",
+            summary=f"{main} có commit mới nhưng worktree còn thay đổi chưa commit: hãy commit trước rồi gọi stage_complete lại "
+                    f"(office sẽ merge {main} vào nhánh). Chưa commit: {' '.join(dirty.split())[:200]}",
+        )
+    identity = [] if (await run_argv(["git", "config", "user.email"], ws, timeout=30))[0] == 0 else IDENTITY
+    message = f"Merge {main} into {branch} ({ctx.ticket.key})"
+    code, out, _ = await run_argv(["git", *identity, "merge", "--no-ff", "--no-edit", "-m", message, main_sha], ws, timeout=300)
+    if code != 0:
+        files = (await run_argv(["git", "diff", "--name-only", "--diff-filter=U"], ws, timeout=30))[1].split()
+        await run_argv(["git", "merge", "--abort"], ws, timeout=60)
+        listed = ", ".join(files) if files else out.strip()[-300:]
+        return CheckResult(
+            id="main_synced", status="failed",
+            summary=f"merge {main} ({main_sha[:7]}) vào nhánh bị xung đột ở: {listed}. Office đã huỷ merge, nhánh giữ nguyên. "
+                    f"Hãy chạy `git merge {main}`, giải quyết conflict, commit, rồi gọi stage_complete lại.",
+            data={"main": main, "main_sha": main_sha, "conflicts": files[:50]},
+        )
+    merge_sha = (await run_argv(["git", "rev-parse", "HEAD"], ws, timeout=30))[1].strip()
+    try:
+        await ctx.office.tickets.add_comment(
+            ctx.ticket.id, f"🔄 Đã cập nhật nhánh {branch} theo {main} ({main_sha[:7]}), commit merge {merge_sha[:7]}.",
+            author_kind="system", author_id=None,
+        )
+    except Exception:  # the merge is made: a failed note must not fail the check
+        log.exception("comment on the main sync of %s", ctx.ticket.key)
+    await _record_sync(ctx, main, main_sha)
+    return CheckResult(id="main_synced", status="passed", summary=f"đã merge {main} ({main_sha[:7]}) vào nhánh, commit {merge_sha[:7]}",
+                       data={"main": main, "main_sha": main_sha, "merge_sha": merge_sha})
+
+
+async def _record_sync(ctx: CheckContext, main: str, main_sha: str) -> None:
+    """Keep the office's one line in the dossier's tests section; written only when it changes. Never raises."""
+    tickets = ctx.office.tickets
+    try:
+        for _ in range(3):  # optimistic revisions, as dossier_update
+            doc = await tickets.get_document(ctx.ticket.id, "dossier")
+            sections = parse_dossier(doc.body if doc else "")
+            current = sections.get(SYNC_SECTION, "")
+            updated = set_sync_line(current, sync_line(main, main_sha, date.today().isoformat()))
+            if updated == current:
+                return
+            sections[SYNC_SECTION] = updated
+            try:
+                await tickets.put_document(ctx.ticket.id, "dossier", render_dossier(sections), author="office",
+                                           base_revision=doc.revision if doc else None)
+            except OfficeError:
+                continue
+            return
+        log.warning("dossier of %s kept changing: main sync line not written", ctx.ticket.key)
+    except Exception:
+        log.exception("dossier line of the main sync of %s", ctx.ticket.key)
+
+
 async def check_automation_saved(ctx: CheckContext) -> CheckResult:
     row = await ctx.office.db.fetchone("SELECT name FROM automations WHERE ticket_id = ? ORDER BY created_at DESC LIMIT 1", (ctx.ticket.id,))
     if not row:
@@ -440,6 +534,7 @@ BUILTIN = {
     "steps_done": check_steps_done,
     "tests_changed": check_tests_changed,
     "pr_linked": check_pr_linked,
+    "main_synced": check_main_synced,
     "automation_saved": check_automation_saved,
 }
 

@@ -23,7 +23,7 @@ from actoroffice.domain.stage import StageOutcome
 from actoroffice.domain.work import Project, ProjectAccess, Ticket
 from actoroffice.engine.workspace import branch_name
 from actoroffice.services.automations import kill_tree
-from actoroffice.services.checks import command_list, run_argv, test_env
+from actoroffice.services.checks import IDENTITY, command_list, run_argv, test_env
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -31,8 +31,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 LOG_TAIL = 1500
-# Used only when the repo has no identity of its own (as for a fresh project, services/projects.py)
-IDENTITY = ["-c", "user.name=actor-office", "-c", "user.email=office@localhost", "-c", "commit.gpgsign=false"]
 
 
 class MergeError(OfficeError):

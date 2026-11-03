@@ -190,6 +190,12 @@ REVIEW_REPLY = (
     "  finding with review_reply: fix it and reply fixed (the next round re-checks it), or reply wontfix with the\n"
     "  reason in note (a wontfix needs a reason). The stage cannot finish while one has no reply; people see the replies."
 )
+MAIN_SYNC = (
+    "- At stage_complete the office first merges the main branch into your branch when main has new commits (check\n"
+    "  main_synced), so the other checks run on up-to-date code; commit everything before you call it.\n"
+    "  If main_synced fails on a conflict, run `git merge <main>` in your working directory,\n"
+    "  resolve the conflicts, commit, then call stage_complete again (repo:* checks are skipped until it passes)."
+)
 OFFICE_RUNS_TESTS = {
     "Run the project's build/test/lint if it has them.": (
         "Run the build/lint if it has them, but only the tests for what you changed (their test file, or -k), not the\n"
@@ -343,6 +349,8 @@ def _instructions(template: StageTemplate, stage: StageDef, office_runs_tests: b
     if office_runs_tests and "repo:test" in stage.checks:
         for old, new in OFFICE_RUNS_TESTS.items():
             text = text.replace(old, new)
+    if "main_synced" in stage.checks:
+        text += "\n" + MAIN_SYNC
     if "review_clean" in stage.checks:
         text += "\n" + REVIEW_REPLY
     return text

@@ -129,6 +129,7 @@ def _code() -> StageTemplate:
                 id="build",
                 outputs=["handoff"],
                 checks=[
+                    "main_synced",  # first: the checks below run on the branch merged with main's new commits
                     "outputs",
                     "steps_done",
                     "tests_changed",
@@ -156,7 +157,7 @@ def _quick() -> StageTemplate:
         name="quick",
         stages=[
             StageDef(id="scope", outputs=["plan"], checks=["outputs", "plan_ac"], gate="plan"),
-            StageDef(id="build", checks=["no_secrets", "log_lint", "repo:build", "repo:test", "repo:lint", "review_clean"]),
+            StageDef(id="build", checks=["main_synced", "no_secrets", "log_lint", "repo:build", "repo:test", "repo:lint", "review_clean"]),
             StageDef(id="pr", checks=["pr_linked"], gate="merge"),
         ],
     )

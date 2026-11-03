@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 S = TicketStatus
 MAX_CONTINUATIONS = 3  # automatic "continue" wakes in a row after an actor sets its ticket back to todo
+PROGRESS_EVENTS = {"text", "thinking", "tool_use"}  # once one arrives, a failed turn is not re-run by itself
 
 
 class Executor:
@@ -422,7 +424,12 @@ class Executor:
         return env
 
     async def _turn(self, spec: TurnSpec, gate: OfficeGate, *, extra_sink: Any = None) -> TurnResult:
+        progressed = False
+
         async def sink(kind: str, payload: dict[str, Any]) -> None:
+            nonlocal progressed
+            if kind in PROGRESS_EVENTS:
+                progressed = True
             activity = await self.office.runs.event(spec.run_id, kind, payload)
             if gate.watchdog is not None:
                 await gate.watchdog.observe(activity)
@@ -431,12 +438,26 @@ class Executor:
             if extra_sink is not None:
                 await extra_sink(kind, payload)
 
-        result = await self.office.runtime.run_turn(spec, gate, sink)
-        await self.office.runs.event(
-            spec.run_id,
-            "turn",
-            {"status": result.status.value, "usage": result.usage.model_dump(), "cost_usd": result.cost_usd, "error": result.error},
-        )
+        # A turn that errors before any token or content (CLI start-up timeout, lost CLI process, API overload)
+        # did nothing: run it again after a growing wait. Once the AI has worked, a re-run could repeat its work.
+        delays = self.office.settings.transient_retry_delays_s
+        for attempt in range(len(delays) + 1):
+            result = await self.office.runtime.run_turn(spec, gate, sink)
+            await self.office.runs.event(
+                spec.run_id,
+                "turn",
+                {"status": result.status.value, "usage": result.usage.model_dump(), "cost_usd": result.cost_usd, "error": result.error},
+            )
+            if result.status != TurnStatus.ERROR or progressed or _tokens(result.usage):
+                return result
+            if attempt == len(delays):
+                break
+            await self.office.runs.event(
+                spec.run_id, "retry", {"attempt": attempt + 1, "of": len(delays), "delay_s": delays[attempt], "error": result.error}
+            )
+            await asyncio.sleep(delays[attempt])
+        if delays:
+            result.error = f"Claude khởi động lỗi {len(delays) + 1} lần liền: {result.error}. Bấm Thử lại ở giai đoạn."
         return result
 
     async def _needs_disposition(self, result: TurnResult, ticket_id: int, run_id: str) -> bool:
@@ -555,6 +576,10 @@ def _chat_line(m: Any, actors: dict[str, Any], positions: dict[str, str]) -> str
     else:
         who = "System"
     return f"[{who}] {m.body}"
+
+
+def _tokens(usage: Usage) -> int:
+    return usage.input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_write_tokens
 
 
 def _add(usage: Usage, cost: float, result: TurnResult) -> tuple[Usage, float]:

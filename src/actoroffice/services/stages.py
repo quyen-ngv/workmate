@@ -220,7 +220,8 @@ class StageService:
 
     async def add_usage(self, stage_run_id: int, usage: Usage, cost: float, session_id: str | None) -> None:
         run = await self.get_run(stage_run_id)
-        total = {k: int(run.usage.get(k) or 0) + int(getattr(usage, k)) for k in Usage.model_fields}
+        total: dict[str, Any] = {k: int(run.usage.get(k) or 0) + int(getattr(usage, k)) for k in Usage.model_fields if k != "model"}
+        total["model"] = usage.model or run.usage.get("model") or ""
         await self.office.db.execute(
             "UPDATE stage_runs SET usage_json = ?, cost_usd = cost_usd + ?, session_id = COALESCE(?, session_id) WHERE id = ?",
             (json.dumps(total), cost, session_id, stage_run_id),

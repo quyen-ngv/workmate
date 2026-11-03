@@ -55,6 +55,7 @@ class ClaudeSdkRuntime:
         rate_limit: RateLimit | None = None
         result: ResultMessage | None = None
         assistant_error: str | None = None
+        model = ""
         try:
             async with ClaudeSDKClient(options=options) as client:
                 self._clients[spec.run_id] = client
@@ -80,6 +81,8 @@ class ClaudeSdkRuntime:
                             status=info.status, kind=info.rate_limit_type, utilization=info.utilization, resets_at=info.resets_at
                         )
                         await sink("rate_limit", rate_limit.model_dump())
+                    elif isinstance(msg, SystemMessage) and msg.subtype == "init":
+                        model = str((msg.data or {}).get("model") or "")
                     elif isinstance(msg, SystemMessage) and msg.subtype == "compact_boundary":
                         await sink("compacted", {"data": msg.data})
                     elif isinstance(msg, ResultMessage):
@@ -89,7 +92,7 @@ class ClaudeSdkRuntime:
             return TurnResult(status=TurnStatus.ERROR, error=f"{type(exc).__name__}: {exc}", rate_limit=rate_limit)
         finally:
             self._clients.pop(spec.run_id, None)
-        return _to_turn_result(result, texts, rate_limit, assistant_error)
+        return _to_turn_result(result, texts, rate_limit, assistant_error, model)
 
     def _options(self, spec: TurnSpec, gate: ToolGate) -> ClaudeAgentOptions:
         async def pre_tool_use(data: Any, tool_use_id: str | None, _ctx: Any) -> dict[str, Any]:
@@ -162,12 +165,22 @@ def _sdk_tool(bound: BoundTool) -> Any:
     return tool(bound.name, bound.definition.description, bound.definition.input_schema)(handler)
 
 
+def _main_model(model_usage: dict[str, Any] | None) -> str:
+    """The model that wrote most of the turn (the CLI may also use a small model for side tasks)."""
+    def output(name: str) -> int:
+        entry = (model_usage or {}).get(name)
+        return int(entry.get("outputTokens") or 0) if isinstance(entry, dict) else 0
+
+    return max(model_usage, key=output) if model_usage else ""
+
+
 def _to_turn_result(
-    result: ResultMessage | None, texts: list[str], rate_limit: RateLimit | None, assistant_error: str | None
+    result: ResultMessage | None, texts: list[str], rate_limit: RateLimit | None, assistant_error: str | None, model: str = ""
 ) -> TurnResult:
     if result is None:
-        return TurnResult(status=TurnStatus.ERROR, error="no result from Claude", rate_limit=rate_limit)
+        return TurnResult(status=TurnStatus.ERROR, error="no result from Claude", rate_limit=rate_limit, usage=Usage(model=model))
     usage = Usage.from_sdk(result.usage)
+    usage.model = model or _main_model(result.model_usage)
     common = {
         "session_id": result.session_id,
         "text": "\n\n".join(texts).strip(),

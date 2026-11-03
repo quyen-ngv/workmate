@@ -150,6 +150,7 @@ class ReviewService:
         result = None
         try:
             result = await office.runtime.run_turn(spec, _ReadOnlyGate(ctx.workspace), sink)
+            result.usage.model = result.usage.model or spec.model or ""
         finally:
             ok = result is not None and result.status == TurnStatus.COMPLETED
             await office.runs.finish(

@@ -32,6 +32,7 @@ from .workspace import ticket_env
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
+    from actoroffice.domain.org import Actor, Position
 
 log = logging.getLogger(__name__)
 S = TicketStatus
@@ -136,7 +137,7 @@ class Executor:
                     skills=office.skills.for_actor(actor, position),
                     memories=await office.memory.context_for(actor, f"{ticket.title} {ticket.description}"),
                 )
-                model = actor.model or position.model or office.settings.default_model
+                model = _model_for(office, actor, position)
             spec = TurnSpec(
                 run_id=run_id,
                 prompt=prompt,
@@ -344,7 +345,7 @@ class Executor:
                     skills=office.skills.for_actor(actor, position),
                     memories=await office.memory.context_for(actor, " ".join(m.body for m in history[-5:])),
                 ),
-                model=actor.model or position.model or office.settings.default_model,
+                model=_model_for(office, actor, position),
                 tools=["Read", "Glob", "Grep"],
                 coding_preset=False,  # chat never needs the coding preset: about half the base tokens
                 resume_session_id=resume,
@@ -447,6 +448,7 @@ class Executor:
         try:
             for attempt in range(len(delays) + 1):
                 result = await self.office.runtime.run_turn(spec, watched, sink)
+                result.usage.model = result.usage.model or spec.model or ""
                 await self.office.runs.event(
                     spec.run_id,
                     "turn",
@@ -625,6 +627,13 @@ class _CountingGate:
         await self.gate.after_tool(tool, args, result)
 
 
+def _model_for(office: Office, actor: Actor, position: Position) -> str:
+    """The office AI runs on ai_model wherever it works; other actors keep their own or their position's model."""
+    if actor.name == office.settings.ai_name and office.settings.ai_model:
+        return office.settings.ai_model
+    return actor.model or position.model or office.settings.default_model
+
+
 def _tokens(usage: Usage) -> int:
     return usage.input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_write_tokens
 
@@ -637,6 +646,7 @@ def _add(usage: Usage, cost: float, result: TurnResult) -> tuple[Usage, float]:
             output_tokens=usage.output_tokens + u.output_tokens,
             cache_read_tokens=usage.cache_read_tokens + u.cache_read_tokens,
             cache_write_tokens=usage.cache_write_tokens + u.cache_write_tokens,
+            model=u.model or usage.model,
         ),
         cost + result.cost_usd,
     )

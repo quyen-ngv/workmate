@@ -224,6 +224,14 @@ function reviewList(items) {
   return `<div class="review"><div class="who">Điểm review</div><ul>${rows}</ul></div>`;
 }
 
+// Acceptance criteria tagged [review]: how to check them (requirements) and how the AI did (handoff).
+function reviewAcList(items) {
+  if (!(items || []).length) return "";
+  const rows = items.map((a) => `<li><b>${esc(a.id)}</b> ${esc(a.title)}
+    <div class="reply">Cách kiểm: ${esc(a.how || "—")}</div><div class="reply">Đã kiểm: ${esc(a.done)}</div></li>`).join("");
+  return `<div class="review"><div class="who">AC kiểm bằng review</div><ul>${rows}</ul></div>`;
+}
+
 function card(item) {
   const p = item.payload || {};
   const who = (p.approver_names || []).join(", ") || p.roles_label || "bạn";
@@ -237,7 +245,7 @@ function card(item) {
     const checks = (p.checks || []).map((c) => `<li>${c.status === "passed" ? "✅" : c.status === "failed" ? "❌" : "⏭"} ${esc(c.id)}: ${esc(c.summary)}</li>`).join("");
     const kb = (p.kb || []).map((k) => `<li>${esc(k)}</li>`).join("");
     return `<div class="card" data-card="${esc(item.id)}"><div class="who">✋ ${esc(p.stage_title)} xong — cần ${esc(who)} duyệt</div>
-      <div class="q">${esc(p.summary)}</div>${checks ? `<ul>${checks}</ul>` : ""}${reviewList(p.review)}${kb ? `<div class="who">Kiến thức AI ghi lại:</div><ul>${kb}</ul>` : ""}
+      <div class="q">${esc(p.summary)}</div>${checks ? `<ul>${checks}</ul>` : ""}${reviewList(p.review)}${reviewAcList(p.review_acs)}${kb ? `<div class="who">Kiến thức AI ghi lại:</div><ul>${kb}</ul>` : ""}
       ${(p.access || []).length ? `<div class="who">Duyệt kèm quyền: ${esc(p.access.join(", "))}</div>` : ""}
       <div class="composer inline"><textarea placeholder="${p.gate === "knowledge" ? "Bỏ mục sai: 'bỏ 2, 5'" : "Ghi chú khi trả lại…"}" data-text></textarea></div>
       <div class="opts"><button class="btn good" data-approve="1">👍 ${p.gate === "knowledge" ? "Xác nhận" : "Duyệt"}</button><button class="btn bad" data-approve="0">👎 ${p.gate === "knowledge" ? "Bỏ (theo ghi chú)" : "Trả lại"}</button></div></div>`;
@@ -292,7 +300,7 @@ function renderPane(key) {
       </div>
     </div>
     ${steps.length ? `<div class="steps">${steps.map((s, i) => `<div class="s ${s.done ? "done" : i === cur ? "cur" : ""}">${s.done ? "☑" : i === cur ? "▶" : "☐"} ${esc(s.text)}</div>`).join("")}</div>` : ""}
-    ${t.stage === "pr" ? reviewList(d.stage?.review) : ""}
+    ${t.stage === "pr" ? reviewList(d.stage?.review) + reviewAcList(d.stage?.review_acs) : ""}
     <div class="timeline">${renderTimeline(timeline(key)) || `<div class="empty">Chưa có hoạt động.</div>`}</div>
     ${pending.length ? `<div class="cards">${pending.map(card).join("")}</div>` : ""}
     <div class="composer"><textarea placeholder="Chỉ dẫn cho AI… Enter để gửi, Shift+Enter xuống dòng" data-steer></textarea><button class="btn primary" data-send>Gửi</button></div>`;

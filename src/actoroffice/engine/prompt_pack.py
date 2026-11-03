@@ -98,6 +98,10 @@ Goal: an exact, testable requirement the BA can approve.
 - Ask the right roles about real gaps (business rules → ba, feasibility → dev, edge cases/test data → qe).
 - Write the document `requirements` (doc_put): user story, scope in/out, business rules, assumptions, and
   acceptance criteria numbered AC-1, AC-2… each in Given / When / Then form (observable, testable).
+- Tag an AC "[review]" right after its id (e.g. "AC-5 [review]: …") only when it is about how the work is done
+  (process, documents) or a UI that is hard to automate: it is then checked by a person at the gate, not by a test.
+  It still needs Given / When / Then and a line "Cách kiểm: …" saying how it will be checked. At most half of the
+  ACs may be [review]. Inside an AC never write another AC's id: the text after it is counted as that other AC.
 - Dossier: context (why, who asked, current behaviour with file references), requirements (short summary),
   qa (every question → answer → who answered).
 - When no blocking question is open: stage_complete. The BA approves (or sends it back with a note).""",
@@ -110,7 +114,8 @@ Goal: a plan a Dev can choose from and approve.
 - Write the document `plan` with:
   1. Options: at least "Phương án A" and "Phương án B" with trade-offs, and which one you recommend and why.
   2. Files/modules to change and why. 3. Risks (schema, public API, other teams' services).
-  4. Test plan: a table mapping every AC-n to the tests that prove it (unit / integration / e2e).
+  4. Test plan: a table mapping every AC-n to the tests that prove it (unit / integration / e2e). An AC tagged
+     [review] is mapped to how it will be checked by review instead of a test.
   5. Access needs: environments, databases, services the build needs (or "none").
 - stage_complete: a Dev chooses and approves (they may edit the plan first: always follow the approved revision).""",
     "scope": """\
@@ -142,6 +147,8 @@ Goal: working, tested changes that follow the approved plan.
   deviation with plan_deviation (major=true when it changes scope, design or risk).
 - Commit with clear messages. Do not push to the main branch.
 - Write the document `handoff`: what changed, how to run, how to test, AC → test map, known limits.
+- An AC tagged [review] needs no test, but the AC table of the `handoff` must have a line with its id saying how
+  you checked it (people confirm it at the gate).
 - For an automation: write and test the script, then save it with automation_save (people approve it).
 - stage_complete runs the checks (tests changed, build, test, lint…). Fix failures and call it again.""",
     "pr": """\
@@ -150,6 +157,7 @@ Goal: a pull request people can review and merge.
   connected, the branch itself is reviewed on this machine: do not ask for a PR URL and do not push; call
   stage_complete with the branch name, and a person merges it.
 - PR description: summary, AC → test map, check results, how to test, assumptions and known limits.
+- ACs tagged [review], if any: list them in the PR description with how each was checked (from the `handoff`).
 - Do not run the test suite again while the code has not changed since the build stage: it was tested when the
   build stage finished. Take the check results for the PR description from the build stage (its stage_complete
   result and the `handoff`); the office reruns what it needs at stage_complete.

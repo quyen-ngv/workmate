@@ -61,6 +61,40 @@ def test_ac11_stage_api_returns_review_on_pr(office_client, severity: str) -> No
         ]
 
 
+def test_ac9_stage_api_returns_review_acs(office_client) -> None:
+    office, c = office_client
+    login(c)
+    task = c.post("/api/tasks", json={"title": "Hoàn tiền", "template": "code"}, headers=HEADERS).json()
+    assert c.get(f"/api/tickets/{task['key']}/stage").json()["review_acs"] == []
+
+    async def at_pr() -> None:
+        ticket = await office.tickets.get(task["key"])
+        requirements = "- AC-1: Given a When b Then c\n- AC-2 [review]: Given README When đọc Then đủ.\n  Cách kiểm: đọc diff\n"
+        await office.tickets.put_document(ticket.id, "requirements", requirements, author="Copilot", base_revision=None)
+        await office.tickets.put_document(ticket.id, "handoff", "| AC-2 | đã đọc diff |\n", author="Copilot", base_revision=None)
+        await office.db.execute("UPDATE tickets SET stage = 'pr' WHERE id = ?", (ticket.id,))
+
+    c.portal.call(at_pr)
+    assert c.get(f"/api/tickets/{task['key']}/stage").json()["review_acs"] == [
+        {"id": "AC-2", "title": "AC-2 [review]: Given README When đọc Then đủ.", "how": "đọc diff", "done": "| AC-2 | đã đọc diff |"}
+    ]
+
+
+def test_ac9_team_js_renders_review_acs() -> None:
+    from pathlib import Path
+
+    import actoroffice
+
+    js = (Path(actoroffice.__file__).parent / "web" / "static" / "team" / "team.js").read_text(encoding="utf-8")
+    start = js.index("function reviewAcList(items)")
+    body = js[start : js.index("\n}\n", start)]
+    assert "AC kiểm bằng review" in body and "Cách kiểm" in body and "Đã kiểm" in body and "a.done" in body
+    card = js[js.index("function card(item)") : js.index("function renderPane(key)")]
+    assert "reviewAcList(p.review_acs)" in card
+    pane = js[js.index("function renderPane(key)") :]
+    assert 'reviewList(d.stage?.review) + reviewAcList(d.stage?.review_acs)' in pane
+
+
 def test_people_teams_tasks_board_and_controls(client):  # noqa: F811
     login(client)
     lan = client.post("/api/people", json={"name": "Lan", "roles": [], "telegram_id": 111}, headers=HEADERS).json()

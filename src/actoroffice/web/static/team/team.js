@@ -787,6 +787,9 @@ function connect() {
   renderTabs();
   renderPanes();
   for (const key of paneKeys()) await act(() => loadTicket(key));
+  // other tabs off the board (closed or gone): load them too, for their name and dot, or drop them on 404
+  for (const key of state.open.filter((k) => !paneKeys().includes(k) && !state.board.tickets.some((t) => t.ticket === k))) await act(() => loadTicket(key));
+  renderTabs();
   renderPanes();
   connect();
   setInterval(() => act(loadBoard), 30000);

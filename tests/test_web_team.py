@@ -197,7 +197,10 @@ def test_ac3_team_js_closed_section() -> None:
 def test_ac4_team_js_keeps_closed_tabs() -> None:
     js = _js()
     boot = js[js.rindex("(async () => {") :]
-    assert "state.board.tickets.some" not in boot
+    assert "state.open = state.open.filter" not in boot  # tabs are not dropped against the board
+    # every tab off the board is loaded at start (name/dot for closed tickets, 404 drops deleted ones), not only the visible panes
+    assert "state.open.filter((k) => !paneKeys().includes(k) && !state.board.tickets.some" in boot
+    assert boot.index("!paneKeys().includes(k)") < boot.index("renderTabs()", boot.index("!paneKeys().includes(k)"))
     load = _fn(js, "loadTicket")
     assert "404" in load
     info = _fn(js, "ticketInfo")

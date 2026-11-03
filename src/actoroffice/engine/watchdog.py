@@ -4,10 +4,11 @@ developer instead.
 
 - slow:     one command has been running longer than `slow_command_s`
 - stalled:  no event at all for `stall_after_s`
+- editing:  10 different edits of one file with no command (test/build run) in between: a warning only
 - looping:  the same failing command 3 times, the same part of a file read 4 times, the same edit made twice
-            (so an edit redone after it was undone), or 2 undone edits / 10 edits of one file with no command
-            (test/build run) in between. Several different edits of one file are normal work, and so is
-            undoing one misplaced edit once: neither is a loop.
+            (so an edit redone after it was undone), or 2 undone edits of one file with no command in between.
+            Different edits of one file are normal work, however many, and so is undoing one misplaced edit
+            once: neither is a loop.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 
 FAILS_FOR_LOOP = 3
 READS_FOR_LOOP = 4
-EDITS_FOR_LOOP = 10
+EDITS_FOR_WARNING = 10
 UNDOS_FOR_LOOP = 2
 
 
@@ -102,8 +103,11 @@ class Watchdog:
             if sig:
                 seen.add(sig)
             self.edits_since_command[path] += 1
-            if self.edits_since_command[path] >= EDITS_FOR_LOOP:
-                await self._loop(f"sửa `{path[-80:]}` {self.edits_since_command[path]} lần mà không chạy lại test")
+            if self.edits_since_command[path] == EDITS_FOR_WARNING:  # different edits: a nudge, not a stop (SI-22)
+                await self._health(
+                    "editing",
+                    f"Đã sửa `{path[-80:]}` {EDITS_FOR_WARNING} lần mà chưa chạy lệnh nào: nên kiểm tra cú pháp hoặc chạy test liên quan",
+                )
 
     async def _loop(self, reason: str) -> None:
         if self.loop is None:

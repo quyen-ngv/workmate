@@ -175,7 +175,13 @@ def register(app: FastAPI, office: Office) -> None:
             "participants": [m.model_dump() for m in await teams.participants(ticket.id)],
             "review": await office.stages.last_review(ticket.id),
             "review_acs": await office.stages.review_acs(ticket.id),
+            "merge": await office.merges.panel(ticket.key) if ticket.stage == "pr" else {"available": False},
         }
+
+    @app.post("/api/tickets/{key}/merge/start")
+    async def merge_start(key: str) -> dict[str, Any]:
+        """The "Merge into <main>" button (repos without a code host): merges, tests and passes the gate in the background."""
+        return await office.merges.start(key, by=LOCAL_OWNER_ID)
 
     @app.get("/api/tickets/{key}/changes")
     async def ticket_changes(key: str) -> dict[str, Any]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -35,11 +36,14 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 S = TicketStatus
 MAX_CONTINUATIONS = 3  # automatic "continue" wakes in a row after an actor sets its ticket back to todo
+PROGRESS_EVENTS = {"text", "thinking", "tool_use"}  # once one arrives, a failed turn is not re-run by itself
 
 
 class Executor:
     def __init__(self, office: Office) -> None:
         self.office = office
+        self._stopped: set[str] = set()  # runs stopped by a person; checked between tries of a failed turn
+        self._retry_waits: dict[str, asyncio.Event] = {}  # run_id → wakes the wait before the next try
 
     async def run_ticket(self, wake: WakeRequest, run_id: str) -> RunStatus:
         office = self.office
@@ -422,7 +426,12 @@ class Executor:
         return env
 
     async def _turn(self, spec: TurnSpec, gate: OfficeGate, *, extra_sink: Any = None) -> TurnResult:
+        progressed = False
+
         async def sink(kind: str, payload: dict[str, Any]) -> None:
+            nonlocal progressed
+            if kind in PROGRESS_EVENTS:
+                progressed = True
             activity = await self.office.runs.event(spec.run_id, kind, payload)
             if gate.watchdog is not None:
                 await gate.watchdog.observe(activity)
@@ -431,13 +440,57 @@ class Executor:
             if extra_sink is not None:
                 await extra_sink(kind, payload)
 
-        result = await self.office.runtime.run_turn(spec, gate, sink)
-        await self.office.runs.event(
-            spec.run_id,
-            "turn",
-            {"status": result.status.value, "usage": result.usage.model_dump(), "cost_usd": result.cost_usd, "error": result.error},
-        )
+        # A turn that errors before any token, content or tool call (CLI start-up timeout, lost CLI process, API
+        # overload) did nothing: run it again after a growing wait. Once the AI has worked, a re-run could repeat it.
+        delays = self.office.settings.transient_retry_delays_s
+        watched = _CountingGate(gate)
+        try:
+            for attempt in range(len(delays) + 1):
+                result = await self.office.runtime.run_turn(spec, watched, sink)
+                await self.office.runs.event(
+                    spec.run_id,
+                    "turn",
+                    {"status": result.status.value, "usage": result.usage.model_dump(), "cost_usd": result.cost_usd, "error": result.error},
+                )
+                if result.status != TurnStatus.ERROR or progressed or watched.calls or _tokens(result.usage):
+                    return result
+                if attempt == len(delays):
+                    break
+                await self.office.runs.event(
+                    spec.run_id, "retry", {"attempt": attempt + 1, "of": len(delays), "delay_s": delays[attempt], "error": result.error}
+                )
+                if not await self._wait_retry(spec.run_id, gate.ticket_id, delays[attempt]):
+                    return TurnResult(status=TurnStatus.CANCELLED, error="stopped while waiting to retry")
+        finally:
+            self._stopped.discard(spec.run_id)
+        if delays:
+            result.error = f"Claude khởi động lỗi {len(delays) + 1} lần liền: {result.error}. Bấm Thử lại ở giai đoạn."
         return result
+
+    def stop(self, run_id: str) -> None:
+        """Stop a run between two tries of a failed turn (the runtime has no process to interrupt then)."""
+        self._stopped.add(run_id)
+        if run_id in self._retry_waits:
+            self._retry_waits[run_id].set()
+
+    async def _wait_retry(self, run_id: str, ticket_id: int | None, delay: float) -> bool:
+        """Wait before the next try; False when the run was stopped or its ticket paused meanwhile."""
+        if run_id not in self._stopped:
+            woken = self._retry_waits[run_id] = asyncio.Event()
+            try:
+                await asyncio.wait_for(woken.wait(), delay)
+            except TimeoutError:
+                pass
+            finally:
+                self._retry_waits.pop(run_id, None)
+        if run_id in self._stopped:
+            return False
+        # The wait was long: read the ticket again, a person may have paused or taken it meanwhile.
+        if ticket_id is not None:
+            ticket = await self.office.tickets.get(ticket_id)
+            if ticket.paused or ticket.checkout_run_id != run_id:
+                return False
+        return True
 
     async def _needs_disposition(self, result: TurnResult, ticket_id: int, run_id: str) -> bool:
         if result.status != TurnStatus.COMPLETED or run_id in self.office.stages.finished_runs:
@@ -555,6 +608,25 @@ def _chat_line(m: Any, actors: dict[str, Any], positions: dict[str, str]) -> str
     else:
         who = "System"
     return f"[{who}] {m.body}"
+
+
+class _CountingGate:
+    """The run's gate, counting tool calls: a turn that reached one has started working."""
+
+    def __init__(self, gate: OfficeGate) -> None:
+        self.gate = gate
+        self.calls = 0
+
+    async def before_tool(self, tool: str, args: dict[str, Any], tool_use_id: str | None) -> Any:
+        self.calls += 1
+        return await self.gate.before_tool(tool, args, tool_use_id)
+
+    async def after_tool(self, tool: str, args: dict[str, Any], result: Any) -> None:
+        await self.gate.after_tool(tool, args, result)
+
+
+def _tokens(usage: Usage) -> int:
+    return usage.input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_write_tokens
 
 
 def _add(usage: Usage, cost: float, result: TurnResult) -> tuple[Usage, float]:

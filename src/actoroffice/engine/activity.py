@@ -106,6 +106,13 @@ class ActivityTracker:
                 status="error" if status in ("error", "max_turns") else "ok",
                 fields={"tokens": tokens, "status": status},
             )
+        if kind == "retry":
+            return Activity(
+                kind="health",
+                title=f"Claude khởi động lỗi, thử lại lần {payload.get('attempt')}",
+                status="error",
+                fields={"attempt": payload.get("attempt"), "delay_s": payload.get("delay_s")},
+            )
         if kind == "health":
             return Activity(kind="health", title=str(payload.get("title") or payload.get("state")), status="error", fields=payload)
         if kind == "compacted":

@@ -21,6 +21,7 @@ class Settings(BaseModel):
     kiro_cli_path: str | None = None  # None = kiro-cli on PATH (actors whose model is "kiro" or "kiro:<model>")
     kiro_engine: str = "v3"  # Kiro CLI ACP engine: "v3" (current) or "v2"
     corrective_turns: int = 1  # extra turns to make an actor set a final ticket status
+    transient_retry_delays_s: list[float] = [30, 120]  # waits before re-running a turn that failed before doing anything
     max_unattended_agent_messages: int = 8  # actor↔actor chat messages in a row before pausing for the user
     web_host: str = "127.0.0.1"
     web_port: int = 8765

@@ -39,6 +39,14 @@ class MergeError(OfficeError):
     code = 409
 
 
+class MergeRecordError(MergeError):
+    """Main already holds the merge, but writing it to the ticket failed: never report this as "main unchanged"."""
+
+    def __init__(self, message: str, result: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.result = result
+
+
 class MergeService:
     def __init__(self, office: Office) -> None:
         self.office = office
@@ -100,7 +108,11 @@ class MergeService:
         project = await office.projects.get(root.project_id or "")
         if self._lock(project).locked():
             raise Conflict("Đang có một merge khác trên dự án này")
-        await self._check(root, project)
+        try:
+            await self._check(root, project)
+        except MergeError as exc:
+            await self._refused(root, project, by, exc)
+            raise
         if root.key in self._jobs:  # another click got in while this one was checking
             raise Conflict(f"Đang merge {root.key}")
         self._jobs[root.key] = asyncio.get_running_loop().create_task(self._run_job(root, by))
@@ -124,21 +136,39 @@ class MergeService:
     async def _run_job(self, root: Ticket, by: str) -> None:
         office = self.office
         try:
-            result = await self.merge(root.key, by=by)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if not isinstance(exc, OfficeError):
-                log.exception("merge of %s crashed", root.key)
-            reason = str(exc) if isinstance(exc, OfficeError) else f"lỗi không lường trước: {type(exc).__name__}: {exc}"
-            with contextlib.suppress(Exception):
-                await office.tickets.add_comment(root.id, f"❌ Chưa merge được, nhánh chính giữ nguyên. {reason}", author_kind="system", author_id=None)
-        else:
-            await office.stages.external_passed(root.id, "merge", by=by, note=f"đã merge {result['commit']} vào {result['main']}")
+            try:
+                result = await self.merge(root.key, by=by)
+            except MergeRecordError as exc:
+                result = exc.result  # main holds the merge: still pass the gate
+                await self._say(root, f"⚠️ {exc}")
+            except Exception as exc:
+                if not isinstance(exc, OfficeError):
+                    log.exception("merge of %s crashed", root.key)
+                reason = str(exc) if isinstance(exc, OfficeError) else f"lỗi không lường trước: {type(exc).__name__}: {exc}"
+                await self._say(root, f"❌ Chưa merge được, nhánh chính giữ nguyên. {reason}")
+                return
+            try:
+                await office.stages.external_passed(root.id, "merge", by=by, note=f"đã merge {result['commit']} vào {result['main']}")
+            except Exception as exc:
+                log.exception("merge gate of %s", root.key)
+                await self._say(root, f"⚠️ Đã merge {result['commit']} vào {result['main']} nhưng chưa qua được cổng merge ({type(exc).__name__}: {exc}). "
+                                      "Bấm \"PR đã merge\" để đi tiếp.")
         finally:
             self._jobs.pop(root.key, None)
             with contextlib.suppress(Exception):
                 office.bus.publish("ticket.updated", ticket=(await office.tickets.get(root.id)).model_dump())
+
+    async def _say(self, root: Ticket, text: str) -> None:
+        try:
+            await self.office.tickets.add_comment(root.id, text, author_kind="system", author_id=None)
+        except Exception:
+            log.exception("comment on %s: %s", root.key, text)
+
+    async def _refused(self, root: Ticket, project: Project, by: str, exc: MergeError) -> None:
+        """A check before merging failed: the reason goes to the timeline and the audit log, main is untouched."""
+        await self.office.audit.record("git:merge", "failed", ticket_id=root.id, target=f"{project.name}:{branch_name(root)}",
+                                       detail={"by": by, "reason": str(exc)[:1000]})
+        await self._say(root, f"❌ Chưa merge được, nhánh chính giữ nguyên. {exc}")
 
     def _lock(self, project: Project) -> asyncio.Lock:
         return self._locks.setdefault(str(Path(project.path or "")), asyncio.Lock())
@@ -198,11 +228,15 @@ class MergeService:
                 raise
         branch, main, commit = result["branch"], result["main"], result["commit"]
         tested = f"test `{result['tested']}` pass trên kết quả merge" if result["tested"] else "không có lệnh test, kết quả merge chưa được test"
-        await office.tickets.add_comment(root.id, f"Đã merge {branch} vào {main} ({commit}) bởi {await self._name(by)}; {tested}.",
-                                         author_kind="system", author_id=None)
-        await office.tickets.add_work_product(root.id, "merge", commit, {"note": f"{branch} → {main}", "sha": result["sha"]})
-        await office.audit.record("git:merge", "merged", ticket_id=root.id, target=f"{project.name}:{branch}",
-                                  detail={"commit": commit, "by": by, "tested": result["tested"]})
+        try:
+            await office.tickets.add_comment(root.id, f"Đã merge {branch} vào {main} ({commit}) bởi {await self._name(by)}; {tested}.",
+                                             author_kind="system", author_id=None)
+            await office.tickets.add_work_product(root.id, "merge", commit, {"note": f"{branch} → {main}", "sha": result["sha"]})
+            await office.audit.record("git:merge", "merged", ticket_id=root.id, target=f"{project.name}:{branch}",
+                                      detail={"commit": commit, "by": by, "tested": result["tested"]})
+        except Exception as exc:
+            log.exception("recording the merge of %s", root.key)
+            raise MergeRecordError(f"Đã merge {branch} vào {main} ({commit}) nhưng chưa ghi được vào ticket: {type(exc).__name__}: {exc}", result) from exc
         office.bus.publish("ticket.document", ticket_id=root.id, key="merge", revision=0)
         return result
 

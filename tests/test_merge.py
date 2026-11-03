@@ -364,6 +364,44 @@ async def test_dirty_project_folder_is_refused_before_starting(office: Office, t
     with pytest.raises(MergeError, match="chưa commit"):
         await office.merges.start(root.key, by="user")
     assert not (await office.merges.panel(root.key))["running"]
+    text = await comments(office, root)
+    assert "Chưa merge được" in text and "chưa commit" in text  # BR-7: the reason is on the timeline
+    audit = await office.db.fetchall("SELECT outcome, detail_json FROM audit_log WHERE action = 'git:merge'")
+    assert [a["outcome"] for a in audit] == ["failed"] and "chưa commit" in audit[0]["detail_json"]
+
+
+async def test_failure_after_main_moved_is_not_reported_as_main_unchanged(office: Office, tmp_path: Path, monkeypatch) -> None:
+    root, repo, ws = await at_pr(office, tmp_path)
+    tip = commit(ws, {"leave.py": "x = 1\n"}, "leave")
+
+    async def broken(*_a, **_k) -> None:
+        raise RuntimeError("db is gone")
+
+    monkeypatch.setattr(office.tickets, "add_work_product", broken)
+    await office.merges.start(root.key, by="user")
+    await office.merges.wait(root.key)
+
+    assert tip in git(repo, "rev-list", "main")
+    text = await comments(office, root)
+    assert "chưa ghi được vào ticket" in text and "nhánh chính giữ nguyên" not in text
+    assert (await office.tickets.get(root.id)).stage != "pr"  # main holds the merge: the gate still passes
+
+
+async def test_gate_failure_after_merge_is_reported(office: Office, tmp_path: Path, monkeypatch) -> None:
+    root, repo, ws = await at_pr(office, tmp_path)
+    tip = commit(ws, {"leave.py": "x = 1\n"}, "leave")
+
+    async def broken(*_a, **_k) -> None:
+        raise RuntimeError("gate broke")
+
+    monkeypatch.setattr(office.stages, "external_passed", broken)
+    await office.merges.start(root.key, by="user")
+    await office.merges.wait(root.key)
+
+    assert tip in git(repo, "rev-list", "main")
+    text = await comments(office, root)
+    assert "chưa qua được cổng merge" in text and "PR đã merge" in text
+    assert not (await office.merges.panel(root.key))["running"]
 
 
 async def test_leftover_scratch_worktree_is_cleaned_up(office: Office, tmp_path: Path) -> None:

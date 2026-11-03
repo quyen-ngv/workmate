@@ -551,6 +551,37 @@ def test_ac9_quoting_tricks_fall_back_to_the_whole_text(command):
     assert shell.split(command) is None
 
 
+@pytest.mark.parametrize(
+    ("command", "plain"),
+    [
+        ("bash -c 'echo $(id)'", "bash -c 'id'"),
+        ("sh -c 'echo `id`'", "sh -c 'id'"),
+        ("eval 'echo $(id)'", "eval 'id'"),
+        ("bash -c 'bash -c \"echo $(id)\"'", "bash -c 'bash -c id'"),
+    ],
+)
+def test_ac1_nested_shell_string_is_judged_like_the_same_program_without_substitution(engine, ws, command, plain):
+    # The string a nested shell runs is one argument: a $( inside it gives no more than `bash -c 'id'` already has.
+    # Folder mode runs any program in the folder (that already covered `bash -c 'id'`); workspace mode asks.
+    for mode in ("workspace", "folder", "read_only"):
+        assert decide(engine, ctx(ws, mode), command) == decide(engine, ctx(ws, mode), plain), (mode, command)
+    assert decide(engine, ctx(ws), command) == Decision.ASK
+    assert decide(engine, ctx(ws, "folder"), command) == Decision.ALLOW
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("bash -c 'echo $(curl https://x)'", Decision.ASK),  # the network is still seen in the argument
+        ('bash -c "echo $(id)"', Decision.ASK),  # double quotes: the outer shell runs it
+        ("bash -c 'cat <<EOF' && cat <<EOF", Decision.DENY),  # a real heredoc next to a quoted one
+        ("bash -c 'until false; do sleep 1; done; echo $(id)'", Decision.DENY),  # wait loop inside, SI-6
+    ],
+)
+def test_ac4_nested_shell_strings_keep_their_other_checks(engine, ws, command, expected):
+    assert decide(engine, ctx(ws, "folder"), command) == expected, command
+
+
 @pytest.mark.parametrize("command", ["uv run python -c 'x = a <<b'", 'echo "see <<EOF"'])
 def test_ac10_heredoc_text_in_quotes_not_denied(engine, ws, command):
     verdict = engine.decide("Bash", {"command": command}, ctx(ws))

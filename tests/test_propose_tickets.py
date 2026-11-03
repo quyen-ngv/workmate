@@ -193,6 +193,53 @@ async def test_ac7_drop_all_from_ticket_comments_on_source(office: Office) -> No
     assert any("Đã bỏ đề xuất 3 ticket" in c.body for c in await office.tickets.comments(source.id))
 
 
+async def test_ac3_failed_start_leaves_ticket_in_backlog(office: Office, monkeypatch) -> None:
+    from actoroffice.services.stages import StageError
+
+    async def broken(*_a: Any, **_k: Any) -> Any:
+        raise StageError("không có mẫu")
+
+    card, _dm = await propose_from_chat(office)
+    monkeypatch.setattr(office.stages, "start", broken)
+    resolved = await office.answer(card.id, {"approved": True}, by="user")
+    t1 = await office.tickets.get(resolved.response["created"][0])
+    assert (t1.status, t1.stage) == (S.BACKLOG, None)  # still reachable: "Bắt đầu" in the Backlog list
+    assert t1.key in [b["ticket"] for b in (await office.proposals.backlog())[1]]
+    assert any(t1.key in e for e in resolved.response["errors"])
+    with pytest.raises(StageError):
+        await office.proposals.start_backlog(t1.key, by="user")
+    assert (await office.tickets.get(t1.id)).status == S.BACKLOG
+
+
+async def test_ac13_start_backlog_twice_starts_once(office: Office) -> None:
+    import asyncio
+
+    card, _dm = await propose_from_chat(office)
+    await office.answer(card.id, {"approved": True}, by="user")
+    key = (await office.interactions.get(card.id)).response["created"][2]
+    results = await asyncio.gather(*(office.proposals.start_backlog(key, by="user") for _ in range(2)), return_exceptions=True)
+    assert sorted(type(r).__name__ for r in results) == ["Conflict", "Ticket"]
+
+
+async def test_ac9_failed_item_still_records_created_and_audit(office: Office, monkeypatch) -> None:
+    card, dm = await propose_from_chat(office)
+    real = office.tickets.create
+    calls = {"n": 0}
+
+    async def flaky(*a: Any, **k: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("ổ đĩa đầy")
+        return await real(*a, **k)
+
+    monkeypatch.setattr(office.tickets, "create", flaky)
+    resolved = await office.answer(card.id, {"approved": True}, by="user")
+    assert len(resolved.response["created"]) == 2
+    assert any("mục 2: không tạo được" in e for e in resolved.response["errors"])
+    assert (await audit(office))[-1]["created"] == resolved.response["created"]
+    assert any("Đã tạo 2 ticket" in m.body for m in await office.chat.messages(dm))
+
+
 # ---- AC-8, AC-9: who approves, audit ---------------------------------------------------------------------
 
 

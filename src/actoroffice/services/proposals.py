@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from actoroffice.domain.chat import MessageKind
 from actoroffice.domain.errors import Conflict, NotFound, OfficeError, PolicyDenied
+from actoroffice.domain.ids import utcnow
 from actoroffice.domain.team import LOCAL_OWNER_ID
 from actoroffice.domain.work import Interaction, InteractionKind, Priority, Ticket, TicketStatus
 
@@ -227,62 +228,83 @@ class ProposalService:
         return chosen, dropped
 
     async def _create(self, item: Interaction, chosen: list[dict[str, Any]], dropped: list[int]) -> tuple[dict[int, Ticket], list[str]]:
-        """Create every ticket first (in order, so keys grow with the list), then start the "run now" ones: a failed
-        start is reported, never loses a ticket already created."""
-        office = self.office
+        """Create every ticket first, in `backlog` (in order, so keys grow with the list), then start the "run now"
+        ones. The card is already resolved: an item that fails is reported in `errors`, never stops the others, so
+        the response, the audit and the notice always list what was created."""
         p = item.payload
         titles = {int(it["n"]): it["title"] for it in p.get("items") or []}
         origin = p.get("source_ticket") or "chat"
         created: dict[int, Ticket] = {}
         errors: list[str] = []
         for it in chosen:
-            blockers = [created[d].id for d in it["depends_on"] if d in created]
-            for key in it.get("blocked_by") or []:
-                try:
-                    blockers.append((await office.tickets.get(key)).id)
-                except NotFound:
-                    errors.append(f"mục {it['n']}: ticket {key} không còn, bỏ phụ thuộc")
-            notes = [f'Bỏ phụ thuộc vào "{titles.get(d, d)}" (không được chọn).' for d in it["depends_on"] if d in dropped]
-            body = "\n\n".join(
-                x for x in (it["description"], f"**Vì sao:** {it['why']}" if it.get("why") else "", f"_Đề xuất từ {origin} bởi {p.get('proposed_by')}._", "\n".join(notes)) if x
-            )
-            team_id = p.get("team_id")
-            if not team_id and it.get("project_id"):
-                try:
-                    team_id = (await office.projects.get(it["project_id"])).team_id
-                except NotFound:
-                    team_id = None
-            ticket = await office.tickets.create(
-                it["title"],
-                description=body,
-                type="task",
-                project_id=it.get("project_id"),
-                priority=Priority(it.get("priority") or "medium"),
-                created_by=str(p.get("proposed_by") or "user"),
-                status=S.TODO if it["run_now"] else S.BACKLOG,
-                blocked_by=blockers,
-            )
-            # backlog: the suggested workflow waits in stage_template until "Bắt đầu" (stage stays NULL)
-            await office.db.execute("UPDATE tickets SET stage_template = ?, team_id = ? WHERE id = ?", (it["workflow"], team_id, ticket.id))
-            created[int(it["n"])] = await office.tickets.get(ticket.id)
+            n = int(it["n"])
+            try:
+                created[n] = await self._create_one(it, p, origin, titles, dropped, created, errors)
+            except Exception as exc:  # e.g. the project was removed after the proposal
+                log.exception("could not create proposed ticket %s of %s", n, item.id)
+                errors.append(f"mục {n}: không tạo được ({exc})")
         for it in chosen:
-            ticket = created[int(it["n"])]
-            if not it["run_now"]:
+            ticket = created.get(int(it["n"]))
+            if ticket is None or not it["run_now"]:
                 continue
             try:
-                await self._run(ticket, it["workflow"], by="proposal")
-                created[int(it["n"])] = await office.tickets.get(ticket.id)
-            except OfficeError as exc:
+                created[int(it["n"])] = await self._start(ticket.id, it["workflow"], by="proposal")
+            except Exception as exc:
                 log.warning("could not start %s: %s", ticket.key, exc)
-                errors.append(f"{ticket.key}: chưa chạy được quy trình ({exc})")
+                errors.append(f"{ticket.key}: chưa chạy được quy trình, vẫn ở Backlog ({exc})")
         return created, errors
 
-    async def _run(self, ticket: Ticket, workflow: str, *, by: str) -> Ticket:
-        """Start the workflow; a ticket with an open blocker waits in `blocked` and runs when the blocker closes."""
+    async def _create_one(
+        self, it: dict[str, Any], p: dict[str, Any], origin: str, titles: dict[int, str], dropped: list[int], created: dict[int, Ticket], errors: list[str]
+    ) -> Ticket:
         office = self.office
-        if await office.tickets.open_blockers(ticket.id) and ticket.status != S.BLOCKED:
-            ticket = await office.tickets.transition(ticket.id, S.BLOCKED, by=by)
-        return await office.stages.start(ticket.id, template=workflow, by=by, team_id=ticket.team_id)
+        blockers = [created[d].id for d in it["depends_on"] if d in created]
+        for d in it["depends_on"]:
+            if d not in created and d not in dropped:
+                errors.append(f"mục {it['n']}: mục {d} không tạo được, bỏ phụ thuộc")
+        for key in it.get("blocked_by") or []:
+            try:
+                blockers.append((await office.tickets.get(key)).id)
+            except NotFound:
+                errors.append(f"mục {it['n']}: ticket {key} không còn, bỏ phụ thuộc")
+        notes = [f'Bỏ phụ thuộc vào "{titles.get(d, d)}" (không được chọn).' for d in it["depends_on"] if d in dropped]
+        body = "\n\n".join(
+            x for x in (it["description"], f"**Vì sao:** {it['why']}" if it.get("why") else "", f"_Đề xuất từ {origin} bởi {p.get('proposed_by')}._", "\n".join(notes)) if x
+        )
+        team_id = p.get("team_id")
+        if not team_id and it.get("project_id"):
+            team_id = (await office.projects.get(it["project_id"])).team_id
+        ticket = await office.tickets.create(
+            it["title"],
+            description=body,
+            type="task",
+            project_id=it.get("project_id"),
+            priority=Priority(it.get("priority") or "medium"),
+            created_by=str(p.get("proposed_by") or "user"),
+            status=S.BACKLOG,
+            blocked_by=blockers,
+        )
+        # the suggested workflow waits in stage_template until it starts (stage stays NULL until then)
+        await office.db.execute("UPDATE tickets SET stage_template = ?, team_id = ? WHERE id = ?", (it["workflow"], team_id, ticket.id))
+        return await office.tickets.get(ticket.id)
+
+    async def _start(self, ticket_id: int, workflow: str, *, by: str) -> Ticket:
+        """Take a backlog ticket (atomic: two clicks cannot both start it) and start its workflow; an open blocker
+        makes it wait in `blocked`. When the start fails, the ticket goes back to the Backlog list to be retried."""
+        office = self.office
+        cur = await office.db.execute(
+            "UPDATE tickets SET status = 'todo', updated_at = ? WHERE id = ? AND status = 'backlog' AND stage IS NULL", (utcnow(), ticket_id)
+        )
+        if cur.rowcount != 1:
+            raise Conflict(f"{(await office.tickets.get(ticket_id)).key} không nằm trong Backlog")
+        try:
+            if await office.tickets.open_blockers(ticket_id):
+                await office.tickets.transition(ticket_id, S.BLOCKED, by=by)
+            return await office.stages.start(ticket_id, template=workflow, by=by)
+        except Exception:
+            await office.db.execute("UPDATE tickets SET status = 'backlog', updated_at = ? WHERE id = ? AND stage IS NULL", (utcnow(), ticket_id))
+            office.bus.publish("ticket.updated", ticket=(await office.tickets.get(ticket_id)).model_dump())
+            raise
 
     async def _announce(self, item: Interaction, text: str, *, keys: list[str] | None = None) -> None:
         office = self.office
@@ -317,10 +339,7 @@ class ProposalService:
         """The "Bắt đầu" button: run the suggested workflow (code when none); still blocked → `blocked` (A-3)."""
         office = self.office
         ticket = await office.tickets.get(ref)
-        if ticket.status != S.BACKLOG or ticket.stage:
-            raise Conflict(f"{ticket.key} không nằm trong Backlog")
         workflow = ticket.stage_template or "code"
-        ticket = await office.tickets.transition(ticket.id, S.TODO, by=by)
-        ticket = await self._run(ticket, workflow, by=by)
+        ticket = await self._start(ticket.id, workflow, by=by)
         await office.audit.record("tickets:backlog", "started", ticket_id=ticket.id, target=ticket.key, detail={"by": by, "workflow": workflow})
         return ticket

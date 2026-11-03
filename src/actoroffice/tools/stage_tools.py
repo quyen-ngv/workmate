@@ -8,23 +8,13 @@ import json
 import re
 from typing import Any
 
+from actoroffice.domain.dossier import DOSSIER_SECTIONS, SYNC_SECTION, keep_sync_line, parse_dossier, render_dossier
 from actoroffice.domain.errors import OfficeError
 from actoroffice.domain.team import ROLE_VI
 from actoroffice.domain.work import InteractionKind
 
 from .registry import ToolCtx, ToolDef, ToolError, schema
 
-DOSSIER_SECTIONS = {
-    "context": "Bối cảnh",
-    "requirements": "Yêu cầu & AC",
-    "qa": "Hỏi đáp",
-    "decisions": "Quyết định",
-    "technical": "Kỹ thuật",
-    "access": "Truy cập môi trường",
-    "tests": "Kiểm thử",
-    "deviations": "Lệch kế hoạch",
-    "links": "Liên kết",
-}
 ROLE_CHOICES = ["ba", "dev", "qe", "lead", "owner"]
 
 
@@ -192,7 +182,9 @@ async def dossier_update(args: dict[str, Any], ctx: ToolCtx) -> str:
     for _ in range(3):  # optimistic revisions: retry when someone else just wrote
         doc = await office.tickets.get_document(ctx.ticket_id, "dossier")
         sections = parse_dossier(doc.body if doc else "")
-        sections[section] = body + (("\n\n_Nguồn: " + "; ".join(sources) + "_") if sources else "")
+        text = body + (("\n\n_Nguồn: " + "; ".join(sources) + "_") if sources else "")
+        # The office's "Đã cập nhật theo <main> …" line survives the AI rewriting the tests section (SI-21)
+        sections[section] = keep_sync_line(sections.get(section, ""), text) if section == SYNC_SECTION else text
         try:
             saved = await office.tickets.put_document(
                 ctx.ticket_id, "dossier", render_dossier(sections), author=ctx.actor.name, base_revision=doc.revision if doc else None
@@ -201,33 +193,6 @@ async def dossier_update(args: dict[str, Any], ctx: ToolCtx) -> str:
             continue
         return f"Dossier section '{section}' saved (revision {saved.revision})."
     raise ToolError("The dossier keeps changing; read it again and retry.")
-
-
-def parse_dossier(text: str) -> dict[str, str]:
-    by_title = {v.lower(): k for k, v in DOSSIER_SECTIONS.items()}
-    sections: dict[str, str] = {}
-    current: str | None = None
-    buf: list[str] = []
-    for line in text.splitlines():
-        m = re.match(r"^##\s+(.+?)\s*$", line)
-        if m and (m.group(1).lower() in by_title or m.group(1).lower() in DOSSIER_SECTIONS):
-            if current:
-                sections[current] = "\n".join(buf).strip()
-            current = by_title.get(m.group(1).lower(), m.group(1).lower())
-            buf = []
-        elif current:
-            buf.append(line)
-    if current:
-        sections[current] = "\n".join(buf).strip()
-    return sections
-
-
-def render_dossier(sections: dict[str, str]) -> str:
-    parts = ["# Dossier"]
-    for key, title in DOSSIER_SECTIONS.items():
-        if sections.get(key, "").strip():
-            parts.append(f"## {title}\n\n{sections[key].strip()}")
-    return "\n\n".join(parts) + "\n"
 
 
 async def plan_deviation(args: dict[str, Any], ctx: ToolCtx) -> str:

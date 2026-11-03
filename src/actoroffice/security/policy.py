@@ -91,17 +91,27 @@ def office_tool(tool: str) -> str | None:
 SHELL_CHAINING = re.compile(r"[;&|<>`]|\$\(|\r|\n")
 # File content authored inside the command: a heredoc, or cat/echo/printf/tee redirected into a file.
 # (Saving a program's output, `uv run x.py > out.txt`, is not this; it goes through normal approval.)
-SHELL_FILE_WRITE = re.compile(
-    # heredoc at the start of a word (not `1<<3` inside an expression)
-    r"(?:^|[\s;&|(])<<-?\s*['\"]?[A-Za-z_]\w*"
+# heredoc at the start of a word (not `1<<3` inside an expression)
+_HEREDOC = r"(?:^|[\s;&|(])<<-?\s*['\"]?[A-Za-z_]\w*"
+_FILE_REDIRECT = (
     # cat/echo/printf redirected into a file (outside quotes, not 2>&1, >/dev/null, > nul, > $null)
-    r"|\b(?:cat|echo|printf)\b[^|;&\"'>]*(?:\"[^\"]*\"|'[^']*'|[^|;&\"'>])*?(?<![0-9&>])1?>>?(?!>)\s*"
+    r"\b(?:cat|echo|printf)\b[^|;&\"'>]*(?:\"[^\"]*\"|'[^']*'|[^|;&\"'>])*?(?<![0-9&>])1?>>?(?!>)\s*"
     r"(?!&|/dev/null\b|nul\b|\$null\b)[\w./\\~-]"
     r"|\btee\s+(?:-a\s+)?(?!/dev/null)[\w./\\~-]"
     r"|\b(?:Set-Content|Add-Content|Out-File)\b"
-    r"|\bsed\s+(?:-[a-zA-Z]*i\b|--in-place)|\bperl\s+-[a-zA-Z]*i",
-    re.IGNORECASE,
+    r"|\bsed\s+(?:-[a-zA-Z]*i\b|--in-place)|\bperl\s+-[a-zA-Z]*i"
 )
+SHELL_HEREDOC = re.compile(_HEREDOC, re.IGNORECASE)
+SHELL_FILE_REDIRECT = re.compile(_FILE_REDIRECT, re.IGNORECASE)
+SHELL_FILE_WRITE = re.compile(f"{_HEREDOC}|{_FILE_REDIRECT}", re.IGNORECASE)
+
+
+def writes_file(command: str, dialect: str = "sh") -> bool:
+    """The command authors file content (SHELL_FILE_WRITE). In sh a `<<` that is only text (quoted or escaped,
+    shell.specials_are_text) is no heredoc; PowerShell is judged on the whole text."""
+    if SHELL_FILE_REDIRECT.search(command):
+        return True
+    return bool(SHELL_HEREDOC.search(command)) and (dialect != "sh" or shell.specials_are_text(command) is not True)
 
 WAIT_LOOP_REASON = (
     "Do not run a command in the background and wait for it with a sleep loop (until/while … sleep): it waits forever "
@@ -232,7 +242,7 @@ class PolicyEngine:
         policy = ctx.position.policy
         if any(fnmatch.fnmatchcase(cmd, pat) for pat in policy.bash_deny):
             return Verdict(Decision.DENY, Risk.EXEC, "command is denied for this position")
-        if SHELL_FILE_WRITE.search(cmd):
+        if writes_file(cmd, dialect):
             # Writing files through the shell skips the workspace checks of Write/Edit and needs a human click
             # every time; steer the actor to the right tool instead of asking the user.
             return Verdict(
@@ -246,7 +256,7 @@ class PolicyEngine:
             # not an ask: the reason reaches the actor, and no mode or rule can let it through.
             return Verdict(Decision.DENY, Risk.EXEC, WAIT_LOOP_REASON)
         if ctx.workspace is not None and not cmd.lower().startswith(("powershell", "pwsh")):
-            judged = self._chain(cmd, ctx)
+            judged = self._chain(cmd, ctx, dialect)
             if judged is not None:
                 return judged
         chained = bool(SHELL_CHAINING.search(cmd))
@@ -259,9 +269,9 @@ class PolicyEngine:
         reason = "chained/redirected shell command needs approval" if chained else "shell command needs approval"
         return Verdict(_decision(policy.exec_default, allow_means_ask=chained), Risk.EXEC, reason)
 
-    def _chain(self, cmd: str, ctx: ToolCallContext) -> Verdict | None:
+    def _chain(self, cmd: str, ctx: ToolCallContext, dialect: str = "sh") -> Verdict | None:
         """Judge each command of a chain on its own (None: the line could not be split)."""
-        parts = shell.split(cmd)
+        parts = shell.split(cmd, dialect)
         if parts is None:
             return None
         place = shell.Place(ctx.workspace, self._read_dirs(ctx), self.protected)

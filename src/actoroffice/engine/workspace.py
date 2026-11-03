@@ -15,6 +15,7 @@ from pathlib import Path
 
 from actoroffice.domain.org import Position, WorkspaceKind
 from actoroffice.domain.work import Project, ProjectAccess, Ticket
+from actoroffice.security.shell import TICKET_TMP
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,25 @@ def ticket_env(ticket: Ticket, project: Project | None) -> dict[str, str]:
         if re.fullmatch(r"[A-Z][A-Z0-9_]{1,40}", str(name)):
             env[str(name)] = str(base + i)
     return env
+
+
+async def ticket_tmp(workspace: Path) -> dict[str, str]:
+    """TMPDIR/TEMP/TMP of a run: a temp folder inside the workspace (the policy lets the actor write there without
+    a click, /tmp would ask). In a git checkout it goes to info/exclude once, so it is never committed."""
+    tmp = workspace / TICKET_TMP
+    tmp.mkdir(parents=True, exist_ok=True)
+    if (workspace / ".git").exists():
+        code, out = await _git(workspace, "rev-parse", "--git-path", "info/exclude", check=False)
+        if code == 0 and out.strip():
+            exclude = workspace / out.strip()
+            lines = exclude.read_text(encoding="utf-8", errors="replace").splitlines() if exclude.is_file() else []
+            if f"{TICKET_TMP}/" not in (line.strip() for line in lines):
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                prefix = "\n" if lines and not exclude.read_bytes().endswith(b"\n") else ""
+                with exclude.open("a", encoding="utf-8") as f:
+                    f.write(f"{prefix}{TICKET_TMP}/\n")
+    value = str(tmp)
+    return {"TMPDIR": value, "TEMP": value, "TMP": value}
 
 
 async def cleanup_ticket(ticket: Ticket, workspace: Path) -> None:

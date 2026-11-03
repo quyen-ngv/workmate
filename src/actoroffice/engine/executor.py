@@ -30,7 +30,7 @@ from actoroffice.tools.work_tools import CHAT_WORK_TOOLS, WORK_TOOLS
 from . import context, prompt_pack
 from .gate import OfficeGate
 from .watchdog import Watchdog
-from .workspace import ticket_env
+from .workspace import ticket_env, ticket_tmp
 
 TICKET_TOOLS = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS + [PROPOSE_TICKETS]  # every ticket run (stage tools added on top)
 
@@ -163,6 +163,7 @@ class Executor:
                 env={
                     **self._env(actor, position),
                     **ticket_env(ticket, project),
+                    **(await ticket_tmp(ws.path)),
                     **(await office.access.env_for(ticket.id) if stage_run is not None else {}),
                 },
                 mcp_servers=mcp_servers,

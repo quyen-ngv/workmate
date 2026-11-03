@@ -136,6 +136,8 @@ Goal: the change the approved plan describes, checked and committed.
 - Add or update a test when that area has tests; for a UI or CSS change say how a person checks it.
 - After a few edits of one file, run a syntax check (e.g. `node --check`, `python -m py_compile`) or its related
   tests before editing on.
+- Temp files: use $TMPDIR (the ticket's temp folder, never committed), not /tmp: writing outside the workspace
+  needs a click.
 - For each AC tagged [ui] take a screenshot with ui_screenshot (ac = its id, a caption, actions to reach the
   state). If the environment cannot take it (the tool records its error), write the line
   "AC-n: không chụp được: <lý do>" in a short `handoff` document (doc_put); people see it before the merge.
@@ -154,6 +156,8 @@ Goal: working, tested changes that follow the approved plan.
   deviation with plan_deviation (major=true when it changes scope, design or risk).
 - After a few edits of one file, run a syntax check (e.g. `node --check`, `python -m py_compile`) or its related
   tests before editing on.
+- Temp files: use $TMPDIR (the ticket's temp folder, never committed), not /tmp: writing outside the workspace
+  needs a click.
 - Commit with clear messages. Do not push to the main branch.
 - Write the document `handoff`: what changed, how to run, how to test, AC → test map, known limits.
 - An AC tagged [review] needs no test, but the AC table of the `handoff` must have a line with its id saying how

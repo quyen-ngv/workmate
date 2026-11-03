@@ -90,6 +90,23 @@ RANGE = re.compile(r"[\d,;$p]+")  # numbers and sed-style ranges (195,260p)
 GLOB = re.compile(r"[*?\[]")
 GIT_BASH_DRIVE = re.compile(r"^/([a-zA-Z])(/|$)")
 
+# The ticket's temp folder (TMPDIR/TEMP/TMP of a run): inside the workspace, so writing there needs no click.
+TICKET_TMP = ".ao-tmp"
+_TMP_NAMES = r"(?:TMPDIR|TEMP|TMP)"
+# A word that starts with the temp variable: $TMPDIR/x, ${TEMP}\x (sh), $env:TEMP\x (PowerShell).
+TMP_PREFIX = {
+    "sh": re.compile(rf"^\$(?:\{{{_TMP_NAMES}\}}|{_TMP_NAMES}(?!\w))(?=[/\\]|$)"),
+    "ps": re.compile(rf"^\$env:{_TMP_NAMES}(?=[/\\]|$)", re.IGNORECASE),
+}
+# Every way a command may read the variable; any other mention of the name (TMPDIR=…, export TMP, unset,
+# $env:TEMP = …, a quoted or escaped use) means the value is not the one the office set.
+_TMP_READ = {
+    "sh": re.compile(rf"\$(?:\{{{_TMP_NAMES}\}}|{_TMP_NAMES}(?![\w=]))"),
+    "ps": re.compile(rf"\$env:{_TMP_NAMES}(?![\w=]|\s*=)", re.IGNORECASE),
+}
+_TMP_LITERAL = re.compile(rf"(?:'[^']*|\\)\$(?:\{{|env:)?{_TMP_NAMES}", re.IGNORECASE)
+_TMP_MENTION = re.compile(rf"\b{_TMP_NAMES}\b", re.IGNORECASE)
+
 
 @dataclass
 class Command:
@@ -108,6 +125,18 @@ class Place:
     workspace: Path | None
     readable: list[Path]
     protected: list[Path]
+    tmp: Path | None = None  # what $TMPDIR / $TEMP / $TMP name (tmp_dir), None: they stay unknown
+    dialect: str = "sh"
+
+
+def tmp_dir(command: str, workspace: Path | None, dialect: str = "sh") -> Path | None:
+    """The ticket's temp folder when the command only reads TMPDIR/TEMP/TMP (so they hold what the office set);
+    None when it sets, unsets, quotes or escapes one of them, or names them any other way."""
+    if workspace is None or dialect not in _TMP_READ or _TMP_LITERAL.search(command):
+        return None
+    if _TMP_MENTION.search(_TMP_READ[dialect].sub(" ", command)):
+        return None
+    return workspace / TICKET_TMP
 
 
 def split(command: str, dialect: str = "sh") -> list[Command] | None:
@@ -404,7 +433,10 @@ def _paths(args: list[str], place: Place, cwd: Path | None, inside: Kind, why: s
 
 
 def resolve(raw: str, place: Place, cwd: Path | None) -> Path | None:
-    """The absolute path a shell word names (None when it depends on variables)."""
+    """The absolute path a shell word names (None when it depends on variables other than the temp folder)."""
+    prefix = TMP_PREFIX.get(place.dialect)
+    if place.tmp is not None and prefix is not None and (m := prefix.match(raw)):
+        raw = str(place.tmp) + raw[m.end() :]
     if "$" in raw or "%" in raw:
         return None
     text = os.path.expanduser(raw)

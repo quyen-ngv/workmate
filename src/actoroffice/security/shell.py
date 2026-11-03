@@ -81,6 +81,7 @@ GIT_NETWORK = {"push", "pull", "fetch", "clone", "ls-remote", "submodule", "remo
 
 SAFE_TARGETS = {"/dev/null", "nul", "NUL", "$null", "/dev/stdout", "/dev/stderr"}
 NOT_SPLITTABLE = re.compile(r"`|\$\(|<\(|>\(|<<")
+CONTINUATION = re.compile(r"\\[\r\n]")  # bash removes backslash-newline: `$\⏎(` is `$(`
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 OPERATORS = {"&&", "||", ";", "|", "&", "|&"}
 RANGE = re.compile(r"[\d,;$p]+")  # numbers and sed-style ranges (195,260p)
@@ -113,7 +114,7 @@ def split(command: str, dialect: str = "sh") -> list[Command] | None:
     see specials_are_text) do not count; PowerShell is judged on the whole text."""
     if dialect == "sh":
         literal = specials_are_text(command)
-        if literal is None or (not literal and NOT_SPLITTABLE.search(command)):
+        if literal is None or (not literal and (NOT_SPLITTABLE.search(command) or CONTINUATION.search(command))):
             return None
     elif NOT_SPLITTABLE.search(command):
         return None
@@ -164,8 +165,9 @@ def specials_are_text(command: str) -> bool | None:
     """Bash: True when every `$(`, backtick, `<<`, `<(`, `>(` in the command is only text: inside '…', escaped
     with `\\`, or (`<<`, `<(`, `>(` only) inside "…". False when one of them runs, or when the quoting is past what
     this scan follows (`${…}` and `$[…]` can hold quotes of their own, `#` starts a comment that hides a quote):
-    judge the whole text then. None when the line must never be split: an unclosed quote, or `$'…'` (ANSI-C
-    quoting, where `\\'` does not end the string)."""
+    judge the whole text then. None when the line must never be split: an unclosed quote, `$'…'` (ANSI-C
+    quoting, where `\\'` does not end the string), or a backslash-newline outside '…' (bash removes it, so
+    `$\\⏎(` is `$(`)."""
     i, n = 0, len(command)
     quote = ""
     while i < n:
@@ -174,6 +176,8 @@ def specials_are_text(command: str) -> bool | None:
             if ch == "'":
                 quote = ""
         elif ch == "\\":
+            if command[i + 1 : i + 2] in ("\n", "\r"):
+                return None  # bash drops backslash-newline, so `$\⏎(id)` is `$(id)`, which the whole text hides
             i += 2  # \$ \` \' \" \\ … (inside "…" a backslash before any other character is text, so is that one)
             continue
         elif ch == "`" or pair in ("$(", "${", "$["):

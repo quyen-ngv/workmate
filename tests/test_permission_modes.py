@@ -552,6 +552,33 @@ def test_ac9_quoting_tricks_fall_back_to_the_whole_text(command):
 
 
 @pytest.mark.parametrize(
+    "command",
+    [
+        # bash drops backslash-newline outside '…' (also inside "…"), so `$\⏎(id)` runs `id`
+        'uv run python -c "$\\\n(id)"',
+        "uv run python -c $\\\n(id)",
+        'uv run python -c "$\\\r\n(id)"',
+        'uv run python -c "a\\\n`id`"',
+        "uv run python -c a\\\n`id`",
+        'uv run python -c "\\\\\\\n$(id)"',
+        # the scan stops early at `${`/`#`, so the continuation behind it is checked on the whole text
+        'uv run python -c ${HOME} "$\\\n(id)"',
+        'uv run python -c $[1] "$\\\n(id)"',
+    ],
+)
+def test_ac9_line_continuation_is_never_split(engine, ws, command):
+    assert not shell.specials_are_text(command)
+    assert shell.split(command) is None
+    assert decide(engine, ctx(ws), command) == Decision.ASK
+
+
+def test_ac9_line_continuation_inside_single_quotes_is_text(engine, ws):
+    command = "uv run python -c '$\\\n(x)'"  # no continuation inside '…'
+    assert shell.specials_are_text(command) is True
+    assert decide(engine, ctx(ws), command) == Decision.ALLOW
+
+
+@pytest.mark.parametrize(
     ("command", "plain"),
     [
         ("bash -c 'echo $(id)'", "bash -c 'id'"),

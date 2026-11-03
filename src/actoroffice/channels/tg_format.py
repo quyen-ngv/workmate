@@ -144,6 +144,38 @@ def step_label(step: dict[str, Any]) -> str:
     return f"🤖 giao {step.get('actor', '')}: {step.get('prompt', '')}"
 
 
+def review_lines(items: list[dict[str, Any]], limit: int = 10, budget: int = LIMIT) -> str:
+    """Medium/high review findings of a gate card (payload `review`), shortened for Telegram."""
+    lines = []
+    for r in items[:limit]:
+        label = f" <i>({esc(r.get('label'))})</i>" if r.get("label") else ""
+        lines.append(
+            f"• <b>{esc(r.get('id'))}</b> [{esc(r.get('severity'))}] {esc(r.get('where'))} {esc(str(r.get('claim') or '')[:100])}"
+            f" → {esc(str(r.get('reply') or '')[:200])}{label}"
+        )
+    return fit_lines(lines, budget, len(items) - len(lines), "điểm")
+
+
+def fit_lines(lines: list[str], budget: int, hidden: int = 0, unit: str = "mục") -> str:
+    """Keep the first lines that fit in `budget` characters; the rest (plus `hidden` already left out) become
+    one "+N … khác" line, so a card never goes over Telegram's message limit."""
+
+    def more(n: int) -> str:
+        return f"<i>+{n} {unit} khác (xem trên web)</i>"
+
+    kept: list[str] = []
+    used = 0
+    for i, line in enumerate(lines):
+        left = len(lines) - i - 1 + hidden
+        reserve = len(more(left)) + 1 if left else 0
+        if used + len(line) + 1 + reserve > budget:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    dropped = len(lines) - len(kept) + hidden
+    return "\n".join(kept + ([more(dropped)] if dropped else []))
+
+
 def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
     """HTML text and inline keyboard for a pending decision. Callback data: "i:<interaction id>:<choice>"."""
     p = item.get("payload") or {}
@@ -187,19 +219,28 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
     if kind == "approve_stage":
         names = ", ".join(p.get("approver_names") or []) or str(p.get("roles_label") or "")
         icons = {"passed": "✅", "failed": "❌", "skipped": "⏭"}
-        checks = "\n".join(
-            f"{icons.get(c.get('status'), '•')} {esc(c.get('id'))}: {esc(str(c.get('summary', ''))[:120])}" for c in p.get("checks") or []
-        )
+        check_rows = [f"{icons.get(c.get('status'), '•')} {esc(c.get('id'))}: {esc(str(c.get('summary', ''))[:120])}" for c in p.get("checks") or []]
         docs = ", ".join(f"{esc(d['key'])} (rev {d['revision']})" for d in p.get("docs") or [])
+        items = p.get("review") or []
         approvals = p.get("approvals") or []
         need = int(p.get("min") or 1)
-        text = (
+        head = (
             f"✋ <b>{esc(p.get('ticket'))} · {esc(p.get('stage_title'))} xong — cần {esc(names)} duyệt</b>\n"
             f"<b>{esc(p.get('title'))}</b>\n{md_to_html(str(p.get('summary') or '')[:1500])}"
             + (f"\n\n<b>Tài liệu:</b> {docs}" if docs else "")
+        )
+        tail = (f"\n<b>Duyệt kèm quyền môi trường:</b> {esc(', '.join(p.get('access') or []))}" if p.get("access") else "") + (
+            f"\n<i>Đã duyệt {len(approvals)}/{need}: {esc(', '.join(a.get('name', '') for a in approvals))}</i>" if need > 1 else ""
+        )
+        # Checks and review findings share what is left of the message; each keeps at least half when both are long.
+        room = max(0, LIMIT - len(head) - len(tail) - 200)
+        checks = fit_lines(check_rows, room // 2 if items else room, unit="check")
+        review = review_lines(items, budget=room - len(checks))
+        text = (
+            head
             + (f"\n<b>Kiểm tra:</b>\n{checks}" if checks else "")
-            + (f"\n<b>Duyệt kèm quyền môi trường:</b> {esc(', '.join(p.get('access') or []))}" if p.get("access") else "")
-            + (f"\n<i>Đã duyệt {len(approvals)}/{need}: {esc(', '.join(a.get('name', '') for a in approvals))}</i>" if need > 1 else "")
+            + (f"\n<b>Điểm review:</b>\n{review}" if review else "")
+            + tail
         )
         if p.get("gate") == "knowledge":
             items = "\n".join(esc(line) for line in p.get("kb") or []) or "(không có mục nào)"

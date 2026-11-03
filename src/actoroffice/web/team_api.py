@@ -173,6 +173,7 @@ def register(app: FastAPI, office: Office) -> None:
             "template": template.model_dump(),
             "stage_runs": [r.model_dump() for r in await office.stages.runs(ticket.id)],
             "participants": [m.model_dump() for m in await teams.participants(ticket.id)],
+            "review": await office.stages.last_review(ticket.id),
         }
 
     @app.get("/api/tickets/{key}/changes")

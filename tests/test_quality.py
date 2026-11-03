@@ -131,44 +131,457 @@ async def test_diff_checks_on_a_worktree(office: Office, runtime: FakeRuntime, t
     assert by_id["review_clean"]["status"] == "skipped" or by_id["review_clean"]["status"] == "passed"
 
 
-async def test_reviewer_findings_fail_the_check_for_two_rounds_then_go_to_people(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
-    project = await repo_project(office, tmp_path)
-    ticket_id = await build_ticket(office, project)
-    await office.db.execute("UPDATE tickets SET stage = 'build' WHERE id = ?", (ticket_id,))
-    outcomes: list[str] = []
-    high = '{"findings": [{"severity": "high", "file": "src/app.py", "line": 2, "claim": "VIP chưa có test", "evidence": "AC-2"}]}'
+def findings(*items: tuple[str, str], previous: list[dict] | None = None) -> str:
+    """A reviewer answer: (severity, claim) pairs on src/app.py, and verdicts on earlier findings."""
+    return json.dumps(
+        {"findings": [{"severity": s, "file": "src/app.py", "line": 2, "claim": c, "evidence": "AC-2"} for s, c in items], "previous": previous or []},
+        ensure_ascii=False,
+    )
 
-    def reviewer(text: str):
-        async def script(ctx: TurnCtx) -> TurnResult:
-            assert "strict, independent code reviewer" in ctx.spec.system_prompt and "def total" in ctx.spec.prompt
-            denied = await ctx.gate.before_tool("Bash", {"command": "rm -rf ."}, None)
-            assert denied.decision == GateDecision.DENY
-            return ok(ctx, text)
 
-        return script
+def reviewer(text: str, prompts: list[str] | None = None):
+    async def script(ctx: TurnCtx) -> TurnResult:
+        assert "strict, independent code reviewer" in ctx.spec.system_prompt and "def total" in ctx.spec.prompt
+        denied = await ctx.gate.before_tool("Bash", {"command": "rm -rf ."}, None)
+        assert denied.decision == GateDecision.DENY
+        if prompts is not None:
+            prompts.append(ctx.spec.prompt)
+        return ok(ctx, text)
 
-    async def work(ctx: TurnCtx) -> TurnResult:
-        (ctx.spec.cwd / "src" / "app.py").write_text("def total(x, vip=False):\n    return x * 2 if vip else x\n", encoding="utf-8")
-        await ctx.office("plan_steps", {"steps": ["code"]})
-        await ctx.office("step_done", {"index": 1})
-        for _ in range(3):
-            outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
-        return ok(ctx)
+    return script
 
-    # build stage template without the other diff checks for this test: only review_clean matters
+
+async def review_ticket(office: Office, tmp_path: Path) -> int:
+    """A ticket at the build stage of a template whose build only checks review_clean, then closes."""
     from actoroffice.domain.stage import StageDef, StageTemplate
     from actoroffice.domain.team import TeamSettings
 
-    team = await office.teams.create_team("T", settings=TeamSettings(stage_templates={"code": StageTemplate(name="code", stages=[StageDef(id="build", checks=["review_clean"]), StageDef(id="close")])}))
+    project = await repo_project(office, tmp_path)
+    ticket_id = await build_ticket(office, project)
+    stages = [StageDef(id="build", checks=["review_clean"]), StageDef(id="close")]
+    team = await office.teams.create_team("T", settings=TeamSettings(stage_templates={"code": StageTemplate(name="code", stages=stages)}))
     await office.db.execute("UPDATE tickets SET team_id = ? WHERE id = ?", (team.id, ticket_id))
-    runtime.scripts += [work, reviewer(high), reviewer(high)]
+    return ticket_id
+
+
+def change(ctx: TurnCtx) -> None:
+    (ctx.spec.cwd / "src" / "app.py").write_text("def total(x, vip=False):\n    return x * 2 if vip else x\n", encoding="utf-8")
+
+
+async def run_review(office: Office, runtime: FakeRuntime, ticket_id: int, work, *reviewers) -> None:
+    runtime.scripts += [work, *reviewers]
     await office.tickets.assign(ticket_id, (await office.ensure_ai()).id, by="user")
     await office.scheduler.wait_idle(timeout=30)
+
+
+async def review_check(office: Office, ticket_id: int) -> dict:
+    srun = [r for r in await office.stages.runs(ticket_id) if r.stage == "build"][-1]
+    return next(c for c in srun.checks if c["id"] == "review_clean")
+
+
+async def stored_review(office: Office, ticket_id: int) -> dict:
+    return [r for r in await office.stages.runs(ticket_id) if r.stage == "build"][-1].review
+
+
+async def reviewer_runs(office: Office) -> int:
+    row = await office.db.fetchone("SELECT COUNT(*) AS n FROM runs WHERE purpose = 'reviewer'")
+    return int(row["n"])
+
+
+async def test_reviewer_findings_fail_the_check_until_replied_and_stop_after_two_rounds(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    """Before SI-7 the third call passed by itself after two rounds; now it fails until the AI replies (BR-5)."""
+    ticket_id = await review_ticket(office, tmp_path)
+    outcomes: list[str] = []
+    high = findings(("high", "VIP chưa có test"))
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        for _ in range(3):
+            outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
+        await ctx.office("review_reply", {"id": "F1", "action": "fixed", "note": "thêm test VIP"})
+        await ctx.office("review_reply", {"id": "F2", "action": "wontfix", "note": "trùng F1"})
+        outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
+        return ok(ctx)
+
+    await run_review(office, runtime, ticket_id, work, reviewer(high), reviewer(high))
     assert "VIP chưa có test" in outcomes[0] and "review_clean" in outcomes[0]
-    assert "review_clean" in outcomes[1]  # second round still has a high finding
-    assert "Next stage: close" in outcomes[2]  # after two rounds it goes to people instead of looping
-    reviewer_runs = await office.db.fetchall("SELECT status FROM runs WHERE purpose = 'reviewer'")
-    assert [r["status"] for r in reviewer_runs] == ["succeeded", "succeeded"]
+    assert "review_clean" in outcomes[1] and "F2" in outcomes[1]  # second round still has a high finding
+    assert "review_clean" in outcomes[2] and "đã review 2 vòng" in outcomes[2]  # no third round, still failing
+    assert "Next stage: close" in outcomes[3]
+    statuses = await office.db.fetchall("SELECT status FROM runs WHERE purpose = 'reviewer'")
+    assert [r["status"] for r in statuses] == ["succeeded", "succeeded"]
+
+
+async def test_ac1_ids_are_stable_across_rounds(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    ticket_id = await review_ticket(office, tmp_path)
+    seen: list[list[str]] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        seen.append([f["id"] for f in (await stored_review(office, ticket_id))["findings"]])
+        await ctx.office("stage_complete", {"summary": "x"})
+        return ok(ctx)
+
+    first = findings(("high", "a"), ("medium", "b"), ("low", "c"))
+    await run_review(office, runtime, ticket_id, work, reviewer(first), reviewer(findings(("low", "d"))))
+    assert seen[0] == ["F1", "F2", "F3"]
+    stored = {f["id"]: f["claim"] for f in (await stored_review(office, ticket_id))["findings"]}
+    assert stored == {"F1": "a", "F2": "b", "F3": "c", "F4": "d"}
+    data_ids = {f["id"] for f in (await review_check(office, ticket_id))["data"]["findings"]}
+    assert data_ids == {"F1", "F2", "F3", "F4"}
+
+
+async def test_ac2_unanswered_medium_fails(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    ticket_id = await review_ticket(office, tmp_path)
+    outcomes: list[str] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
+        return ok(ctx)
+
+    await run_review(office, runtime, ticket_id, work, reviewer(findings(("medium", "thiếu kiểm tra số âm"))))
+    check = await review_check(office, ticket_id)
+    assert check["status"] == "failed"
+    assert "F1" in check["summary"] and "thiếu kiểm tra số âm" in check["summary"]
+    assert "cannot finish" in outcomes[0] and "F1 [medium] src/app.py:2 thiếu kiểm tra số âm" in outcomes[0]
+
+
+async def test_ac3_wontfix_reply_passes_after_rounds(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    ticket_id = await review_ticket(office, tmp_path)
+    outcomes: list[str] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
+        outcomes.append(await ctx.office("review_reply", {"id": "F1", "action": "wontfix", "note": "ngoài phạm vi, có backlog 02"}))
+        outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
+        return ok(ctx)
+
+    await run_review(office, runtime, ticket_id, work, reviewer(findings(("medium", "b"))), reviewer(findings()))
+    assert "Reply saved for F1" in outcomes[1]
+    assert "Next stage: close" in outcomes[2]
+    check = await review_check(office, ticket_id)
+    assert check["status"] == "passed"
+    assert check["summary"].startswith("0 high · 1 medium (0 đã sửa, 1 không sửa) · 0 low")
+
+
+async def test_ac4_review_reply_rejects_bad_input(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    from actoroffice.tools.registry import ToolError
+
+    ticket_id = await review_ticket(office, tmp_path)
+    errors: list[str] = []
+    before: list[dict] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        before.append(await stored_review(office, ticket_id))
+        for args in (
+            {"id": "F1", "action": "wontfix", "note": "  "},
+            {"id": "F9", "action": "fixed", "note": "x"},
+            {"id": "F1", "action": "ignore", "note": "x"},
+        ):
+            with pytest.raises(ToolError) as exc:
+                await ctx.office("review_reply", args)
+            errors.append(str(exc.value))
+        before.append(await stored_review(office, ticket_id))
+        await ctx.office("review_reply", {"id": "F1", "action": "fixed", "note": "đã thêm"})
+        await ctx.office("review_reply", {"id": "f1", "action": "wontfix", "note": "đổi ý: ngoài phạm vi"})
+        return ok(ctx)
+
+    await run_review(office, runtime, ticket_id, work, reviewer(findings(("medium", "b"))))
+    assert "reason" in errors[0] and "F9" in errors[1] and "F1" in errors[1] and "fixed, wontfix" in errors[2]
+    assert before[0] == before[1]  # nothing saved by the wrong calls
+    [f1] = (await stored_review(office, ticket_id))["findings"]
+    assert f1["reply"]["action"] == "wontfix" and f1["reply"]["note"] == "đổi ý: ngoài phạm vi"
+
+
+@pytest.mark.parametrize("verdict", ["still", "resolved"])
+async def test_ac5_fixed_is_rechecked(office: Office, runtime: FakeRuntime, tmp_path: Path, verdict: str) -> None:
+    ticket_id = await review_ticket(office, tmp_path)
+    outcomes: list[str] = []
+    prompts: list[str] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        await ctx.office("review_reply", {"id": "F1", "action": "fixed", "note": "thêm test"})
+        outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
+        return ok(ctx)
+
+    second = findings(previous=[{"id": "F1", "status": verdict, "note": "test vẫn không kiểm VIP"}])
+    await run_review(office, runtime, ticket_id, work, reviewer(findings(("medium", "b"))), reviewer(second, prompts))
+    assert "F1 [medium] src/app.py:2 b — engineer says fixed: thêm test → RE-CHECK" in prompts[0]
+    [f1] = (await stored_review(office, ticket_id))["findings"]
+    check = await review_check(office, ticket_id)
+    if verdict == "still":
+        assert f1["reply"] is None and f1["reopened"] and f1["reviewer_note"] == "test vẫn không kiểm VIP"
+        assert check["status"] == "failed" and "mở lại: test vẫn không kiểm VIP" in check["summary"]
+    else:
+        assert f1["reply"]["action"] == "fixed" and f1["verified"] and not f1["reopened"]
+        assert check["status"] == "passed" and "(1 đã sửa, 0 không sửa)" in check["summary"]
+        assert "Next stage: close" in outcomes[0]
+
+
+async def test_ac6_wontfix_not_rechecked(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    ticket_id = await review_ticket(office, tmp_path)
+    prompts: list[str] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        await ctx.office("review_reply", {"id": "F1", "action": "fixed", "note": "đã sửa"})
+        await ctx.office("review_reply", {"id": "F2", "action": "wontfix", "note": "người dùng đã chấp nhận"})
+        await ctx.office("stage_complete", {"summary": "x"})
+        return ok(ctx)
+
+    second = findings(previous=[{"id": "F1", "status": "resolved"}, {"id": "F2", "status": "still", "note": "vẫn còn"}])
+    await run_review(office, runtime, ticket_id, work, reviewer(findings(("medium", "a"), ("medium", "b"))), reviewer(second, prompts))
+    assert "F2 [medium] src/app.py:2 b — engineer will not fix: người dùng đã chấp nhận → do not re-check" in prompts[0]
+    by_id = {f["id"]: f for f in (await stored_review(office, ticket_id))["findings"]}
+    assert by_id["F2"]["reply"]["action"] == "wontfix" and not by_id["F2"]["reopened"] and by_id["F2"]["reviewer_note"] == ""
+    assert (await review_check(office, ticket_id))["status"] == "passed"
+
+
+async def test_ac7_after_max_rounds_no_reviewer_but_still_fails(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    ticket_id = await review_ticket(office, tmp_path)
+    outcomes: list[str] = []
+    runs_seen: list[int] = []
+    checks: list[dict] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        for fid in ("F1", "F2", "F3"):
+            await ctx.office("review_reply", {"id": fid, "action": "wontfix", "note": "lý do"})
+        await ctx.office("stage_complete", {"summary": "x"})  # round 2 adds F4
+        outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
+        runs_seen.append(await reviewer_runs(office))
+        checks.append(await review_check(office, ticket_id))
+        await ctx.office("review_reply", {"id": "F4", "action": "fixed", "note": "đã sửa"})
+        outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
+        return ok(ctx)
+
+    first = findings(("medium", "a"), ("medium", "b"), ("high", "c"))
+    await run_review(office, runtime, ticket_id, work, reviewer(first), reviewer(findings(("medium", "d"))))
+    assert runs_seen == [2] and await reviewer_runs(office) == 2
+    assert checks[0]["status"] == "failed" and "F4 [medium] src/app.py:2 d" in checks[0]["summary"]
+    assert "F4" in outcomes[0] and "Next stage: close" in outcomes[1]
+    check = await review_check(office, ticket_id)
+    f4 = next(f for f in check["data"]["findings"] if f["id"] == "F4")
+    assert check["status"] == "passed" and f4["unverified"] is True
+
+
+def state_of(*items: tuple[str, str | None]) -> dict:
+    """Stored review state: (severity, reply action or None) per finding."""
+    rows = [
+        {"id": f"F{i}", "severity": s, "file": "a.py", "line": i, "claim": f"c{i}", "reply": {"action": a, "note": "n"} if a else None, "verified": False, "reopened": False}
+        for i, (s, a) in enumerate(items, 1)
+    ]
+    return {"next": len(rows) + 1, "findings": rows}
+
+
+def test_ac8_summary_counts_by_severity() -> None:
+    from actoroffice.services.review import evaluate
+
+    state = state_of(("medium", "fixed"), ("medium", "wontfix"), ("low", None), ("low", None), ("low", None))
+    result = evaluate(state, rounds=1)
+    assert result.status == "passed"
+    assert result.summary.startswith("0 high · 2 medium (1 đã sửa, 1 không sửa) · 3 low")
+    assert result.data["counts"] == {"high": 0, "medium": 2, "low": 3, "fixed": 1, "wontfix": 1, "open": 0}
+    open_one = evaluate(state_of(("high", None), ("medium", "fixed")), rounds=2)
+    assert open_one.status == "failed"
+    assert open_one.summary.startswith("1 high · 1 medium (1 đã sửa, 0 không sửa, 1 chưa trả lời) · 0 low; đã review 2 vòng")
+    assert "- F1 [high] a.py:1 c1" in open_one.summary
+
+
+def test_ac8_summary_lists_at_most_ten_open_findings() -> None:
+    from actoroffice.services.review import evaluate
+
+    result = evaluate(state_of(*[("medium", None)] * 12), rounds=1)
+    assert "- F10 " in result.summary and "- F11 " not in result.summary and "…và 2 điểm nữa" in result.summary
+
+
+def test_ac9_low_only_passes() -> None:
+    from actoroffice.services.review import evaluate
+
+    result = evaluate(state_of(("low", None), ("low", None)), rounds=1)
+    assert result.status == "passed" and result.summary.startswith("0 high · 0 medium (0 đã sửa, 0 không sửa) · 2 low")
+
+
+def test_ac5_apply_previous_ignores_wontfix_and_unanswered() -> None:
+    from actoroffice.services.review import apply_previous, assign_ids
+
+    state = state_of(("medium", "fixed"), ("medium", "wontfix"), ("medium", None))
+    apply_previous(state, [{"id": "f1", "status": "still", "note": "n1"}, {"id": "F2", "status": "still"}, {"id": "F3", "status": "resolved"}, {"id": "F7"}])
+    f1, f2, f3 = state["findings"]
+    assert f1["reply"] is None and f1["reopened"] and f1["reviewer_note"] == "n1"
+    assert f2["reply"]["action"] == "wontfix" and not f2["reopened"]
+    assert f3["reply"] is None and not f3["verified"]
+    assign_ids(state, [{"severity": "CRITICAL", "claim": "x"}, {"severity": "weird", "claim": "y"}], 2)
+    assert [(f["id"], f["severity"]) for f in state["findings"][3:]] == [("F4", "high"), ("F5", "medium")]
+
+
+async def test_ac10_gate_card_lists_review(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    from actoroffice.channels.tg_format import card
+
+    ticket_id = await review_ticket(office, tmp_path)
+    ticket = await office.tickets.get(ticket_id)
+    await office.rules.propose(
+        title="Code cần lead", body="", kind="gate", scope=f"team:{ticket.team_id}", spec={"roles": ["lead"], "when": {"paths": ["src/**"]}}, by="user", activate=True
+    )
+    outcomes: list[str] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        await ctx.office("review_reply", {"id": "F1", "action": "wontfix", "note": "ngoài phạm vi"})
+        await ctx.office("review_reply", {"id": "F2", "action": "fixed", "note": "đã sửa"})
+        outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
+        return ok(ctx)
+
+    first = findings(("high", "thiếu khoá"), ("medium", "thiếu test"), ("low", "tên biến"))
+    second = findings(previous=[{"id": "F2", "status": "resolved"}])
+    await run_review(office, runtime, ticket_id, work, reviewer(first), reviewer(second))
+    assert "gate 'rules'" in outcomes[0]
+    [item] = [i for i in await office.interactions.pending(ticket_id=ticket_id) if i.kind.value == "approve_stage"]
+    review = item.payload["review"]
+    assert [r["id"] for r in review] == ["F1", "F2"]  # low findings are not listed
+    assert review[0] == {
+        "id": "F1", "severity": "high", "where": "src/app.py:2", "claim": "thiếu khoá", "reply": "không sửa: ngoài phạm vi", "label": "", "reviewer_note": ""
+    }
+    assert review[1]["reply"] == "đã sửa: đã sửa" and review[1]["label"] == ""  # verified by round 2
+    text, _buttons = card(item.model_dump(mode="json"))
+    assert "Điểm review" in text and "<b>F1</b> [high] src/app.py:2 thiếu khoá → không sửa: ngoài phạm vi" in text
+
+
+async def test_review_reply_refused_after_the_stage_finished(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    """The gate card holds a copy of the replies; a finished stage run must not change behind it."""
+    from actoroffice.tools.registry import ToolError
+
+    ticket_id = await review_ticket(office, tmp_path)
+    ticket = await office.tickets.get(ticket_id)
+    await office.rules.propose(
+        title="Code cần lead", body="", kind="gate", scope=f"team:{ticket.team_id}", spec={"roles": ["lead"], "when": {"paths": ["src/**"]}}, by="user", activate=True
+    )
+    errors: list[str] = []
+    before: list[dict] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        await ctx.office("review_reply", {"id": "F1", "action": "wontfix", "note": "ngoài phạm vi"})
+        await ctx.office("stage_complete", {"summary": "x"})  # passes: the rules gate waits, the ticket stays at build
+        before.append(await stored_review(office, ticket_id))
+        with pytest.raises(ToolError) as exc:
+            await ctx.office("review_reply", {"id": "F1", "action": "fixed", "note": "đổi ý"})
+        errors.append(str(exc.value))
+        return ok(ctx)
+
+    await run_review(office, runtime, ticket_id, work, reviewer(findings(("medium", "b"))), reviewer(findings()))
+    assert "already finished" in errors[0]
+    assert await stored_review(office, ticket_id) == before[0]
+    [item] = [i for i in await office.interactions.pending(ticket_id=ticket_id) if i.kind.value == "approve_stage"]
+    assert item.payload["review"][0]["reply"] == "không sửa: ngoài phạm vi"
+
+
+def test_gate_card_stays_under_telegram_limit() -> None:
+    from actoroffice.channels.tg_format import LIMIT, card
+
+    checks = [{"id": f"check_{i}", "status": "passed", "summary": "s" * 300} for i in range(11)]
+    review = [{"id": f"F{i}", "severity": "medium", "where": "src/a.py:1", "claim": "c" * 300, "reply": "r" * 300, "label": "chưa xác minh"} for i in range(1, 16)]
+    payload = {"ticket": "SI-7", "stage_title": "Làm", "title": "t" * 200, "summary": "x " * 1000, "checks": checks, "review": review, "access": ["db"], "min": 2}
+    text, _buttons = card({"id": 1, "kind": "approve_stage", "payload": payload})
+    assert len(text) <= LIMIT
+    assert "<b>F1</b>" in text and "điểm khác (xem trên web)" in text and "check_0" in text
+    short, _ = card({"id": 1, "kind": "approve_stage", "payload": {**payload, "summary": "ok", "checks": checks[:2], "review": review[:2]}})
+    assert "khác (xem trên web)" not in short and "<b>F2</b>" in short
+
+
+def test_ac10_gate_items_labels() -> None:
+    from actoroffice.channels.tg_format import review_lines
+    from actoroffice.services.review import evaluate, gate_items
+
+    state = state_of(("medium", "fixed"), ("high", None), ("low", None))
+    state["findings"][1].update(reopened=True, reviewer_note="vẫn còn")
+    items = gate_items(evaluate(state, rounds=2).data)
+    assert [(i["id"], i["label"], i["reply"]) for i in items] == [("F1", "chưa xác minh", "đã sửa: n"), ("F2", "mở lại", "chưa trả lời")]
+    assert gate_items(None) == [] and gate_items({}) == []
+    many = review_lines([{"id": f"F{i}", "severity": "medium", "where": "a:1", "claim": "x" * 300, "reply": "r"} for i in range(12)])
+    assert "+2 điểm khác" in many and "x" * 101 not in many
+
+
+async def test_ac12_skipped_cases_unchanged(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    ticket_id = await review_ticket(office, tmp_path)
+    ticket = await office.tickets.get(ticket_id)
+    repo = tmp_path / "svc"
+
+    async def check(workspace: Path) -> CheckResult:
+        stage = (await office.stages.template_of(ticket)).stage("build")
+        assert stage is not None
+        srun = await office.stages.ensure_run(ticket)
+        [result] = await office.stages.checks.run(ticket, stage, srun, workspace=workspace, run_id=None, only=["review_clean"])
+        return result
+
+    office.settings.ai_review = False
+    assert (await check(repo)).model_dump(include={"status", "summary"}) == {"status": "skipped", "summary": "review độc lập đang tắt (ai_review)"}
+    office.settings.ai_review = True
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert (await check(plain)).summary == "không phải git worktree"
+    assert (await check(repo)).summary == "không có thay đổi để review"
+    (repo / "src" / "app.py").write_text("def total(x):\n    return x + 1\n", encoding="utf-8")
+    runtime.scripts.append(reviewer("không có JSON"))
+    result = await check(repo)
+    assert result.status == "skipped" and result.summary == "reviewer không trả kết quả có cấu trúc"
+
+
+async def test_non_json_round_keeps_stored_findings(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    """Plan risk 2 (owner chose it): a round without structured output still fails on stored open findings."""
+    ticket_id = await review_ticket(office, tmp_path)
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        await ctx.office("stage_complete", {"summary": "x"})
+        return ok(ctx)
+
+    await run_review(office, runtime, ticket_id, work, reviewer(findings(("medium", "b"))), reviewer("xin lỗi, không có JSON"))
+    check = await review_check(office, ticket_id)
+    assert check["status"] == "failed" and "reviewer vòng này không trả kết quả có cấu trúc" in check["summary"] and "F1" in check["summary"]
+
+
+async def test_ac11_last_review_for_the_pr_stage(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    ticket_id = await review_ticket(office, tmp_path)
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        await ctx.office("review_reply", {"id": "F1", "action": "wontfix", "note": "lý do"})
+        await ctx.office("stage_complete", {"summary": "x"})
+        return ok(ctx)
+
+    assert await office.stages.last_review(ticket_id) == []
+    await run_review(office, runtime, ticket_id, work, reviewer(findings(("medium", "b"), ("low", "c"))), reviewer(findings()))
+    review = await office.stages.last_review(ticket_id)
+    assert [(r["id"], r["reply"]) for r in review] == [("F1", "không sửa: lý do")]
+    await office.db.execute("UPDATE stage_runs SET outcome = 'rejected' WHERE ticket_id = ? AND stage = 'build'", (ticket_id,))
+    assert await office.stages.last_review(ticket_id) == []  # a build sent back is not what the pr stage shows
+
+
+def test_ac13_build_prompt_and_tool() -> None:
+    from actoroffice.tools.stage_tools import STAGE_TOOLS
+
+    from .test_prompt_pack import _prompt
+
+    code_build = _prompt("code", office_runs_tests=True).parts["stage"]
+    assert "review_reply" in code_build and "a wontfix needs a reason" in code_build
+    for template_name, stage_id in (("quick", "build"), ("code", "pr"), ("code", "plan")):
+        assert "review_reply" not in _prompt(template_name, office_runs_tests=True, stage_id=stage_id).parts["stage"]
+    tool = next(t for t in STAGE_TOOLS if t.name == "review_reply")
+    assert tool.input_schema["properties"]["action"]["enum"] == ["fixed", "wontfix"]
 
 
 async def test_ports_changes_and_artifacts(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:

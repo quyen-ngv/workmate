@@ -23,3 +23,15 @@ when idle, write down what the run showed, and add improvement tickets to the ba
 ## Stopped
 
 The loop was stopped by the user after SI-16. Backlog left: 07 coverage, 08 serial queue, 09 merge button, 10 update branch, 11 test speed, 12 handoff/dossier, 14 quote-aware NOT_SPLITTABLE, plus SI-16 F2/F3 and a turn retry on a CLI start timeout (`Control request timeout: initialize`).
+
+## Round 2 (resumed 2026-11-03, plan: `2026-11-03-flow-review-round-2.md`)
+
+Claude reviews and approves in place of the user; screenshots per case in `F:/_ao_self/evidence/`.
+
+| Ticket | Backlog | Workflow | Result | What the run showed |
+|---|---|---|---|---|
+| SI-17 | 18 | quick | merged, 513 tests | Plan approved with one added requirement (a stop during the wait between tries ends it). Review: F1 high (stop/pause/shutdown ignored during the 30s/120s wait) fixed; F2 medium (weak AC-1 test) fixed. Open low: F3 (message says "Claude" for Kiro errors), F4 (no chat-path test). |
+| SI-18 | 23 | quick | merged, 523 tests | Found while checking the model: chat and plain tickets ignored `ai_model` (Copilot in the main office chatted on Sonnet). Now the office AI uses `ai_model` everywhere and each run records the model that answered; the "Hết lượt" line shows `claude-opus-5-5`. Review F1 medium (Claude/Kiro sessions shared a key) fixed. |
+| SI-19 | 11 | code | merged, 533 tests | Suite 211.8s → 84.7s (median of 3, measured alternately); merge run 242s → 93s. One question with 4 measured choices. 4 tool approvals because temp files went to `/tmp` (steered into the worktree; backlog 24) and one read-only `git grep` with `$(` (backlog 14). Lead gate (security rule) accepted two small out-of-plan `src` changes with no behaviour change. |
+
+New backlog: 23 (done as SI-18), 24 per-ticket temp folder counted as workspace, 25 reviewer calls a missing `StructuredOutput` tool before answering in text.

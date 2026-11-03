@@ -128,3 +128,17 @@ def test_ac11_stage_guides_mention_review_acs() -> None:
         assert "ACs tagged [review], if any: list them in the PR description with how each was checked" in _stage(template_name, "pr")
     # the quick workflow has no requirements: its scope and build guides do not mention [review]
     assert "[review]" not in _stage("quick", "scope") and "[review]" not in _stage("quick", "build")
+
+
+CHECK_EDITS = "After a few edits of one file, run a syntax check"
+
+
+def test_ac4_build_guides_say_check_after_a_few_edits_of_one_file() -> None:
+    """SI-26: the build guides tell the AI to check a file it keeps editing instead of being stopped by the watchdog."""
+    for template_name in ("code", "quick"):
+        build = _stage(template_name, "build")
+        assert CHECK_EDITS in build and "node --check" in build and "related tests" in build
+    # only the build stage edits code: the other stages do not get the sentence
+    assert CHECK_EDITS not in _stage("code", "plan") and CHECK_EDITS not in _stage("quick", "scope")
+    for template_name in ("code", "quick"):
+        assert CHECK_EDITS not in _stage(template_name, "pr")

@@ -81,6 +81,11 @@ class OfficeGate:
             if message:
                 await self._audit(tool, tool, Risk.READ, "interrupted", "watchdog loop")
                 return GateResult(GateDecision.DENY, message)
+            # Many edits of one file with no command: hold back the next one once so the AI checks the file (SI-26).
+            message = self.watchdog.nudge_message(tool, args)
+            if message:
+                await self._audit(tool, tool, Risk.READ, "interrupted", "watchdog nudge")
+                return GateResult(GateDecision.DENY, message)
         project = await self._project()
         check = await evaluate_call(
             office, self.actor.id, self.position, project, self.workspace, self.read_dirs, self.tainted, self.policies,

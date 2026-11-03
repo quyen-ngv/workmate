@@ -747,6 +747,114 @@ async def test_ac3_a_command_resets_the_undo_count() -> None:
     assert other.loop is None
 
 
+# ---- SI-26: a long run of different edits of one file is not a loop ---------------------------------------
+
+
+def _health_watchdog(run_id: str):
+    from types import SimpleNamespace
+
+    from actoroffice.engine.activity import describe_call
+    from actoroffice.engine.watchdog import Watchdog
+
+    events: list[dict] = []
+
+    async def event(_run_id: str, kind: str, payload: dict) -> None:
+        if kind == "health":
+            events.append(payload)
+
+    def edit(old: str, new: str, path: str = "src/a.py") -> dict:
+        activity = describe_call("Edit", {"file_path": path, "old_string": old, "new_string": new})
+        return {"kind": "edit", "status": "running", "fields": activity.fields}
+
+    office = SimpleNamespace(runs=SimpleNamespace(event=event))
+    return Watchdog(office, run_id, stall_after_s=600, slow_command_s=600), edit, events
+
+
+async def test_ac1_many_different_edits_of_one_file_only_warn() -> None:
+    dog, edit, events = _health_watchdog("run_si26_ac1")
+    for i in range(12):  # SI-22: team.js edited 10 times for 6 different parts
+        await dog.observe(edit(f"old {i}", f"new {i}"))
+    assert dog.loop is None
+    assert dog.stop_message() is None
+    editing = [e for e in events if e["state"] == "editing"]
+    assert len(editing) == 1 and "src/a.py" in editing[0]["title"]
+    assert not [e for e in events if e["state"] == "looping"]
+
+    await dog.observe({"kind": "command", "status": "ok", "call_id": "c1", "fields": {"command": "node --check a.js"}})
+    for i in range(10):  # after a command the warning may come again
+        await dog.observe(edit(f"later {i}", f"new {i}"))
+    assert dog.loop is None
+    assert len([e for e in events if e["state"] == "editing"]) == 2
+
+
+async def test_ac1_the_next_edit_of_the_file_is_held_back_once_with_a_reminder() -> None:
+    dog, edit, _events = _health_watchdog("run_si26_nudge")
+    args = {"file_path": "src/a.py", "old_string": "old 9", "new_string": "new 9"}
+    for i in range(9):
+        await dog.observe(edit(f"old {i}", f"new {i}"))
+    assert dog.nudge_message("Edit", args) is None  # no warning yet
+    await dog.observe(edit("old 8b", "new 8b"))  # the tenth edit
+    assert dog.nudge_message("Read", {"file_path": "src/a.py"}) is None  # only an edit is held back
+    assert dog.nudge_message("Edit", {**args, "file_path": "src/b.py"}) is None  # of that file
+    message = dog.nudge_message("Edit", args)
+    assert message and "NOT run" in message and "node --check" in message and "src/a.py" in message
+    assert dog.nudge_message("Edit", args) is None  # once
+    await dog.observe(edit("old 9", "new 9"))  # the held-back call, as the runtime reports it
+    await dog.observe(edit("old 9", "new 9"))  # made again after the reminder: not a repeat
+    assert dog.loop is None
+    await dog.observe(edit("old 9", "new 9"))  # a third time is
+    assert dog.loop and "lặp lại" in dog.loop
+
+    reset, edit, _events = _health_watchdog("run_si26_nudge_reset")
+    for i in range(10):
+        await reset.observe(edit(f"old {i}", f"new {i}"))
+    await reset.observe({"kind": "command", "status": "ok", "call_id": "c1", "fields": {"command": "node --check a.js"}})
+    assert reset.nudge_message("Edit", {"file_path": "src/a.py", "old_string": "x", "new_string": "y"}) is None  # checked already
+
+
+async def test_ac1_gate_holds_back_one_edit_after_many_edits(office: Office, runtime: FakeRuntime) -> None:
+    ticket = await office.tickets.create("Sửa nhiều", description="x")
+    seen: list[tuple[str, str]] = []
+
+    async def many_edits(ctx: TurnCtx) -> TurnResult:
+        for i in range(10):
+            await ctx.sink("tool_use", {"tool": "Edit", "input": {"file_path": "web/team.js", "old_string": f"a{i}", "new_string": f"b{i}"}, "id": f"e{i}"})
+        nxt = {"file_path": "web/team.js", "old_string": "a10", "new_string": "b10"}
+        for _ in range(2):
+            decision = await ctx.gate.before_tool("Edit", nxt, None)
+            seen.append((decision.decision.value, decision.reason))
+        return ok(ctx)
+
+    runtime.scripts.append(many_edits)
+    await office.stages.start(ticket.id, template="code", by="user")
+    await office.scheduler.wait_idle(timeout=20)
+    assert seen[0][0] == "deny" and "CHECK FIRST" in seen[0][1] and "ask_human" not in seen[0][1]
+    assert seen[1][0] != "deny" or "CHECK FIRST" not in seen[1][1]  # held back once only
+    run = (await office.runs.for_ticket(ticket.id))[0]
+    health = [a["title"] for a in await office.runs.activities(run.id) if a["kind"] == "health"]
+    assert health and "team.js" in health[0] and not [t for t in health if "lặp" in t]
+
+
+async def test_ac2_a_repeated_edit_in_a_long_run_still_stops() -> None:
+    dog, edit, _events = _health_watchdog("run_si26_ac2")
+    for i in range(10):
+        await dog.observe(edit(f"old {i}", f"new {i}"))
+    assert dog.loop is None
+    await dog.observe(edit("old 3", "new 3"))
+    assert dog.loop and "lặp lại" in dog.loop
+
+
+async def test_ac3_two_undos_in_a_long_run_still_stop() -> None:
+    dog, edit, _events = _health_watchdog("run_si26_ac3")
+    for i in range(10):
+        await dog.observe(edit(f"old {i}", f"new {i}"))
+    assert dog.loop is None
+    await dog.observe(edit("new 1", "old 1"))
+    assert dog.loop is None
+    await dog.observe(edit("new 2", "old 2"))
+    assert dog.loop and "hoàn tác 2 lần" in dog.loop
+
+
 # ---- SI-5: flaky_rerun reuses the build stage's repo:test result -------------------------------------------
 
 FAKE_TEST = """\

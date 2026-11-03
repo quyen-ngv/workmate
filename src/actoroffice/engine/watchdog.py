@@ -4,10 +4,12 @@ developer instead.
 
 - slow:     one command has been running longer than `slow_command_s`
 - stalled:  no event at all for `stall_after_s`
+- editing:  10 different edits of one file with no command (test/build run) in between: a warning, and the next
+            edit of that file is held back once with a reminder to run a syntax check or the related tests
 - looping:  the same failing command 3 times, the same part of a file read 4 times, the same edit made twice
-            (so an edit redone after it was undone), or 2 undone edits / 10 edits of one file with no command
-            (test/build run) in between. Several different edits of one file are normal work, and so is
-            undoing one misplaced edit once: neither is a loop.
+            (so an edit redone after it was undone), or 2 undone edits of one file with no command in between.
+            Different edits of one file are normal work, however many, and so is undoing one misplaced edit
+            once: neither is a loop.
 """
 
 from __future__ import annotations
@@ -20,12 +22,14 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .activity import describe_call
+
 if TYPE_CHECKING:
     from actoroffice.app import Office
 
 FAILS_FOR_LOOP = 3
 READS_FOR_LOOP = 4
-EDITS_FOR_LOOP = 10
+EDITS_FOR_WARNING = 10
 UNDOS_FOR_LOOP = 2
 
 
@@ -49,6 +53,8 @@ class Watchdog:
     running: dict[str, tuple[str, float]] = field(default_factory=dict)  # call id → (command, started)
     reported: set[str] = field(default_factory=set)
     loop: str | None = None  # set when a loop is detected; the gate turns it into a stop-and-ask
+    nudge: str | None = None  # a file edited many times with no command: its next edit is held back once
+    nudged_sig: str | None = None  # the edit held back, so making it again is not counted as a repeat
     _task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -76,6 +82,7 @@ class Watchdog:
             self.edits_since_command.clear()
             self.edit_sigs.clear()
             self.undos.clear()
+            self.nudge = self.nudged_sig = None
             if status == "error":
                 self.failures[command] += 1
                 if self.failures[command] >= FAILS_FOR_LOOP:
@@ -93,7 +100,9 @@ class Watchdog:
             path = str(fields.get("path") or "")
             seen = self.edit_sigs.setdefault(path, set())
             sig, undo = fields.get("sig"), fields.get("undo")
-            if sig and sig in seen:
+            if sig and sig in seen and sig == self.nudged_sig:
+                self.nudged_sig = None  # the edit the nudge held back, made again: not a repeat
+            elif sig and sig in seen:
                 await self._loop(f"lặp lại đúng một chỗ sửa trong `{path[-80:]}`")
             elif undo and undo in seen and undo != sig:
                 self.undos[path] += 1  # one undo fixes a misplaced edit; a second one is going back and forth
@@ -102,8 +111,12 @@ class Watchdog:
             if sig:
                 seen.add(sig)
             self.edits_since_command[path] += 1
-            if self.edits_since_command[path] >= EDITS_FOR_LOOP:
-                await self._loop(f"sửa `{path[-80:]}` {self.edits_since_command[path]} lần mà không chạy lại test")
+            if self.edits_since_command[path] == EDITS_FOR_WARNING:  # different edits: a nudge, not a stop (SI-22)
+                await self._health(
+                    "editing",
+                    f"Đã sửa `{path[-80:]}` {EDITS_FOR_WARNING} lần mà chưa chạy lệnh nào: nên kiểm tra cú pháp hoặc chạy test liên quan",
+                )
+                self.nudge = path
 
     async def _loop(self, reason: str) -> None:
         if self.loop is None:
@@ -136,4 +149,18 @@ class Watchdog:
             f"STOP: you seem to be going round in circles ({self.loop}). This tool call was NOT run. "
             "Summarize what you tried and what you found, then ask a developer with ask_human (roles [dev]) how to "
             "proceed, and end your turn."
+        )
+
+    def nudge_message(self, tool: str, args: dict[str, Any]) -> str | None:
+        """Once per warning: the text the gate returns instead of the next edit of the file edited many times."""
+        if self.nudge is None:
+            return None
+        activity = describe_call(tool, args)
+        if activity is None or activity.kind != "edit" or activity.fields.get("path") != self.nudge:
+            return None
+        path, self.nudge, self.nudged_sig = self.nudge, None, activity.fields.get("sig")
+        return (
+            f"CHECK FIRST: you edited `{path[-80:]}` {self.edits_since_command[path]} times without running anything. "
+            "This edit was NOT run. Run a syntax check (e.g. `node --check`, `python -m py_compile`) or its related "
+            "tests, then make this edit again and continue."
         )

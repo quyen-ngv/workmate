@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
 import os
 import secrets
@@ -110,6 +111,24 @@ def free_port(env: dict[str, str]) -> int | None:
                 continue
             return port
     return None
+
+
+def listeners(port: int) -> list[str]:
+    """Addresses something listens on at this TCP port. Windows may report another process's listening socket
+    with status NONE: a bound socket without a remote end counts too. Empty when the system does not tell."""
+    try:
+        conns = psutil.net_connections(kind="tcp")
+    except psutil.Error:
+        log.warning("cannot list listening sockets to check the UI preview on port %s", port)
+        return []
+    return sorted({c.laddr.ip for c in conns if c.laddr and c.laddr.port == port and not c.raddr and c.status in (psutil.CONN_LISTEN, psutil.CONN_NONE)})
+
+
+def is_loopback_ip(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip.split("%")[0]).is_loopback
+    except ValueError:
+        return False
 
 
 def _kill_and_wait(pid: int, timeout: float = 10) -> None:
@@ -214,6 +233,10 @@ class UiPreviewService:
         except OSError as exc:
             raise UiEnvError(f"không chạy được lệnh start {argv[0]}: {exc}") from exc
         await self._wait(preview, timeout)
+        exposed = [ip for ip in await asyncio.to_thread(listeners, preview.port) if not is_loopback_ip(ip)]
+        if exposed:
+            # the app holds the sign-in token: it must not be reachable from the network (R3)
+            raise UiEnvError(f"app nghe trên {', '.join(exposed)} thay vì chỉ 127.0.0.1: sửa lệnh start (vd. --host 127.0.0.1)", preview.tail())
         preview.ready = True
 
     async def _wait(self, preview: Preview, timeout: float) -> None:

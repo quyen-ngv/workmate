@@ -28,7 +28,9 @@ from actoroffice.domain.work import ProjectAccess
 from actoroffice.engine import prompt_pack
 from actoroffice.engine.browser import Action, BrowserError, PlaywrightBrowser, ShotResult, is_loopback, parse_actions
 from actoroffice.engine.workspace import ticket_env
+from actoroffice.services import ui_preview
 from actoroffice.services.checks import review_ids, ui_evidence_markdown, ui_ids
+from actoroffice.services.ui_preview import listeners
 from actoroffice.tools.registry import ToolCtx, ToolError
 from actoroffice.tools.stage_tools import ui_screenshot
 
@@ -124,8 +126,7 @@ def gone(pid: int) -> bool:
 
 def listening(port: int) -> list[str]:
     """Addresses something listens on at this TCP port (machine-wide: a venv launcher on Windows hides its child's sockets)."""
-    # Windows may report another process's listening socket with status NONE: a bound socket without a remote end
-    return sorted({c.laddr.ip for c in psutil.net_connections(kind="tcp") if c.laddr and c.laddr.port == port and not c.raddr and c.status in (psutil.CONN_LISTEN, psutil.CONN_NONE)})
+    return listeners(port)
 
 
 def has_chrome() -> bool:
@@ -205,6 +206,27 @@ async def test_ac2_preview_starts_seed_then_start_on_ticket_port(office: Office,
         assert json.loads((second.data / "serve.json").read_text(encoding="utf-8"))["token"] == second.token
     finally:
         await office.ui.stop_run("run-b")
+
+
+async def test_ac2_app_listening_beyond_loopback_is_refused(office: Office, tmp_path: Path, monkeypatch) -> None:
+    """The office checks the address itself: an app the start command opened to the network is stopped (R3)."""
+    ticket, _project, repo = await ui_ticket(office, tmp_path, ui_profile())
+    browser = FakeBrowser()
+    office.ui.browser = browser
+    seen: list[int] = []
+
+    def exposed(port: int) -> list[str]:
+        seen.append(port)
+        return ["0.0.0.0", "127.0.0.1"]  # what an app started with --host 0.0.0.0 shows (no real socket opened to the LAN)
+
+    monkeypatch.setattr(ui_preview, "listeners", exposed)
+    with pytest.raises(ToolError, match=r"app nghe trên 0\.0\.0\.0 thay vì chỉ 127\.0\.0\.1"):
+        await ui_screenshot({"ac": "AC-2", "caption": "x"}, await tool_ctx(office, ticket.id, repo))
+    assert seen and browser.calls == [] and office.ui.running("run-ui-1") is None
+    [error] = await ui_errors(office, ticket.id)
+    assert error["metadata"]["ac"] == "AC-2" and "0.0.0.0" in error["metadata"]["reason"]
+    assert ui_preview.is_loopback_ip("::1") and ui_preview.is_loopback_ip("127.0.0.1") and not ui_preview.is_loopback_ip("::")
+    assert not ui_preview.is_loopback_ip("192.168.1.5") and not ui_preview.is_loopback_ip("")
 
 
 async def test_ac2_stop_run_kills_app_and_removes_data(office: Office, tmp_path: Path) -> None:

@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -26,11 +28,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import psutil
 
 from actoroffice.engine.browser import Browser, PlaywrightBrowser, is_loopback
 from actoroffice.engine.workspace import PORTS_PER_TICKET, ticket_env
 
-from .checks import _kill_tree, command_list, run_argv, test_env
+from .checks import command_list, run_argv, test_env
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -109,6 +112,31 @@ def free_port(env: dict[str, str]) -> int | None:
     return None
 
 
+def _kill_and_wait(pid: int, timeout: float = 10) -> None:
+    """Kill a process and all its children, then wait until they are gone (their files are released)."""
+    try:
+        parent = psutil.Process(pid)
+        procs = [parent, *parent.children(recursive=True)]
+    except psutil.Error:
+        return
+    for proc in procs:
+        with contextlib.suppress(psutil.Error):
+            proc.kill()
+    psutil.wait_procs(procs, timeout=timeout)
+
+
+def rmtree(path: Path) -> None:
+    """Delete a folder, read-only files included (git objects of a temporary office are read-only on Windows)."""
+
+    def writable(func: Any, target: str, _exc: BaseException) -> None:
+        with contextlib.suppress(OSError):
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+
+    with contextlib.suppress(OSError):
+        shutil.rmtree(path, onexc=writable)
+
+
 def fill(value: str, preview: Preview, *, token: bool = False) -> str:
     out = value.replace("{port}", str(preview.port)).replace("{data}", str(preview.data))
     return out.replace("{token}", preview.token) if token else out
@@ -135,7 +163,9 @@ class UiPreviewService:
             port = free_port(env)
             if port is None:
                 raise UiEnvError(f"không còn cổng trống trong khối cổng của {ticket.key} ({env['AO_PORT_0']}–{env[f'AO_PORT_{PORTS_PER_TICKET - 1}']})")
-            root = Path(tempfile.mkdtemp(prefix=f"ao-ui-{ticket.key.lower()}-"))
+            base = self.office.settings.data_dir / "ui-previews"  # inside the office's own folder, never the system temp
+            base.mkdir(parents=True, exist_ok=True)
+            root = Path(tempfile.mkdtemp(prefix=f"{ticket.key.lower()}-", dir=base))
             # registered before any await: stop_run cleans up even when the start is interrupted (R-3)
             preview = Preview(run_id, root, port, secrets.token_urlsafe(32))
             self._apps[run_id] = preview
@@ -206,16 +236,16 @@ class UiPreviewService:
         if preview is None:
             return
         if preview.proc is not None and preview.proc.returncode is None:
-            _kill_tree(preview.proc.pid)
+            await asyncio.to_thread(_kill_and_wait, preview.proc.pid)
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(preview.proc.wait(), 10)
         if preview.log_file is not None:
             preview.log_file.close()
-        for _ in range(5):  # Windows releases files of a killed process a moment later
-            shutil.rmtree(preview.root, ignore_errors=True)
+        for _ in range(10):  # Windows releases files of a killed process a moment later
+            await asyncio.to_thread(rmtree, preview.root)
             if not preview.root.exists():
                 break
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.3)
         if preview.root.exists():
             log.warning("UI preview folder %s could not be removed", preview.root)
 

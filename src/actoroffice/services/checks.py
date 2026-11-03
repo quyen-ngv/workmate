@@ -50,6 +50,7 @@ REVIEW_TAG = re.compile(r"\bAC[-\s]?(\d+)(?!\d)[ \t]*(?:\[ui\][ \t]*)?\[review\]
 # "AC-3 [ui]: …": a UI criterion; when UI files changed, the build stage wants a screenshot of it (check ui_evidence)
 UI_TAG = re.compile(r"\bAC[-\s]?(\d+)(?!\d)[ \t]*(?:\[review\][ \t]*)?\[ui\]", re.IGNORECASE)
 NO_SHOT = re.compile(r"(?i)không chụp được[ \t]*:[ \t]*(.+)")
+AC_HEAD = re.compile(r"(?i)^AC[-\s]?\d+[ \t]*(?:\[\w+\][ \t]*)*[:.\-–]?[ \t]*")
 # Same line only: an empty "Cách kiểm:" must not take the text of the next line
 HOW_TO_CHECK = re.compile(r"(?im)\bcách kiểm[ \t]*(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?[ \t]*(.*)$")
 NO_HANDOFF_LINE = "chưa ghi cách kiểm"
@@ -324,8 +325,9 @@ def ui_evidence(text: str, handoff: str, products: list[dict[str, Any]]) -> list
             m = NO_SHOT.search(line)
             if m and pattern.search(line[: m.start()]):
                 reasons.append(m.group(1).strip().rstrip("|").strip()[:300])
-        first = body.strip().splitlines()[0].strip()[:200] if body.strip() else key
-        items.append({"id": key, "title": first, "shots": shots, "reasons": list(dict.fromkeys(reasons))})
+        first = body.strip().splitlines()[0].strip() if body.strip() else ""
+        title = AC_HEAD.sub("", first)[:200]  # the id and tags are shown apart: "AC-3 [ui]: Hộp" → "Hộp"
+        items.append({"id": key, "title": title or key, "shots": shots, "reasons": list(dict.fromkeys(reasons))})
     return items
 
 

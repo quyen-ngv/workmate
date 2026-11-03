@@ -454,6 +454,14 @@ async def _save_artifact(ctx: ToolCtx, ticket: Any, source: Any, kind: str, capt
     return target
 
 
+def _slug(text: str) -> str:
+    """A file name part without accents: "AC-9 Bấm ảnh" → "ac-9-bam-anh"."""
+    import unicodedata
+
+    plain = unicodedata.normalize("NFKD", text.replace("đ", "d").replace("Đ", "D")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-")[:50].strip("-")
+
+
 async def ui_screenshot(args: dict[str, Any], ctx: ToolCtx) -> str:
     """Screenshot of a page of the ticket's temporary app (project profile `ui`), saved as an artifact of an AC."""
     from urllib.parse import urljoin, urlsplit
@@ -499,7 +507,7 @@ async def ui_screenshot(args: dict[str, Any], ctx: ToolCtx) -> str:
     target = path if "://" in path else (urljoin(f"{parts.scheme}://{parts.netloc}/", path.lstrip("/")) if path else entry)
     if not is_loopback(target):
         raise ToolError("Refused: only loopback addresses may be opened")
-    slug = re.sub(r"[^a-z0-9]+", "-", f"{ac or 'ui'} {caption}".lower()).strip("-")[:50] or "ui"
+    slug = _slug(f"{ac or 'ui'} {caption}") or "ui"
     out = preview.shots / f"{slug}.png"
     n = 1
     while out.exists():

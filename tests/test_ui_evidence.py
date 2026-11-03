@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import zlib
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,9 @@ async def ui_ticket(office: Office, tmp_path: Path, profile: dict[str, Any] | No
     project = await office.projects.create(f"svc-{tmp_path.name}", path=str(repo), access=ProjectAccess.WORKTREE)
     if profile:
         project = await office.projects.configure(project.id, profile=profile)
+    # Each test DB starts at ticket 1: a ticket id of its own gives each test its own port block (parallel workers)
+    seq = 100 + zlib.crc32(str(tmp_path).encode()) % 1800
+    await office.db.execute("INSERT OR REPLACE INTO sqlite_sequence(name, seq) VALUES ('tickets', ?)", (seq,))
     ticket = await office.tickets.create("Hoàn tiền", description="x", project_id=project.id)
     await office.db.execute("UPDATE tickets SET stage = ?, stage_template = ? WHERE id = ?", (stage, template, ticket.id))
     return await office.tickets.get(ticket.id), project, repo
@@ -208,6 +212,11 @@ async def test_ac2_stop_run_kills_app_and_removes_data(office: Office, tmp_path:
     preview = await office.ui.ensure("run-a", ticket, project, repo)
     pid = json.loads((preview.data / "serve.json").read_text(encoding="utf-8"))["pid"]
     assert psutil.pid_exists(pid)
+    assert preview.root.parent == office.settings.data_dir / "ui-previews"  # never the system temp folder
+    locked = preview.data / "objects" / "0b" / "read-only"  # like a temporary office's git objects
+    locked.parent.mkdir(parents=True)
+    locked.write_text("x", encoding="utf-8")
+    locked.chmod(0o444)
     await office.ui.stop_run("run-a")
     assert not preview.root.exists()
     assert gone(pid)
@@ -261,7 +270,7 @@ async def test_ac3_screenshot_runs_actions_in_order_and_saves_artifact(office: O
     saved = Path(product["ref"])
     assert saved.parent == office.settings.data_dir / "artifacts" / ticket.key and saved.read_bytes() == PNG
     assert product["metadata"] == {"note": "Hộp xác nhận", "ac": "AC-3"}
-    assert saved.name in out and "AC-3" in out
+    assert saved.name in out and "AC-3" in out and saved.name == "ac-3-hop-xac-nhan.png"
     assert event.kind == "ticket.artifact" and event.data["kind"] == "screenshot" and event.data["path"] == str(saved)
     assert not list(repo.glob("**/*.png"))  # nothing left in the worktree
 
@@ -549,6 +558,7 @@ def test_ac8_artifact_file_served_and_denied(office_client, tmp_path) -> None:  
     evidence = c.get(f"/api/tickets/{task['key']}/stage").json()["ui_evidence"]
     assert [e["id"] for e in evidence] == ["AC-2", "AC-3"]
     assert evidence[0]["shots"][0] == {"id": ids["ok"], "name": "ac-2.png", "caption": "Nút"}
+    assert [e["title"] for e in evidence] == ["Nút hoàn tiền", "Hộp xác nhận"]  # id and tags are not repeated
     assert evidence[1]["shots"] == [] and evidence[1]["reasons"] == ["không có Chrome"]
 
     c.cookies.clear()

@@ -3,13 +3,14 @@
     ui_fake_app.py seed [args…]   writes seed.json in AO_UI_DATA
     ui_fake_app.py serve [args…]  writes serve.json, then answers HTTP on 127.0.0.1:AO_UI_PORT
     ui_fake_app.py crash          prints its token and exits 3 (the app does not come up)
-    ui_fake_app.py silent         never listens (the URL never answers)
+    ui_fake_app.py silent         holds the port but never answers (the URL never answers)
 """
 
 from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -47,7 +48,11 @@ def main() -> int:
         print("boom: port already in use", flush=True)
         return 3
     if mode == "silent":
-        time.sleep(300)
+        # holds the port (no other test app can answer there) but never accepts: a hung app
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", int(os.environ["AO_UI_PORT"])))
+            s.listen(1)
+            time.sleep(300)
         return 0
     port = int(os.environ["AO_UI_PORT"])
     info = {"port": port, "token": os.environ["AO_UI_TOKEN"], "pid": os.getpid(), "argv": sys.argv[2:], "seeded": (data / "seed.json").is_file()}

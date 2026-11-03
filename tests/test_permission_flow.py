@@ -462,6 +462,81 @@ async def test_ac12_api_reports_auto_approved_count(office, api, tmp_path):
     assert body["id"] == billing.id and body["name"] == "billing" and body["permission_mode"] == "folder" and "allow_rules" in body
 
 
+# --- SI-9: a one-time 'allow' used while the permission allows the call does not outlive it ------------------------
+
+
+async def gate_for(office: Office, ticket: Any, workspace: Path) -> OfficeGate:
+    actor = await office.org.get_actor(ticket.assignee_actor_id)
+    run_id = new_id("run")
+    await office.runs.start(Run(id=run_id, actor_id=actor.id, kind=RunKind.TICKET, ticket_id=ticket.id))
+    return OfficeGate(office, actor, await office.org.get_position(actor.position_id), run_id, workspace, ticket_id=ticket.id, ticket_key=ticket.key)
+
+
+async def test_ac1_ac2_auto_approved_grant_is_used_and_narrowing_asks_again(office, runtime, tmp_path):
+    ai = await office.ensure_ai()
+    billing = await project(office, tmp_path, "billing")
+    cmd = {"command": "node build.js"}
+    seen: list[GateDecision] = []
+
+    async def first(ctx: TurnCtx) -> TurnResult:
+        seen.append(await ctx.tool("Bash", cmd))
+        return deferred(ctx.spec, "Bash", cmd)
+
+    async def second(ctx: TurnCtx) -> None:
+        seen.append(await ctx.tool("Bash", cmd))
+        await ctx.office("ticket_set_status", {"status": "done", "comment": "built"})
+
+    runtime.scripts += [first, second]
+    office.settings.approval_wait_s = 0.05
+    ticket = await office.tickets.create("build", assignee_actor_id=ai.id, project_id=billing.id)
+    await office.scheduler.wait_idle(timeout=15)
+    [card] = await office.interactions.pending()
+    await office.projects.set_permissions(billing.id, mode="folder")
+    assert await office.permissions_recheck(project_id=billing.id) == 1
+    await office.scheduler.wait_idle(timeout=15)
+    assert seen == [GateDecision.DEFER, GateDecision.ALLOW]
+    assert [(g["decision"], g["used"]) for g in await grants(office, card)] == [("allow", 1)]  # AC-1
+
+    await office.projects.set_permissions(billing.id, mode="workspace")
+    gate = await gate_for(office, ticket, Path(billing.path))
+    assert (await gate.before_tool("Bash", cmd, None)).decision == GateDecision.DEFER  # AC-2
+    [again] = await office.interactions.pending()
+    assert again.id != card.id and again.payload["input_hash"] == input_hash("Bash", cmd)
+
+
+async def test_ac3_clicked_allow_once_is_used_when_a_wider_permission_allows(office, tmp_path):
+    ai = await office.ensure_ai()
+    billing = await project(office, tmp_path, "billing")
+    ticket = await ticket_in(office, billing.id, ai.id)
+    cmd = {"command": "node build.js"}
+    card = await ask_card(office, ticket, Path(billing.path), cmd)
+    await office.interactions.resolve(card.id, {"approved": True}, by="user")
+    await office.projects.set_permissions(billing.id, mode="folder", allow_rules=["Bash(node*)"])  # recheck not run: card is answered
+
+    gate = await gate_for(office, ticket, Path(billing.path))
+    assert (await gate.before_tool("Bash", cmd, None)).decision == GateDecision.ALLOW
+    assert [g["used"] for g in await grants(office, card)] == [1]
+
+    await office.projects.set_permissions(billing.id, mode="workspace", allow_rules=[])
+    office.settings.approval_wait_s = 0.01
+    assert (await gate.before_tool("Bash", cmd, None)).decision == GateDecision.DEFER
+    assert len(await office.interactions.pending()) == 1
+
+
+async def test_ac3_allow_on_an_allowed_call_keeps_a_deny_grant(office, tmp_path):
+    ai = await office.ensure_ai()
+    billing = await project(office, tmp_path, "billing")
+    ticket = await ticket_in(office, billing.id, ai.id)
+    cmd = {"command": "node build.js"}
+    card = await ask_card(office, ticket, Path(billing.path), cmd)
+    await office.interactions.resolve(card.id, {"approved": False}, by="user")
+    await office.projects.set_permissions(billing.id, mode="folder")
+
+    gate = await gate_for(office, ticket, Path(billing.path))
+    assert (await gate.before_tool("Bash", cmd, None)).decision == GateDecision.ALLOW
+    assert [g["used"] for g in await grants(office, card)] == [0]  # only 'allow' grants are used up on ALLOW
+
+
 async def test_ac10_gate_denies_wait_loop_without_a_card(office, tmp_path):
     ai = await office.ensure_ai()
     billing = await project(office, tmp_path, "billing")

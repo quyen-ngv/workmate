@@ -274,7 +274,7 @@ class PolicyEngine:
         parts = shell.split(cmd, dialect)
         if parts is None:
             return None
-        tmp = shell.tmp_dir(cmd, ctx.workspace, dialect)
+        tmp = shell.tmp_dir(cmd, parts, ctx.workspace, dialect)
         place = shell.Place(ctx.workspace, self._read_dirs(ctx), self.protected, tmp=tmp, dialect=dialect)
         limit = MODE_LIMIT.get(ctx.mode, shell.Kind.WORKSPACE)
         allow_list = [] if ctx.mode == "read_only" else ctx.position.policy.bash_allow

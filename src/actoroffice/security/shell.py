@@ -99,13 +99,20 @@ TMP_PREFIX = {
     "ps": re.compile(rf"^\$env:{_TMP_NAMES}(?=[/\\]|$)", re.IGNORECASE),
 }
 # Every way a command may read the variable; any other mention of the name (TMPDIR=…, export TMP, unset,
-# $env:TEMP = …, a quoted or escaped use) means the value is not the one the office set.
+# $env:TEMP = …, $env:TEMP += …, a quoted or escaped use) means the value may not be the one the office set.
 _TMP_READ = {
     "sh": re.compile(rf"\$(?:\{{{_TMP_NAMES}\}}|{_TMP_NAMES}(?![\w=]))"),
-    "ps": re.compile(rf"\$env:{_TMP_NAMES}(?![\w=]|\s*=)", re.IGNORECASE),
+    "ps": re.compile(rf"\$env:{_TMP_NAMES}(?!\w|\s*(?:[-+*/%]|\?\?)?=)", re.IGNORECASE),
 }
 _TMP_LITERAL = re.compile(rf"(?:'[^']*|\\)\$(?:\{{|env:)?{_TMP_NAMES}", re.IGNORECASE)
-_TMP_MENTION = re.compile(rf"\b{_TMP_NAMES}\b", re.IGNORECASE)
+_TMP_MENTION = re.compile(rf"\b{_TMP_NAMES}\b|\benv:", re.IGNORECASE)
+# Bash builtins and keywords that can set a variable of the running shell, even with a name built at run time
+# (printf -v TM''PDIR, read, declare, eval "…", source a file, command/builtin in front of them, exec {fd}>…).
+VAR_SETTERS = {
+    "declare", "typeset", "local", "export", "readonly", "read", "readarray", "mapfile", "printf", "eval", "source",
+    "unset", "set", "let", "getopts", "builtin", "command", "enable", "exec", "trap", "wait", "for", "select",
+    "coproc", "case", "if", "while", "until", "function", "alias", "fc",
+}
 
 
 @dataclass
@@ -129,13 +136,21 @@ class Place:
     dialect: str = "sh"
 
 
-def tmp_dir(command: str, workspace: Path | None, dialect: str = "sh") -> Path | None:
-    """The ticket's temp folder when the command only reads TMPDIR/TEMP/TMP (so they hold what the office set);
-    None when it sets, unsets, quotes or escapes one of them, or names them any other way."""
+def tmp_dir(command: str, parts: list[Command], workspace: Path | None, dialect: str = "sh") -> Path | None:
+    """The ticket's temp folder when the line can only read TMPDIR/TEMP/TMP, so they still hold what the office
+    set. None (judge `$TMPDIR` as unknown, like any variable) when it may change them in any way: the name
+    anywhere else (also split by quotes or `\\`: TM''PDIR), any other `$`, an assignment, or a builtin that sets
+    variables. Not a bash emulator: when in doubt, None."""
     if workspace is None or dialect not in _TMP_READ or _TMP_LITERAL.search(command):
         return None
-    if _TMP_MENTION.search(_TMP_READ[dialect].sub(" ", command)):
+    rest = _TMP_READ[dialect].sub(" ", command)
+    if "$" in rest or _TMP_MENTION.search(re.sub(r"[\"'`\\]", "", rest)):
         return None
+    for part in parts:
+        if any(ASSIGNMENT.match(word) for word in part.argv):
+            return None
+        if any(program_name(word) in VAR_SETTERS for word in part.argv) or unwrap(part).argv[:1] == ["."]:  # . file
+            return None
     return workspace / TICKET_TMP
 
 

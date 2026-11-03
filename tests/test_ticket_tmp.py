@@ -12,6 +12,7 @@ from actoroffice.app import Office
 from actoroffice.config import Settings
 from actoroffice.domain.org import Position, PositionPolicy
 from actoroffice.engine.workspace import ticket_tmp
+from actoroffice.security import shell
 from actoroffice.security.policy import Decision, PolicyEngine, ToolCallContext
 from actoroffice.security.shell import TICKET_TMP
 
@@ -129,9 +130,43 @@ def test_ac3_writing_outside_or_with_a_changed_variable_still_asks(ws, command):
     assert _decide(ws, command) == Decision.ASK
 
 
-def test_ac3_powershell_assignment_still_asks(ws):
-    assert _decide(ws, "$env:TEMP = 'C:/'; uv run main.py > $env:TEMP/x", tool="PowerShell") == Decision.ASK
-    assert _decide(ws, "uv run main.py > $TMPDIR/x", tool="PowerShell") == Decision.ASK
+@pytest.mark.parametrize(
+    ("command", "dialect"),
+    [
+        # a name built at run time (checked on Git Bash: each sets TMPDIR)
+        ("printf -v TM''PDIR /etc; uv run main.py > $TMPDIR/x", "sh"),
+        ("printf -v TM\\PDIR /etc; uv run main.py > $TMPDIR/x", "sh"),
+        ("n=TM; n+=PDIR; printf -v $n /etc; uv run main.py > $TMPDIR/x", "sh"),
+        ("command -p printf -v TMPDIR /etc; uv run main.py > $TMPDIR/x", "sh"),
+        ("read -r TM\\PDIR < a.txt; uv run main.py > $TMPDIR/x", "sh"),
+        ("declare TM''PDIR=/etc; uv run main.py > $TMPDIR/x", "sh"),
+        ("eval TM''PDIR=/etc; uv run main.py > $TMPDIR/x", "sh"),
+        ("wait -p TM''PDIR; uv run main.py > $TMPDIR/x", "sh"),
+        ("exec {TM''PDIR}>a.txt; uv run main.py > $TMPDIR/x", "sh"),
+        # a sourced file or a nested shell may set it
+        ("source env.sh; uv run main.py > $TMPDIR/x", "sh"),
+        (". ./env.sh; uv run main.py > $TMPDIR/x", "sh"),
+        ("sh -c 'TMPDIR=/etc'; uv run main.py > $TMPDIR/x", "sh"),
+        # quotes inside ${…}, substitution, multi-line, backslash-newline
+        ("uv run main.py > ${TM''PDIR}/x", "sh"),
+        ("uv run main.py > $(echo $TMPDIR)/x", "sh"),
+        ("uv run main.py > `echo /etc`/$TMPDIR", "sh"),
+        ("TMPDIR=/etc\nuv run main.py > $TMPDIR/x", "sh"),
+        ("export \\\nTMPDIR=/etc; uv run main.py > $TMPDIR/x", "sh"),
+        ("uv run main.py > $TMPDIR/$HOME/x", "sh"),
+        # PowerShell: compound assignment, the env: drive, the bash name
+        ("$env:TEMP+='/../..'; uv run main.py > $env:TEMP/x", "ps"),
+        ("$env:TEMP ??= 'C:/'; uv run main.py > $env:TEMP/x", "ps"),
+        ("$env:TEMP = 'C:/'; uv run main.py > $env:TEMP/x", "ps"),
+        ("Set-Item env:TE''MP C:/; uv run main.py > $env:TEMP/x", "ps"),
+        ("Set-Location e''nv:; uv run main.py > $env:TEMP/x", "ps"),
+        ("uv run main.py > $TMPDIR/x", "ps"),
+    ],
+)
+def test_ac3_a_line_that_may_change_the_variable_still_asks(ws, command, dialect):
+    parts = shell.split(command, dialect)
+    assert parts is None or shell.tmp_dir(command, parts, ws, dialect) is None
+    assert _decide(ws, command, tool="PowerShell" if dialect == "ps" else "Bash") == Decision.ASK
 
 
 def test_ac5_build_guides_say_use_tmpdir_not_tmp():

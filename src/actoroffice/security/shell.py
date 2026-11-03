@@ -10,6 +10,7 @@ redirects, respecting quotes. Each command gets a class:
 
 The policy turns the classes into allow / ask according to the project's permission mode (security/policy.py).
 Commands with substitution ($(…), backticks), heredocs or subshells are not split: they are judged as a whole.
+In bash those characters count only where they run: not inside '…' or escaped (specials_are_text).
 """
 
 from __future__ import annotations
@@ -106,10 +107,15 @@ class Place:
     protected: list[Path]
 
 
-def split(command: str) -> list[Command] | None:
+def split(command: str, dialect: str = "sh") -> list[Command] | None:
     """The commands of a chain, or None when the line cannot be split safely (substitution, heredoc, subshell,
-    unbalanced quotes)."""
-    if NOT_SPLITTABLE.search(command):
+    unbalanced quotes, ANSI-C quoting). In sh, `$(`, backticks and `<<` that are only text (quoted or escaped,
+    see specials_are_text) do not count; PowerShell is judged on the whole text."""
+    if dialect == "sh":
+        literal = specials_are_text(command)
+        if literal is None or (not literal and NOT_SPLITTABLE.search(command)):
+            return None
+    elif NOT_SPLITTABLE.search(command):
         return None
     command = _newlines_as_separators(command)
     if command is None:
@@ -152,6 +158,37 @@ def split(command: str) -> list[Command] | None:
     elif current.redirects:
         return None
     return commands or None
+
+
+def specials_are_text(command: str) -> bool | None:
+    """Bash: True when every `$(`, backtick, `<<`, `<(`, `>(` in the command is only text: inside '…', escaped
+    with `\\`, or (`<<`, `<(`, `>(` only) inside "…". False when one of them runs, or when the quoting is past what
+    this scan follows (`${…}` and `$[…]` can hold quotes of their own, `#` starts a comment that hides a quote):
+    judge the whole text then. None when the line must never be split: an unclosed quote, or `$'…'` (ANSI-C
+    quoting, where `\\'` does not end the string)."""
+    i, n = 0, len(command)
+    quote = ""
+    while i < n:
+        ch, pair = command[i], command[i : i + 2]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+        elif ch == "\\":
+            i += 2  # \$ \` \' \" \\ … (inside "…" a backslash before any other character is text, so is that one)
+            continue
+        elif ch == "`" or pair in ("$(", "${", "$["):
+            return False
+        elif quote == '"':
+            if ch == '"':
+                quote = ""
+        elif pair == "$'":
+            return None
+        elif ch in "'\"":
+            quote = ch
+        elif pair in ("<<", "<(", ">(") or (ch == "#" and (i == 0 or command[i - 1] in " \t\r\n;&|()<>")):
+            return False
+        i += 1
+    return None if quote else True
 
 
 def _newlines_as_separators(command: str) -> str | None:

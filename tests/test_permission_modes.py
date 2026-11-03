@@ -474,3 +474,102 @@ def test_ac3_powershell_quoted_loops_are_not_denied(engine, ws, command, monkeyp
     assert shell.wait_loop(command, dialect="ps") is False, command
     verdict = engine.decide("PowerShell", {"command": command}, c)
     assert verdict == without_wait_check(monkeypatch, engine, "PowerShell", command, c)
+
+
+# ---- SI-27: specials inside single quotes or escaped are text; real substitution and heredocs are not ------
+
+FILE_WRITE_REASON = "Do not write files through the shell"
+
+
+def test_ac1_single_quoted_specials_are_text(engine, ws):
+    command = """uv run python -c 'print("$(x) `y` <<z")'"""
+    verdict = engine.decide("Bash", {"command": command}, ctx(ws))
+    assert verdict.decision == Decision.ALLOW, verdict.reason
+    parts = shell.split(command)
+    assert len(parts) == 1 and parts[0].argv[:4] == ["uv", "run", "python", "-c"]
+
+
+@pytest.mark.parametrize("command", ['echo "$(whoami)"', 'echo "`id`"'])
+def test_ac2_substitution_in_double_quotes_still_unsplit(engine, ws, command):
+    assert shell.split(command) is None
+    assert decide(engine, ctx(ws), command) == Decision.ASK
+
+
+def test_ac3_escaped_dollar_in_double_quotes(engine, ws):
+    command = r'git commit -m "after \$(. x"'
+    parts = shell.split(command)
+    assert len(parts) == 1 and parts[0].argv[:3] == ["git", "commit", "-m"]
+    assert decide(engine, ctx(ws), command) == Decision.ALLOW
+
+
+@pytest.mark.parametrize("command", ["echo $(whoami)", "echo `id`", "cat <<EOF", "diff <(ls a) b"])
+def test_ac4_unquoted_specials_still_unsplit(command):
+    assert shell.split(command) is None
+
+
+@pytest.mark.parametrize("command", ["echo 'abc $(x)", 'echo "abc'])
+def test_ac5_unclosed_quote_unsplit(command):
+    assert shell.split(command) is None
+
+
+@pytest.mark.parametrize("command", [r"echo \`date\`", r"echo \$HOME"])
+def test_ac6_escaped_specials_outside_quotes(command):
+    parts = shell.split(command)
+    assert len(parts) == 1 and parts[0].argv[0] == "echo"
+
+
+def test_ac6_plain_parameter_expansion_still_splits():
+    parts = shell.split("ls ${HOME}/a && echo '#' x")
+    assert [p.argv[0] for p in parts] == ["ls", "echo"]
+
+
+def test_ac7_redirect_like_text_in_double_quotes():
+    parts = shell.split('echo "a <<b <(c) >(d)"')
+    assert len(parts) == 1 and parts[0].argv == ["echo", "a <<b <(c) >(d)"]
+
+
+@pytest.mark.parametrize("command", [r'echo "\\$(whoami)"', r"echo \\$(whoami)", r"echo \' $(whoami) \'"])
+def test_ac8_escaped_backslash_or_quote_before_substitution(command):
+    assert shell.split(command) is None
+
+
+@pytest.mark.parametrize("command", [r"echo $'a\'' $(whoami) '", "echo $'x'"])
+def test_ac9_ansi_c_quoting_unsplit(command):
+    assert shell.split(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # bash runs these substitutions although a scan that only tracks quotes would think they are quoted
+        """echo "${x:-"}'$(id)'"}\"""",
+        "echo a #'\necho $(id) #'",
+        "echo $[1]'$(id)'",
+    ],
+)
+def test_ac9_quoting_tricks_fall_back_to_the_whole_text(command):
+    assert shell.split(command) is None
+
+
+@pytest.mark.parametrize("command", ["uv run python -c 'x = a <<b'", 'echo "see <<EOF"'])
+def test_ac10_heredoc_text_in_quotes_not_denied(engine, ws, command):
+    verdict = engine.decide("Bash", {"command": command}, ctx(ws))
+    assert not (verdict.decision == Decision.DENY and verdict.reason.startswith(FILE_WRITE_REASON)), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["cat <<EOF", "echo 'a <<b' && cat <<EOF", "git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\"", "echo $'x' <<EOF"],
+)
+def test_ac11_real_heredoc_still_denied(engine, ws, command):
+    verdict = engine.decide("Bash", {"command": command}, ctx(ws))
+    assert verdict.decision == Decision.DENY and verdict.reason.startswith(FILE_WRITE_REASON), command
+
+
+def test_ac12_powershell_unchanged(engine, ws):
+    command = """uv run python -c 'print("$(x)")'"""
+    assert engine.decide("PowerShell", {"command": command}, ctx(ws)).decision == Decision.ASK
+    verdict = engine.decide("PowerShell", {"command": "Write-Host 'a <<EOF'"}, ctx(ws))
+    assert verdict.decision == Decision.DENY and verdict.reason.startswith(FILE_WRITE_REASON)
+    assert shell.split(r"echo \$(whoami)", "ps") is None
+    assert shell.split("echo '$(whoami)'", "ps") is None

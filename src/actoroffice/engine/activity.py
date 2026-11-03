@@ -111,7 +111,7 @@ class ActivityTracker:
         if kind == "retry":
             return Activity(
                 kind="health",
-                title=f"Claude khởi động lỗi, thử lại lần {payload.get('attempt')}",
+                title=f"{payload.get('runtime') or 'Claude'} gặp lỗi, thử lại lần {payload.get('attempt')}",
                 status="error",
                 fields={"attempt": payload.get("attempt"), "delay_s": payload.get("delay_s")},
             )

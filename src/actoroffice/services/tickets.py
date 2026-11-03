@@ -20,6 +20,7 @@ from actoroffice.domain.work import (
 )
 from actoroffice.store import Database, Tx
 
+from .interactions import cancel_closed_ticket_cards, interaction_from_row
 from .wakes import WakeService
 
 S = TicketStatus
@@ -261,10 +262,18 @@ class TicketService:
             if comment:
                 await self._insert_comment(tx, ticket.id, "actor" if run_id else "user", by, comment)
             await self._system_comment(tx, ticket.id, f"{ticket.status.value} → {to.value} by {by}")
+            cancelled: list[str] = []
             if to == S.DONE or to == S.CANCELLED:
                 await self._unblock_dependents(tx, ticket.id)
+                # a held comment wake and an open gate card or question would outlive the ticket (SI-29)
+                await self.wakes.drop_for_ticket(ticket.id, f"ticket {to.value}", tx)
+                cancelled = await cancel_closed_ticket_cards(tx, "?", (ticket.id,))
             updated = await self._get(tx, ticket.id)
         self.bus.publish("ticket.updated", ticket=updated.model_dump(), previous=ticket.status.value, by=by, comment=comment)
+        for interaction_id in cancelled:
+            row = await self.db.fetchone("SELECT * FROM interactions WHERE id = ?", (interaction_id,))
+            if row:
+                self.bus.publish("interaction.resolved", interaction=interaction_from_row(row).model_dump())
         return updated
 
     async def checkout(self, ref: int | str, actor_id: str, run_id: str, *, ignore_blockers: bool = False) -> Ticket:

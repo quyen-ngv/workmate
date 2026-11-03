@@ -131,6 +131,8 @@ class Office:
         await self.automations.reap()
         if recovered:
             log.warning("recovered %d orphaned run(s)", recovered)
+        if withdrawn := await self.interactions.cancel_for_closed_tickets():
+            log.info("withdrew %d pending card(s) of closed tickets", withdrawn)
         await self.start_notifier()
         if schedule:
             self._tasks.append(asyncio.create_task(self.scheduler.run_forever(), name="scheduler"))

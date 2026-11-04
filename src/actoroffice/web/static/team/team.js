@@ -102,19 +102,25 @@ async function loadBoard() {
 }
 
 // One page of done/cancelled tickets (offset 0 starts over).
+let closedSeq = 0;
+// Only the latest call applies its page: an older one (other team, or "Xem thêm" overtaken by a reload) is dropped.
 async function loadClosed(offset = 0) {
+  const seq = ++closedSeq;
   state.closed.loading = true;
   renderSidebar();
   try {
     const team = state.team;
     const page = await api(`/api/board?closed=true&limit=20&offset=${offset}${team ? `&team=${encodeURIComponent(team)}` : ""}`);
+    if (seq !== closedSeq) return;
     state.closed.items = offset ? [...state.closed.items, ...page.tickets] : page.tickets;
     state.closed.has_more = page.has_more;
     if (team) state.board.closed_by_team = { ...state.board.closed_by_team, [team]: page.closed_count };
     else state.board.closed_count = page.closed_count;
   } finally {
-    state.closed.loading = false;
-    renderSidebar();
+    if (seq === closedSeq) {
+      state.closed.loading = false;
+      renderSidebar();
+    }
   }
 }
 

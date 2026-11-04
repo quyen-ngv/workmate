@@ -290,6 +290,8 @@ def test_ac1_team_js_closed_count_by_team() -> None:
     assert "state.team ? (state.board.closed_by_team || {})[state.team] || 0 : state.board.closed_count" in side
     load = _fn(js, "loadClosed")
     assert "&team=${encodeURIComponent(team)}" in load and "closed_by_team" in load
+    # a stale page (other team, or "Xem thêm" overtaken by a reload) is dropped
+    assert "const seq = ++closedSeq" in load and load.index("if (seq !== closedSeq) return") < load.index("state.closed.items =")
     # switching team with the section open reloads it from the server
     switch = js[js.index("if (ds.team !== undefined)") : js.index("if (ds.closedToggle !== undefined)")]
     assert "state.closed.open" in switch and "loadClosed(0)" in switch

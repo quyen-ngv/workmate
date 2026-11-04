@@ -21,6 +21,7 @@ from actoroffice.app import Office
 from actoroffice.config import Settings
 from actoroffice.domain.work import ProjectAccess
 from actoroffice.engine.gate import ENV_DUMP
+from actoroffice.services.projects import ProjectError
 
 from .fakes import FakeRuntime
 from .seed import seed_db
@@ -134,7 +135,9 @@ def test_ac7_readme_documents_the_lint_command() -> None:
 
 
 async def test_ac8_repo_lint_check_passes_on_this_repo(office) -> None:
-    project = await office.projects.create("actor-office", path=str(ROOT), access=ProjectAccess.READ_ONLY)
+    # No project path: the checkout may hold the office data dir (TEMP inside an office worktree), which
+    # projects._validated rightly refuses; the check runs on ROOT through the workspace argument.
+    project = await office.projects.create("actor-office", path=None, access=ProjectAccess.READ_ONLY)
     # The profile command is `uv run ruff check src tests`; the test calls the same ruff directly (no nested uv).
     await office.projects.configure(project.id, profile={"lint": [ruff(), *LINT.split()[3:]]})
     result, _ = await run_checks(office, await build_ticket(office, project), ROOT, "repo:lint")
@@ -153,9 +156,30 @@ async def test_ac8_repo_lint_check_fails_on_a_violation(office, tmp_path) -> Non
     assert result.status == "failed" and result.data["exit"] == 1
 
 
+async def test_si37_ac1_lint_check_runs_on_a_repo_that_holds_the_data_dir(tmp_path) -> None:
+    # Like a run of the office: TEMP (so tmp_path and the data dir) inside the checkout under test
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    shutil.copy(ROOT / "pyproject.toml", repo / "pyproject.toml")
+    (repo / "src" / "app.py").write_text("def total(x):\n    return x\n", encoding="utf-8")
+    o = Office(Settings(data_dir=repo / ".ao-tmp" / "home", approval_wait_s=0.05), runtime=FakeRuntime(scripts=[]))
+    seed_db(o.settings.db_path)
+    await o.open()
+    try:
+        with pytest.raises(ProjectError, match="dữ liệu của văn phòng"):  # _validated still refuses it
+            await o.projects.create("svc", path=str(repo), access=ProjectAccess.READ_ONLY)
+        project = await o.projects.create("svc", path=None, access=ProjectAccess.READ_ONLY)
+        await o.projects.configure(project.id, profile={"lint": [ruff(), *LINT.split()[3:]]})
+        result, _ = await run_checks(o, await build_ticket(o, project), repo, "repo:lint")
+        assert result.status == "passed", result.summary
+    finally:
+        await o.close()
+
+
 @pytest.mark.parametrize("missing", [{}, {"test": "pytest"}])
 async def test_ac8_without_a_lint_command_the_check_is_skipped(office, missing) -> None:
-    project = await office.projects.create("bare", path=str(ROOT), access=ProjectAccess.READ_ONLY)
+    project = await office.projects.create("bare", path=None, access=ProjectAccess.READ_ONLY)
     await office.projects.configure(project.id, profile=missing)
     result, _ = await run_checks(office, await build_ticket(office, project), ROOT, "repo:lint")
     assert result.status == "skipped"

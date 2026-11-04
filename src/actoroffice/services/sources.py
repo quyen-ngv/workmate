@@ -29,8 +29,10 @@ ERROR_LIMIT = 300
 COMMENT_POSITION = 100_000  # people's comments come after the description's sources
 FILE_READ_TOOLS = {"Read", "NotebookRead"}
 TOKEN_SPLIT = re.compile(r"[\s'\"<>|;&()]+")
-# A shell command that prints a file's content (R4): one command per call, so its first word is the program
-FILE_READ_COMMAND = re.compile(r"^\s*(?:cat|head|tail|less|more|nl|bat|type|sed\s+-n|Get-Content|gc)\b(?!\s*(?:>|$))", re.IGNORECASE)
+# A shell command that prints a file's content (R4). Only one plain command counts: a chain, pipe, redirection or
+# substitution (`cat a; git add x`, `cat x > y`, `$(…)`) is not taken apart, so it never marks a file read.
+FILE_READ_COMMAND = re.compile(r"^\s*(?:cat|head|tail|less|more|nl|bat|type|sed\s+-n|Get-Content|gc)\s", re.IGNORECASE)
+NOT_ONE_COMMAND = re.compile(r"[;&|\n\r>`]|\$\(")
 
 
 async def sync_tx(tx: Tx, ticket_id: int, description: str) -> None:
@@ -118,6 +120,7 @@ class SourceService:
             (ticket.id,),
         )
         acts = [json.loads(e["activity_json"]) for e in events]
+        roots = await self.roots(ticket)
         now = utcnow()
         for row in rows:
             ok, error = False, None
@@ -132,6 +135,12 @@ class SourceService:
                 await office.db.execute(
                     "UPDATE ticket_sources SET status = 'read', error = NULL, done_at = ?, updated_at = ? WHERE id = ?", (now, now, row["id"])
                 )
+            elif error is not None and row["kind"] == "file" and _exists(roots, row["ref"]):
+                # a failed read of the wrong path: the file is there, so it is still unread (R6)
+                if row["status"] == "error":
+                    await office.db.execute(
+                        "UPDATE ticket_sources SET status = 'unread', error = NULL, done_at = NULL, updated_at = ? WHERE id = ?", (now, row["id"])
+                    )
             elif error is not None and (row["status"] != "error"):
                 await office.db.execute(
                     "UPDATE ticket_sources SET status = 'error', error = ?, done_at = ?, updated_at = ? WHERE id = ?", (error, now, now, row["id"])
@@ -305,7 +314,7 @@ def _matches(kind: str, ref: str, fields: dict[str, Any]) -> bool:
         if tool in FILE_READ_TOOLS:
             paths.append(str(fields.get("path") or ""))
         command = str(fields.get("command") or "")
-        if FILE_READ_COMMAND.match(command):  # only a command that prints the file counts, not `ls` / `git add` / `rm`
+        if FILE_READ_COMMAND.match(command) and not NOT_ONE_COMMAND.search(command):  # not `ls` / `git add` / `rm`
             paths += TOKEN_SPLIT.split(command)
         return any(_same_file(p, ref) for p in paths if p)
     return False
@@ -314,6 +323,14 @@ def _matches(kind: str, ref: str, fields: dict[str, Any]) -> bool:
 def _same_file(path: str, ref: str) -> bool:
     p = path.replace("\\", "/").strip()
     return p == ref or p.endswith("/" + ref)
+
+
+def _exists(roots: list[Path], ref: str) -> bool:
+    for root in roots:
+        target = (root / ref).resolve()
+        if target.is_relative_to(root) and target.is_file():
+            return True
+    return False
 
 
 def _heading(roots: list[Path], ref: str) -> str:

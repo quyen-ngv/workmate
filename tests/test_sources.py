@@ -229,7 +229,15 @@ async def test_ac5_sources_read_passes_from_activity(office: Office) -> None:
     assert {s["status"] for s in await sources(office, ticket)} == {"read"}
 
 
-@pytest.mark.parametrize("command", ["ls docs/x.md", "git add docs/x.md", "rm docs/x.md", "wc -l docs/x.md", "sed -i s/a/b/ docs/x.md", "echo docs/x.md"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls docs/x.md", "git add docs/x.md", "rm docs/x.md", "wc -l docs/x.md", "sed -i s/a/b/ docs/x.md", "echo docs/x.md",
+        # a read command chained with another one: never taken apart (review F1, round 2)
+        "cat README.md; git add docs/x.md", "cat a.txt && rm docs/x.md", "cat docs/x.md > /dev/null", "cat a.txt | tee docs/x.md",
+        "cat a.txt\ngit add docs/x.md", "cat $(echo docs/x.md)", "cat `echo docs/x.md`", "cat a.txt || rm docs/x.md",
+    ],
+)
 async def test_ac5_commands_that_do_not_read_the_file_do_not_count(office: Office, command: str) -> None:
     ticket = await staged(office, "Hoàn tiền", "Theo docs/x.md")
     await tool_call(office, ticket.id, "Bash", {"command": command})
@@ -303,6 +311,23 @@ async def test_ac8_read_error_recorded(office: Office) -> None:
     assert (await run_check(office, ticket)).status == "passed"
     await tool_call(office, ticket.id, "Read", {"file_path": "/ws/docs/missing.md"})  # read later: read wins
     assert [s["status"] for s in await sources(office, ticket)] == ["read"]
+
+
+async def test_ac8_failed_read_of_a_file_that_exists_stays_unread(office: Office) -> None:
+    """Review F4: Read on the wrong root fails, but the file is in the workspace: not "could not be read"."""
+    ticket = await staged(office, "Sai gốc", "Theo docs/x.md")
+    (office.settings.workspaces_dir / ticket.key / "docs").mkdir(parents=True)
+    (office.settings.workspaces_dir / ticket.key / "docs" / "x.md").write_text("# X\n", encoding="utf-8")
+    await tool_call(office, ticket.id, "Read", {"file_path": "/tmp/x/docs/x.md"}, error="File does not exist.")
+    assert [s["status"] for s in await sources(office, ticket)] == ["unread"]
+    assert (await run_check(office, ticket)).status == "failed"
+    # an error recorded while the file was missing goes back to unread once the file is there
+    other = await staged(office, "Thiếu rồi có", "Theo docs/y.md")
+    await tool_call(office, other.id, "Read", {"file_path": "/ws/docs/y.md"}, error="File does not exist.")
+    assert [s["status"] for s in await sources(office, other)] == ["error"]
+    (office.settings.workspaces_dir / other.key / "docs").mkdir(parents=True)
+    (office.settings.workspaces_dir / other.key / "docs" / "y.md").write_text("# Y\n", encoding="utf-8")
+    assert [s["status"] for s in await sources(office, other)] == ["unread"]
 
 
 async def test_ac8_jira_and_confluence_reads(office: Office) -> None:

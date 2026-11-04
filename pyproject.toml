@@ -36,6 +36,7 @@ dev = [
     "playwright>=1.64",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.17.3",
@@ -48,6 +49,10 @@ testpaths = ["tests"]
 addopts = "-n auto"
 # Keep only the tmp dirs of failed tests, so a session does not have to sweep hundreds of old git repos first.
 tmp_path_retention_policy = "failed"
+
+[tool.coverage.run]
+# Only when asked (`--cov`, see README "Coverage"); xdist workers' data is combined by pytest-cov.
+source = ["actoroffice"]
 
 [tool.ruff]
 line-length = 200

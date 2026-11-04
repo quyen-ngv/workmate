@@ -183,13 +183,14 @@ def _to_turn_result(
         return TurnResult(status=TurnStatus.ERROR, error="no result from Claude", rate_limit=rate_limit, usage=Usage(model=model))
     usage = Usage.from_sdk(result.usage)
     usage.model = model or _main_model(result.model_usage)
+    structured = getattr(result, "structured_output", None)
     common = {
         "session_id": result.session_id,
         "text": "\n\n".join(texts).strip(),
         "usage": usage,
         "cost_usd": float(result.total_cost_usd or 0.0),
         "rate_limit": rate_limit,
-        "structured": result.structured_output if isinstance(result.structured_output, dict) else None,
+        "structured": structured if isinstance(structured, dict) else None,
     }
     reason = result.terminal_reason or ""
     if result.deferred_tool_use is not None:

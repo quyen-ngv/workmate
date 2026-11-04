@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 KINDS = ("fact", "code_note", "decision", "contract", "flow")
 KIND_VI = {"fact": "Nghiệp vụ & thuật ngữ", "code_note": "Ghi chú code", "decision": "Quyết định", "contract": "Hợp đồng tích hợp", "flow": "Luồng nghiệp vụ"}
 MAX_CONTENT = 4000
+SOURCE_SLOTS = 4  # items a ticket's sources may add to what its description finds (SI-39)
 
 
 class KbError(OfficeError):
@@ -159,7 +160,15 @@ class KnowledgeService:
         return item
 
     async def for_ticket(self, ticket: Any, *, limit: int = 12) -> list[KbItem]:
-        return await self.search(f"{ticket.title} {ticket.description[:400]}", team_id=ticket.team_id, limit=limit)
+        items = await self.search(f"{ticket.title} {ticket.description[:400]}", team_id=ticket.team_id, limit=limit)
+        # The titles of the ticket's sources find what its first 400 characters do not name (SI-39). A search of its
+        # own: the query keeps only its first words.
+        extra = await self.office.sources.search_text(ticket)
+        if not extra:
+            return items
+        seen = {i.id for i in items}
+        more = [i for i in await self.search(extra, team_id=ticket.team_id, limit=SOURCE_SLOTS) if i.id not in seen][:limit]
+        return items[: limit - len(more)] + more
 
     async def review_close(self, ticket_id: int, *, approved: bool, note: str, by: str) -> dict[str, list[int]]:
         """The knowledge gate at ticket close: accept the ticket's draft items except those named in the note

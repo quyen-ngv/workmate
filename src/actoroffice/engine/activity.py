@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from .failures import retry_title
 
-READ_TOOLS = {"Read", "NotebookRead", "list_dir", "doc_get", "ticket_get", "skill_read", "stage_info"}
+READ_TOOLS = {"Read", "NotebookRead", "list_dir", "doc_get", "ticket_get", "skill_read", "stage_info", "jira_issue", "wiki_page"}
 SEARCH_TOOLS = {"Grep", "Glob", "history_search", "memory_search", "kb_search", "rule_search", "WebSearch", "tickets_list"}
 SOURCE_TOOLS = {"WebFetch", "db_query", "db_schema", "logs_search", "logs_errors", "logs_cluster", "logs_trace", "kafka_peek", "mq_peek", "redis_scan"}
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
@@ -165,6 +165,8 @@ class ActivityTracker:
                 done.fields["hits"] = hits
         elif payload.get("error"):
             done.title += " → lỗi: " + _one_line(text, 160)
+        if payload.get("error"):
+            done.fields["error"] = _one_line(text, 300)  # a source that could not be read shows why (SI-39)
         return done
 
 
@@ -188,10 +190,16 @@ def describe_call(tool: str, args: dict[str, Any]) -> Activity | None:
             fields={"path": path, "added": added, "removed": removed, "sig": _digest(old, new), "undo": _digest(new, old)},
         )
     if tool in READ_TOOLS:
-        target = path or str(args.get("key") or args.get("name") or args.get("ticket") or "")
+        target = path or str(args.get("key") or args.get("name") or args.get("ticket") or args.get("id") or "")
         part = f"{args.get('offset') or ''}:{args.get('limit') or ''}"
-        verb = {"doc_get": "Đọc tài liệu", "ticket_get": "Đọc ticket", "skill_read": "Đọc skill", "list_dir": "Xem thư mục", "stage_info": "Xem giai đoạn"}.get(tool, "Đọc")
-        return Activity(kind="read", title=f"{verb} `{_short_path(target)}`" if target else verb, fields={"tool": tool, "path": target, "part": part})
+        verb = {
+            "doc_get": "Đọc tài liệu", "ticket_get": "Đọc ticket", "skill_read": "Đọc skill", "list_dir": "Xem thư mục", "stage_info": "Xem giai đoạn",
+            "jira_issue": "Đọc Jira", "wiki_page": "Đọc trang Confluence",
+        }.get(tool, "Đọc")
+        fields = {"tool": tool, "path": target, "part": part}
+        # which ticket, issue or page was read: the sources of a ticket are matched on them (SI-39)
+        fields.update({k: str(args[k]) for k in ("ticket", "key", "id") if args.get(k)})
+        return Activity(kind="read", title=f"{verb} `{_short_path(target)}`" if target else verb, fields=fields)
     if tool in SEARCH_TOOLS:
         query = str(args.get("pattern") or args.get("query") or args.get("glob") or "")
         return Activity(kind="search", title=f"Tìm `{_one_line(query, 80)}`" + (f" trong `{_short_path(path)}`" if path else ""), fields={"tool": tool, "query": query})

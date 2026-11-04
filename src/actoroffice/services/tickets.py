@@ -21,6 +21,7 @@ from actoroffice.domain.work import (
 from actoroffice.store import Database, Tx
 
 from .interactions import cancel_closed_ticket_cards, interaction_from_row
+from .sources import sync_tx as sync_sources
 from .wakes import WakeService
 
 S = TicketStatus
@@ -85,6 +86,7 @@ class TicketService:
             )
             ticket_id = int(cur.lastrowid or 0)
             await tx.execute("UPDATE tickets SET key = ? WHERE id = ?", (f"{self.key_prefix}-{ticket_id}", ticket_id))
+            await sync_sources(tx, ticket_id, description)  # every way a ticket is made passes here (SI-39)
             for blocker in blocked_by or []:
                 await tx.execute("INSERT INTO ticket_blockers(ticket_id, blocker_id) VALUES (?, ?)", (ticket_id, blocker))
             if assignee_actor_id and status in (S.TODO, S.IN_REVIEW):

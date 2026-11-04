@@ -355,6 +355,29 @@ STAGE_TOOLS: list[ToolDef] = [
 ]
 
 
+async def source_skip(args: dict[str, Any], ctx: ToolCtx) -> str:
+    """A source of the ticket does not bear on it: record why (SI-39). Reading is only ever taken from the activity."""
+    ticket = await _stage_ctx(ctx)
+    try:
+        skipped = await ctx.office.sources.skip(ticket, str(args.get("ref") or ""), str(args.get("reason") or ""))
+    except OfficeError as exc:
+        raise ToolError(str(exc)) from exc
+    if not skipped:
+        return "That source is already read: nothing to skip."
+    return f"Recorded as not relevant: {', '.join(skipped)}. Write it in dossier section links with the reason."
+
+
+STAGE_TOOLS.append(
+    ToolDef(
+        "source_skip",
+        "Record that one source of this ticket (a ticket key, file or URL listed under 'Sources of this ticket') does "
+        "not bear on it, with the reason (required). Sources you read are recorded from your activity: do not call this for them.",
+        schema({"ref": {"type": "string"}, "reason": {"type": "string"}}, required=["ref", "reason"]),
+        source_skip,
+    )
+)
+
+
 # ---- rules ---------------------------------------------------------------------------------------------
 
 

@@ -6,7 +6,8 @@ The office runs it as the project's `ui.seed` command, in a fresh data folder gi
 
 It fills that folder (never ~/.actoroffice) with a team, two people and tickets at the stages the team UI shows:
 understand, build (waiting at a gate card), pr (review findings, an AC [review], AC [ui] with a screenshot and one
-with an environment reason), one done and one cancelled. Running it twice adds nothing.
+with an environment reason), one done and one cancelled, one with sources in the "Nguồn" tab (SI-39). Running it
+twice adds nothing.
 """
 
 from __future__ import annotations
@@ -106,7 +107,8 @@ async def seed(office: Office) -> None:
         reason = "không tìm thấy Chrome hoặc Edge trên máy"
         await office.tickets.add_work_product(ticket_id, "ui_error", reason, {"ac": "AC-3", "reason": reason})
 
-    await ticket("Thêm bộ lọc theo ngày cho danh sách đơn", "understand")
+    first = await ticket("Thêm bộ lọc theo ngày cho danh sách đơn", "understand")
+    await sources(office, team.id, (await office.tickets.get(first)).key)
 
     build = await ticket("Hộp xác nhận hoàn tiền (thẻ duyệt sau build)", "build")
     await evidence(build)
@@ -134,6 +136,28 @@ async def seed(office: Office) -> None:
     await proposals(office, team.id)
     await queue(office, team.id)
     await failed_run(office, await ticket("Gửi email xác nhận hoàn tiền (lượt lỗi mạng)", "build"))
+
+
+async def sources(office: Office, team_id: str, other_key: str) -> None:
+    """SI-39: a ticket at understand whose description names a file read (with its line), a ticket not read yet,
+    an external URL and a file that could not be read; the file exists in the ticket's workspace."""
+    description = (
+        f"Đối soát hoàn tiền theo src/a/b.py:120 và {other_key}. Tham khảo https://example.com/refund-guide. "
+        "Thiết kế cũ ở docs/missing.md."
+    )
+    created = await office.tickets.create("Đối soát hoàn tiền (nguồn tài liệu)", description=description, created_by="user")
+    await office.stages.start(created.id, template="code", by=LOCAL_OWNER_ID, team_id=team_id)
+    code = office.settings.workspaces_dir / created.key / "src" / "a" / "b.py"
+    code.parent.mkdir(parents=True, exist_ok=True)
+    code.write_text("".join(f"def step_{n}():\n    return {n}\n\n" for n in range(1, 60)), encoding="utf-8")
+    now = utcnow()
+    await office.db.execute(
+        "UPDATE ticket_sources SET status = 'read', done_at = ? WHERE ticket_id = ? AND ref = 'src/a/b.py'", (now, created.id)
+    )
+    await office.db.execute(
+        "UPDATE ticket_sources SET status = 'error', error = ?, done_at = ? WHERE ticket_id = ? AND ref = 'docs/missing.md'",
+        ("File does not exist.", now, created.id),
+    )
 
 
 async def failed_run(office: Office, ticket_id: int) -> None:

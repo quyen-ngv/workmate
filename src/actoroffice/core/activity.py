@@ -20,8 +20,9 @@ TOOL_VI = {
     "todo": "cập nhật việc cần làm", "Read": "đọc", "Write": "ghi file", "Edit": "sửa file", "MultiEdit": "sửa file",
     "Bash": "chạy lệnh", "PowerShell": "chạy lệnh", "Glob": "tìm file", "Grep": "tìm nội dung", "WebFetch": "đọc web",
     "WebSearch": "tìm web", "TodoWrite": "lập danh sách việc", "NotebookEdit": "sửa notebook",
+    "source_skip": "bỏ qua nguồn",
 }
-TARGET_KEYS = ("command", "file_path", "path", "url", "pattern", "title", "key", "ticket", "name", "query", "question")
+TARGET_KEYS = ("command", "file_path", "path", "url", "pattern", "title", "key", "ticket", "name", "query", "question", "ref")
 
 
 def describe_tool(tool: str, args: dict[str, Any] | None) -> str:

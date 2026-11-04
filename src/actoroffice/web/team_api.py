@@ -277,6 +277,18 @@ def register(app: FastAPI, office: Office) -> None:
             raise NotFound(f"file của artifact {product_id} không còn")
         return FileResponse(path, headers={"Cache-Control": "private, max-age=3600"})
 
+    @app.get("/api/tickets/{key}/sources")
+    async def ticket_sources(key: str) -> list[dict[str, Any]]:
+        """The "Nguồn" tab (SI-39): what the ticket names and whether the AI read it. Another team's ticket: key only."""
+        ticket = await office.tickets.get(key)
+        return await office.sources.list(ticket)
+
+    @app.get("/api/tickets/{key}/sources/file")
+    async def ticket_source_file(key: str, path: str) -> dict[str, Any]:
+        """A file that is a source of the ticket, from its workspace or project folder only."""
+        ticket = await office.tickets.get(key)
+        return await office.sources.file_text(ticket, path)
+
     @app.post("/api/tickets/{key}/participants")
     async def set_participant(key: str, body: ParticipantBody) -> dict[str, Any]:
         ticket = await office.tickets.get(key)

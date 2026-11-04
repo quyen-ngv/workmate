@@ -54,6 +54,7 @@ from actoroffice.services.review import ReviewService
 from actoroffice.services.rules import RuleService
 from actoroffice.services.runs import RunService
 from actoroffice.services.skills import SkillService, split_front_matter
+from actoroffice.services.sources import SourceService
 from actoroffice.services.stages import StageService
 from actoroffice.services.teams import TeamService
 from actoroffice.services.tickets import TicketService
@@ -107,6 +108,7 @@ class Office:
         self.logs = LogService(self)
         self.ui = UiPreviewService(self)  # the ticket's temporary app for UI screenshots (SI-23)
         self.proposals = ProposalService(self)  # lists of proposed tickets approved in one go (SI-24)
+        self.sources = SourceService(self)  # what a ticket's description points to and what the AI read of it (SI-39)
         self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),

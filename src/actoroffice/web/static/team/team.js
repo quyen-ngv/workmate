@@ -1,5 +1,5 @@
 // Team copilot UI: teams and tickets on the left (herdr-like), tabs on top, one or two ticket panes, and a side
-// panel with Files / Changes / Dossier / Rules / Access. Everything is live through the office's WebSocket.
+// panel with Files / Changes / Dossier / Nguồn / Rules / Access. Everything is live through the office's WebSocket.
 
 const HEADERS = { "X-Requested-With": "actoroffice", "Content-Type": "application/json" };
 const ICON = {
@@ -216,7 +216,7 @@ function renderSidebar() {
 // ---- tabs ----------------------------------------------------------------------------------------------------
 
 function renderTabs() {
-  const sides = [["files", "Files"], ["changes", "Changes"], ["dossier", "Dossier"], ["rules", "Rules"], ["access", "Access"]];
+  const sides = [["files", "Files"], ["changes", "Changes"], ["dossier", "Dossier"], ["sources", "Nguồn"], ["rules", "Rules"], ["access", "Access"]];
   $("#tabs").innerHTML = `
     ${state.open.map((key) => {
       const t = ticketInfo(key);
@@ -500,6 +500,9 @@ async function renderSide() {
       const order = ["dossier", "requirements", "plan", "handoff", "report", "document", "kb-draft"];
       docs.sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
       body.innerHTML = docs.map((d) => `<div class="doc"><h2>${esc(d.key)} <span class="chip">rev ${d.revision}${d.approved_revision ? ` · duyệt rev ${d.approved_revision}` : ""}</span></h2>${md(d.body)}</div>`).join("<hr>") || `<div class="empty">Chưa có tài liệu.</div>`;
+    } else if (state.side === "sources") {
+      const list = await api(`/api/tickets/${key}/sources`);
+      body.innerHTML = list.map((s) => sourceRow(key, s)).join("") || `<div class="empty">Ticket không nhắc nguồn nào.</div>`;
     } else if (state.side === "rules") {
       const r = await api(`/api/tickets/${key}/rules`);
       const block = (title, list) => list.length ? `<h3>${title}</h3>` + list.map((x) => `<div class="rule"><div class="h"><b>${esc(x.id)}</b><span class="chip">${esc(x.scope)}</span><span>${esc(x.title)}</span></div>${x.body ? `<div class="b">${esc(x.body)}</div>` : ""}</div>`).join("") : "";
@@ -513,6 +516,31 @@ async function renderSide() {
   } catch (e) {
     body.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
   }
+}
+
+const SOURCE_KIND = { ticket: "ticket", jira: "Jira", file: "file", url: "URL", comment: "comment" };
+
+// One source of the ticket (SI-39): kind, target with its place kept next to it, status with the reason or error.
+function sourceRow(key, s) {
+  const place = s.locator ? `<span class="src-loc">${s.locator.startsWith("§") ? " " : ""}${esc(s.locator)}</span>` : "";
+  let target = `<span class="src-ref">${esc(s.ref)}</span>${place}`;
+  if (s.kind === "file") target = `<a href="#" class="src-ref" data-src-file="${esc(s.ref)}" data-src-key="${esc(key)}" data-src-loc="${esc(s.locator)}">${esc(s.ref)}${place}</a>`;
+  else if (s.kind === "ticket" && s.link) target = `<a href="#" class="src-ref" data-open="${esc(s.link)}">${esc(s.ref)}</a>`;
+  else if (s.kind === "url" && s.link) target = `<a class="src-ref" href="${esc(s.link)}" target="_blank" rel="noopener noreferrer">${esc(s.ref)}</a>`;
+  const note = s.reason || s.error;
+  return `<div class="src"><div class="h"><span class="chip">${esc(SOURCE_KIND[s.kind] || s.kind)}</span>${target}<span class="chip src-${esc(s.status)}">${esc(s.label)}</span></div>` +
+    (s.title ? `<div class="b">${esc(s.title)}</div>` : "") + (note ? `<div class="b src-note">${esc(note)}</div>` : "") + `</div>`;
+}
+
+// A source file with line numbers, scrolled to the line of `:120` / `#L10-L20` (the lines are highlighted).
+async function openSourceFile(key, path, locator) {
+  const f = await api(`/api/tickets/${encodeURIComponent(key)}/sources/file?path=${encodeURIComponent(path)}`);
+  const m = /^(?::|#L)(\d+)(?:-L?(\d+))?$/.exec(locator || "");
+  const from = m ? Number(m[1]) : 0;
+  const to = m ? Number(m[2] || m[1]) : 0;
+  const lines = f.text.split("\n").map((l, i) => `<span class="ln${i + 1 >= from && i + 1 <= to ? " hl" : ""}" data-line="${i + 1}"><i>${i + 1}</i>${esc(l) || " "}</span>`).join("\n");
+  const body = sheet(`${path}${locator || ""}`, `<pre class="src-file">${lines}</pre>` + (f.truncated ? `<div class="empty">Chỉ hiện 512 KB đầu.</div>` : ""));
+  if (from) $(`[data-line="${from}"]`, body)?.scrollIntoView({ block: "center" });
 }
 
 // ---- first run checklist -------------------------------------------------------------------------------------
@@ -715,6 +743,7 @@ document.addEventListener("click", (e) => {
   if (!t) return;
   const ds = t.dataset;
   if (ds.open) { e.preventDefault(); $("#overlay").hidden = true; openTicket(ds.open); return; }
+  if (ds.srcFile) { e.preventDefault(); return act(() => openSourceFile(ds.srcKey, ds.srcFile, ds.srcLoc)); }
   if (ds.shot) { sheet(ds.shotTitle || "Ảnh chụp", `<img class="shot-full" src="${esc(ds.shot)}" alt="${esc(ds.shotTitle || "")}">`); return; }
   if (ds.team !== undefined) {
     state.team = ds.team || null;

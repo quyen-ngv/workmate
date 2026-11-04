@@ -163,6 +163,8 @@ class JiraMirror:
             ticket = await office.tickets.get(row["id"])
             if ticket.title != title or ticket.description.strip() != description.strip():
                 await office.db.execute("UPDATE tickets SET title = ?, description = ? WHERE id = ?", (title, description, ticket.id))
+                if ticket.description.strip() != description.strip():
+                    await office.sources.sync(ticket.id)  # kept sources keep their status, new ones are unread (SI-39)
                 approved = await office.db.fetchone(
                     "SELECT 1 FROM documents WHERE ticket_id = ? AND key = 'requirements' AND approved_revision IS NOT NULL", (ticket.id,)
                 )

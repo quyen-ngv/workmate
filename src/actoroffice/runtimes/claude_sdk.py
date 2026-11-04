@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import (
@@ -32,6 +35,8 @@ log = logging.getLogger(__name__)
 THINKING_LIMIT = 6000
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024  # the SDK default (1 MB) is too small for large file reads
 RESULT_PREVIEW = 400
+# Windows caps a whole command line at 32,767 characters; the prompt shares it with every other argument.
+PROMPT_ARG_LIMIT = 8000
 
 INTERNAL_SERVER = "office"
 
@@ -50,7 +55,8 @@ class ClaudeSdkRuntime:
             await client.interrupt()
 
     async def run_turn(self, spec: TurnSpec, gate: ToolGate, sink: EventSink) -> TurnResult:
-        options = self._options(spec, gate)
+        prompt_file = _prompt_file(spec.system_prompt)
+        options = self._options(spec, gate, prompt_file)
         texts: list[str] = []
         rate_limit: RateLimit | None = None
         result: ResultMessage | None = None
@@ -92,9 +98,11 @@ class ClaudeSdkRuntime:
             return TurnResult(status=TurnStatus.ERROR, error=f"{type(exc).__name__}: {exc}", rate_limit=rate_limit)
         finally:
             self._clients.pop(spec.run_id, None)
+            if prompt_file is not None:
+                prompt_file.unlink(missing_ok=True)
         return _to_turn_result(result, texts, rate_limit, assistant_error, model)
 
-    def _options(self, spec: TurnSpec, gate: ToolGate) -> ClaudeAgentOptions:
+    def _options(self, spec: TurnSpec, gate: ToolGate, prompt_file: Path | None = None) -> ClaudeAgentOptions:
         async def pre_tool_use(data: Any, tool_use_id: str | None, _ctx: Any) -> dict[str, Any]:
             res = await gate.before_tool(data["tool_name"], data.get("tool_input") or {}, tool_use_id)
             out: dict[str, Any] = {"hookEventName": "PreToolUse", "permissionDecision": res.decision.value}
@@ -110,11 +118,19 @@ class ClaudeSdkRuntime:
             # Every call is decided by the PreToolUse hook; reaching here means the CLI asked on its own.
             return PermissionResultDeny(message=f"{name} was not approved by the office policy")
 
-        system_prompt: Any = (
-            {"type": "preset", "preset": "claude_code", "append": spec.system_prompt}
-            if spec.coding_preset
-            else spec.system_prompt
-        )
+        extra_args: dict[str, str | None] = {}
+        system_prompt: Any
+        if prompt_file is not None:
+            # A long prompt goes in a file: on the command line it breaks the Windows limit (WinError 206).
+            if spec.coding_preset:
+                system_prompt = {"type": "preset", "preset": "claude_code"}
+                extra_args["append-system-prompt-file"] = str(prompt_file)
+            else:
+                system_prompt = {"type": "file", "path": str(prompt_file)}
+        elif spec.coding_preset:
+            system_prompt = {"type": "preset", "preset": "claude_code", "append": spec.system_prompt}
+        else:
+            system_prompt = spec.system_prompt
         mcp_servers: dict[str, Any] = {name: dict(cfg) for name, cfg in spec.mcp_servers.items() if name != INTERNAL_SERVER}
         if spec.internal_tools:
             mcp_servers[INTERNAL_SERVER] = create_sdk_mcp_server(
@@ -145,7 +161,18 @@ class ClaudeSdkRuntime:
             output_format={"type": "json_schema", "schema": spec.output_schema} if spec.output_schema else None,
             cli_path=self.cli_path,
             env={"CLAUDE_AGENT_SDK_CLIENT_APP": "actoroffice/0.1", **spec.env},
+            extra_args=extra_args,
         )
+
+
+def _prompt_file(system_prompt: str) -> Path | None:
+    """A file holding the system prompt when it is too long for the command line, else None."""
+    if len(system_prompt) <= PROMPT_ARG_LIMIT:
+        return None
+    fd, name = tempfile.mkstemp(prefix="ao-prompt-", suffix=".md")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(system_prompt)
+    return Path(name)
 
 
 def _result_text(content: Any) -> str:

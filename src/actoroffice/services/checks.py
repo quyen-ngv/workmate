@@ -78,6 +78,8 @@ class CheckContext:
     project: Project | None
     run_id: str | None
     docs: dict[str, str] = field(default_factory=dict)
+    # time.time() when repo:test started in this round: coverage_changed_lines ignores a report older than it
+    test_started: float | None = None
 
 
 class CheckRunner:
@@ -97,8 +99,9 @@ class CheckRunner:
         results: list[CheckResult] = []
         not_synced = False
         for check_id in only if only is not None else stage.checks:
-            if not_synced and check_id.startswith("repo:"):
-                # The branch lacks main's new commits: building or testing it now would test old code (SI-21)
+            if not_synced and (check_id.startswith("repo:") or check_id == "coverage_changed_lines"):
+                # The branch lacks main's new commits: building or testing it now would test old code (SI-21);
+                # coverage reads the report of the repo:test that did not run, so it would score an old one (SI-37)
                 result = CheckResult(id=check_id, status="skipped", summary=f"{NOT_SYNCED} (xem check main_synced)")
             else:
                 try:
@@ -136,6 +139,7 @@ class CheckRunner:
         if key == "test":
             head, clean = await git_state(ctx.workspace)
             state = {"head": head, "clean": clean} if head else {}
+            ctx.test_started = time.time()
         for argv in argv_list:
             code, out, secs = await run_argv(argv, ctx.workspace, timeout=timeout, env=self._env(ctx))
             outputs.append(f"$ {' '.join(argv)}\n{out}\n(exit {code}, {secs:.0f}s)")
@@ -831,6 +835,9 @@ def parse_coverage(kind: str, text: str, root: Path) -> dict[str, dict[int, bool
     return out
 
 
+REPORT_MTIME_SLACK_S = 2.0  # file systems with coarse mtimes (FAT: 2s) must not make a fresh report look old
+
+
 async def check_coverage_changed_lines(ctx: CheckContext) -> CheckResult:
     git = _git_ctx(ctx)
     spec = (ctx.project.profile.get("coverage") if ctx.project else None) or {}
@@ -839,6 +846,11 @@ async def check_coverage_changed_lines(ctx: CheckContext) -> CheckResult:
     report = git[0] / spec["path"]
     if not report.is_file():
         return CheckResult(id="coverage_changed_lines", status="failed", summary=f"không thấy báo cáo coverage {spec['path']} (chạy test có coverage trước)")
+    if ctx.test_started is not None and report.stat().st_mtime < ctx.test_started - REPORT_MTIME_SLACK_S:
+        # repo:test of this round did not write it (it failed before the report): the numbers are from an older run
+        return CheckResult(
+            id="coverage_changed_lines", status="skipped", summary=f"báo cáo coverage {spec['path']} cũ hơn lần chạy test vừa rồi (lệnh test không ghi lại báo cáo)"
+        )
     coverage = parse_coverage(str(spec.get("kind") or "lcov"), report.read_text(encoding="utf-8", errors="replace"), git[0])
     minimum = float(spec.get("min") or 80)
     total = covered = 0

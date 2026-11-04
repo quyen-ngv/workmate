@@ -179,6 +179,20 @@ async def test_ac5_repo_checks_skipped_after_failure(office: Office, tmp_path: P
     assert [r.status for r in results] == ["passed"] * 4
 
 
+async def test_si37_ac3_coverage_is_skipped_with_repo_test_after_a_failed_sync(office: Office, tmp_path: Path) -> None:
+    coverage = {"kind": "lcov", "path": ".cov/lcov.info", "min": 80}
+    ticket, _project, repo, ws = await at_build(office, tmp_path, profile={"test": writer(tmp_path / "test.ran"), "coverage": coverage})
+    (ws / ".cov").mkdir()
+    (ws / ".cov" / "lcov.info").write_text("SF:leave.py\nDA:1,1\nend_of_record\n", encoding="utf-8")  # left by an earlier run
+    commit(ws, {"shared.py": "a = 'ticket'\n"}, "ticket edits shared")
+    commit(repo, {"shared.py": "a = 'main'\n"}, "main edits shared")
+
+    sync, test, cov = await run_checks(office, ticket, ws, "main_synced", "repo:test", "coverage_changed_lines")
+
+    assert [sync.status, test.status, cov.status] == ["failed", "skipped", "skipped"]
+    assert SKIP_REASON in cov.summary and "%" not in cov.summary
+
+
 async def test_ac6_repo_test_runs_on_merge_commit(office: Office, tmp_path: Path) -> None:
     seen = tmp_path / "head.txt"
     ticket, _project, repo, ws = await at_build(office, tmp_path, profile={"test": writer(seen, "HEAD")})

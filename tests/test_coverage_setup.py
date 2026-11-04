@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,10 +20,11 @@ from actoroffice.cli_team import cmd_project
 from actoroffice.config import Settings
 from actoroffice.domain.errors import OfficeError
 from actoroffice.domain.work import ProjectAccess
-from actoroffice.services.checks import check_coverage_changed_lines
+from actoroffice.services.checks import CheckResult, check_coverage_changed_lines
 
 from .fakes import FakeRuntime
 from .seed import IDENT, build_repo, copy_repo, git, seed_db
+from .test_quality import build_ticket
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,6 +44,10 @@ def unused():
     return 3
 """
 
+PYPROJECT = """[tool.coverage.run]
+source = ["pkg"]
+"""
+
 TEST = """import os
 from pathlib import Path
 
@@ -56,10 +62,11 @@ def test_{name}():
 
 @pytest.fixture(scope="module")
 def sample_run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, list[str]]:
-    """A repo whose branch adds two functions and one test file each, tested with `-n 2 --cov` like the README says.
+    """A repo whose branch adds two functions and one test file each, tested with `-n 2 --cov` like the README says:
+    a bare `--cov`, the measured package named only by `[tool.coverage.run] source` in pyproject.toml.
     Returns the repo and the "<test>-<worker>" marks the tests left. One run (~9s on Windows) for the module."""
     tmp_path = tmp_path_factory.mktemp("cov")
-    repo = build_repo(tmp_path / "sample", {"pytest.ini": "[pytest]\npythonpath = src\n", "src/pkg/__init__.py": "", "src/pkg/calc.py": "def base():\n    return 0\n"})
+    repo = build_repo(tmp_path / "sample", {"pytest.ini": "[pytest]\npythonpath = src\n", "pyproject.toml": PYPROJECT, "src/pkg/__init__.py": "", "src/pkg/calc.py": "def base():\n    return 0\n"})
     git(repo, "checkout", "-q", "-b", "t")
     (repo / "src" / "pkg" / "calc.py").write_text(CALC, encoding="utf-8")
     (repo / "tests").mkdir()
@@ -73,7 +80,7 @@ def sample_run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, list[str
     env["SEEN_DIR"] = str(seen)
     env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"  # load only the two plugins under test: starts faster
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "xdist", "-p", "pytest_cov", "-p", "no:cacheprovider", "-n", "2", "--cov=pkg", "--cov-report=lcov:.cov/lcov.info", "tests"],
+        [sys.executable, "-m", "pytest", "-q", "-p", "xdist", "-p", "pytest_cov", "-p", "no:cacheprovider", "-n", "2", "--cov","--cov-report=lcov:.cov/lcov.info", "tests"],
         cwd=repo, env=env, capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -94,13 +101,49 @@ def test_ac1_xdist_workers_are_combined_in_the_lcov_report(sample_run: tuple[Pat
 async def test_ac2_coverage_changed_lines_measures_a_real_report(sample_run: tuple[Path, list[str]]) -> None:
     repo, _ = sample_run
     project = SimpleNamespace(main_branch="main", profile={"coverage": {"kind": "lcov", "path": ".cov/lcov.info", "min": 80}})
-    result = await check_coverage_changed_lines(SimpleNamespace(workspace=repo, project=project))
+    result = await check_coverage_changed_lines(SimpleNamespace(workspace=repo, project=project, test_started=None))
     # changed executable lines: three `def` (run at import), `return 1`, `return 2` covered; `return 3` not
     assert result.status == "passed", result.summary
     assert "83%" in result.summary and "(5/6" in result.summary
     project.profile["coverage"]["min"] = 90
-    result = await check_coverage_changed_lines(SimpleNamespace(workspace=repo, project=project))
+    result = await check_coverage_changed_lines(SimpleNamespace(workspace=repo, project=project, test_started=None))
     assert result.status == "failed" and "83%" in result.summary
+
+
+def test_si37_ac2_bare_cov_measures_only_the_configured_source(sample_run: tuple[Path, list[str]]) -> None:
+    repo, _ = sample_run
+    report = (repo / ".cov" / "lcov.info").read_text(encoding="utf-8").replace("\\", "/")
+    files = sorted(line[3:] for line in report.splitlines() if line.startswith("SF:"))
+    # `[tool.coverage.run] source = ["pkg"]` decides: without it a bare --cov would also measure tests/
+    assert files == ["src/pkg/__init__.py", "src/pkg/calc.py"], files
+
+
+async def test_si37_ac3_a_report_older_than_this_rounds_test_run_is_not_scored(office: Office, sample_run: tuple[Path, list[str]]) -> None:
+    repo, _ = sample_run
+    report = repo / ".cov" / "lcov.info"
+    old = time.time() - 60
+    os.utime(report, (old, old))  # left by an earlier run
+    project = await office.projects.create("sample", path=None, access=ProjectAccess.READ_ONLY)
+
+    async def round_with(test_code: str) -> dict[str, CheckResult]:
+        profile = {"test": [sys.executable, "-c", test_code], "coverage": {"kind": "lcov", "path": ".cov/lcov.info", "min": 80}}
+        await office.projects.configure(project.id, profile=profile)
+        ticket = await office.tickets.get(await build_ticket(office, project))
+        stage = (await office.stages.template_of(ticket)).stage(ticket.stage or "")
+        assert stage is not None
+        srun = await office.stages.ensure_run(ticket)
+        results = await office.stages.checks.run(ticket, stage, srun, workspace=repo, run_id=None, only=["repo:test", "coverage_changed_lines"])
+        return {r.id: r for r in results}
+
+    # the test command fails before writing a report: the old one is not scored
+    stale = await round_with("raise SystemExit(1)")
+    assert stale["repo:test"].status == "failed"
+    assert stale["coverage_changed_lines"].status == "skipped" and "cũ hơn" in stale["coverage_changed_lines"].summary
+    assert "%" not in stale["coverage_changed_lines"].summary
+    # the test command (re)writes the report: it is scored as before
+    fresh = await round_with("import os; os.utime('.cov/lcov.info')")
+    assert fresh["repo:test"].status == "passed", fresh["repo:test"].summary
+    assert fresh["coverage_changed_lines"].status == "passed" and "(5/6" in fresh["coverage_changed_lines"].summary
 
 
 def test_ac4_coverage_files_are_git_ignored() -> None:

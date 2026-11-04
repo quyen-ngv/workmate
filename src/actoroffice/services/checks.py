@@ -99,8 +99,9 @@ class CheckRunner:
         results: list[CheckResult] = []
         not_synced = False
         for check_id in only if only is not None else stage.checks:
-            if not_synced and check_id.startswith("repo:"):
-                # The branch lacks main's new commits: building or testing it now would test old code (SI-21)
+            if not_synced and (check_id.startswith("repo:") or check_id == "coverage_changed_lines"):
+                # The branch lacks main's new commits: building or testing it now would test old code (SI-21);
+                # coverage reads the report of the repo:test that did not run, so it would score an old one (SI-37)
                 result = CheckResult(id=check_id, status="skipped", summary=f"{NOT_SYNCED} (xem check main_synced)")
             else:
                 try:

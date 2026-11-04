@@ -9,11 +9,14 @@ from pathlib import Path
 import psutil
 
 
-def kill_tree(pid: int, wait_s: float = 0) -> bool:
+def kill_tree(pid: int | psutil.Process, wait_s: float = 0) -> bool:
     """Kill process `pid` and all its children; with `wait_s` > 0 wait up to that long until they are gone (their
-    files are released). False when the process no longer existed."""
+    files are released). False when the process no longer existed. Given a psutil.Process checked earlier, a PID
+    reused since by another process is not killed."""
     try:
-        parent = psutil.Process(pid)
+        parent = pid if isinstance(pid, psutil.Process) else psutil.Process(pid)
+        if not parent.is_running():
+            return False
         procs = [parent, *parent.children(recursive=True)]
     except psutil.Error:
         return False

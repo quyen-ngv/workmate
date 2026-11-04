@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import os
 import shutil
 import subprocess
 import sys
@@ -74,9 +75,11 @@ async def advance(clock: FakeClock, guard: CommandGuard, seconds: float, step: f
 
 class AllowGate:
     def __init__(self) -> None:
+        self.before: list[dict[str, Any]] = []
         self.after: list[dict[str, Any]] = []
 
     async def before_tool(self, tool: str, args: dict[str, Any], tool_use_id: str | None) -> GateResult:
+        self.before.append(args)
         return GateResult(GateDecision.ALLOW)
 
     async def after_tool(self, tool: str, args: dict[str, Any], result: Any) -> None:
@@ -90,8 +93,8 @@ def claude_hooks(guard: CommandGuard, gate: AllowGate) -> tuple[Any, Any, Any, d
     return hooks["PreToolUse"][0].hooks[0], hooks["PostToolUse"][0].hooks[0], hooks["PostToolUseFailure"][0].hooks[0], options.env
 
 
-async def wrapped(pre: Any, call_id: str, command: str, **extra: Any) -> str:
-    out = await pre({"tool_name": "Bash", "tool_input": {"command": command, **extra}}, call_id, None)
+async def wrapped(pre: Any, call_id: str, command: str, tool: str = "Bash", **extra: Any) -> str:
+    out = await pre({"tool_name": tool, "tool_input": {"command": command, **extra}}, call_id, None)
     spec = out["hookSpecificOutput"]
     assert spec["permissionDecision"] == "allow"
     return spec["updatedInput"]["command"]
@@ -188,7 +191,7 @@ async def ok(ctx: TurnCtx) -> TurnResult:
 @needs_bash
 async def test_ac1_claude_bash_over_limit_killed_tree(tmp_path) -> None:
     clock = FakeClock()
-    guard = CommandGuard("run_c", command_limit(None, 900), tmp_path / "cmd", AwakeClock(raw=clock))
+    guard = CommandGuard("run_c", command_limit(None, 900), tmp_path / "cmd", AwakeClock(raw=clock), root=os.getpid)
     gate = AllowGate()
     pre, post, _failure, env = claude_hooks(guard, gate)
     assert env["BASH_MAX_TIMEOUT_MS"] == str(960_000)  # the CLI waits past the office limit
@@ -214,7 +217,7 @@ async def test_ac1_claude_bash_over_limit_killed_tree(tmp_path) -> None:
 @needs_bash
 async def test_ac2_profile_timeout_5s_claude(tmp_path) -> None:
     limit = command_limit({"command_timeout_s": 5}, 900)
-    guard = CommandGuard("run_c", limit, tmp_path / "cmd")
+    guard = CommandGuard("run_c", limit, tmp_path / "cmd", root=os.getpid)
     guard.start()
     pre, _post, failure, _env = claude_hooks(guard, AllowGate())
     started = time.monotonic()
@@ -268,7 +271,7 @@ async def test_ac2_profile_timeout_5s_kiro(tmp_path) -> None:
 @needs_bash
 async def test_ac3_background_command_limited(tmp_path) -> None:
     clock = FakeClock()
-    guard = CommandGuard("run_c", 900, tmp_path / "cmd", AwakeClock(raw=clock))
+    guard = CommandGuard("run_c", 900, tmp_path / "cmd", AwakeClock(raw=clock), root=os.getpid)
     gate = AllowGate()
     pre, post, _failure, _env = claude_hooks(guard, gate)
     proc = subprocess.Popen([BASH, "-c", await wrapped(pre, "bg1", "sleep 6103", run_in_background=True)])
@@ -643,3 +646,183 @@ async def test_ac17_ai_error_not_retried(office: Office, runtime: FakeRuntime) -
     ticket, [run] = await run_ticket(office)
     assert len(runtime.specs) == 1 and await events(office, run.id, "retry") == []
     assert run.error_kind == "ai" and "Claude · lỗi của AI: cần bạn xem" in await comments(office, ticket.id)
+
+
+# ---- owner's conditions before merge (plan gate): PID trust, PowerShell, network words, wrap semantics ----------
+
+
+POWERSHELL = shutil.which("powershell") or shutil.which("pwsh")
+needs_powershell = pytest.mark.skipif(POWERSHELL is None, reason="PowerShell not installed")
+
+
+def pid_lines(*values: int | str) -> str:
+    return "".join(f"{v}\n" for v in values)
+
+
+def still_running(proc: subprocess.Popen) -> bool:
+    """Alive a second later: a kill on Windows is not seen by poll() at once."""
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        return True
+    return False
+
+
+def powershell(command: str) -> list[str]:
+    return [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-Command", command]
+
+
+async def test_ac1_pid_file_of_a_process_outside_the_runtime_not_killed(tmp_path, monkeypatch) -> None:
+    """A PID file is only trusted for a process the run's runtime started, after the command started."""
+    groups: list[tuple] = []
+    monkeypatch.setattr("actoroffice.engine.command_guard.kill_msys_group", lambda *a: groups.append(a))
+    runtime_proc = subprocess.Popen(SLEEPER)  # stands for claude.exe of this run
+    foreign = subprocess.Popen(SLEEPER)  # a python of its own: not started by that runtime
+    clock = FakeClock()
+    guard = CommandGuard("run_c", 900, tmp_path / "cmd", AwakeClock(raw=clock))
+    guard.root = lambda: runtime_proc.pid
+    try:
+        guard.wrap("tu1", "sleep 1")
+        guard.commands["tu1"].pid_file.write_text(pid_lines(foreign.pid, 7, 7, "."))
+        guard.tool_ended("tu1")
+        await advance(clock, guard, 901)
+        await guard.close()
+        assert still_running(foreign) and still_running(runtime_proc)
+        assert groups == []  # nor its MSYS group
+    finally:
+        foreign.kill()
+        runtime_proc.kill()
+
+
+async def test_ac1_pid_file_of_a_process_older_than_the_command_not_killed(tmp_path) -> None:
+    """A child of the runtime already running before the command started (a reused PID) is not trusted."""
+    older = subprocess.Popen(SLEEPER)
+    await until(lambda: psutil.Process(older.pid).create_time() < time.time() - 0.2)
+    clock = FakeClock()
+    guard = CommandGuard("run_c", 900, tmp_path / "cmd", AwakeClock(raw=clock))
+    guard.root = lambda: psutil.Process().pid
+    try:
+        guard.wrap("tu1", "sleep 1")
+        guard.commands["tu1"].pid_file.write_text(pid_lines(older.pid, older.pid, "."))
+        await advance(clock, guard, 901)
+        await guard.close()
+        assert still_running(older)
+    finally:
+        older.kill()
+
+
+async def test_ac1_command_of_the_runtime_killed_through_the_checked_process(tmp_path) -> None:
+    """The other side of the check: a process the runtime started after the command began is stopped."""
+    clock = FakeClock()
+    guard = CommandGuard("run_c", 900, tmp_path / "cmd", AwakeClock(raw=clock))
+    guard.root = lambda: psutil.Process().pid
+    guard.wrap("tu1", "sleep 1")
+    child = subprocess.Popen(SLEEPER)
+    try:
+        guard.commands["tu1"].pid_file.write_text(pid_lines(child.pid, child.pid, "."))
+        await guard.poll()
+        checked = guard.commands["tu1"].proc
+        assert checked is not None and checked.pid == child.pid
+        await advance(clock, guard, 901)
+        assert child.wait(timeout=10) is not None
+    finally:
+        child.kill()
+        await guard.close()
+
+
+@needs_powershell
+async def test_ac1_claude_powershell_over_limit_killed(tmp_path) -> None:
+    clock = FakeClock()
+    guard = CommandGuard("run_c", 900, tmp_path / "cmd", AwakeClock(raw=clock))
+    guard.root = lambda: psutil.Process().pid
+    gate = AllowGate()
+    pre, post, _failure, _env = claude_hooks(guard, gate)
+    command = await wrapped(pre, "ps1", "Start-Sleep -Seconds 6201", tool="PowerShell")
+    proc = subprocess.Popen(powershell(command))
+    try:
+        await until(lambda: written(guard.commands["ps1"].pid_file))
+        await advance(clock, guard, 899)
+        assert still_running(proc)
+        await advance(clock, guard, 3)
+        assert proc.wait(timeout=10) is not None
+        out = await post({"tool_name": "PowerShell", "tool_input": {"command": command}}, "ps1", None)
+        assert "Start-Sleep -Seconds 6201" in out["hookSpecificOutput"]["additionalContext"]
+        assert gate.before[0]["command"] == gate.after[-1]["command"] == "Start-Sleep -Seconds 6201"
+    finally:
+        proc.kill()
+        await guard.close()
+
+
+@needs_powershell
+async def test_ac3_claude_powershell_left_running_killed_at_run_end(tmp_path) -> None:
+    guard = CommandGuard("run_c", 900, tmp_path / "cmd")
+    guard.root = lambda: psutil.Process().pid
+    pre, post, _failure, _env = claude_hooks(guard, AllowGate())
+    command = await wrapped(pre, "ps1", "Start-Sleep -Seconds 6202", tool="PowerShell", run_in_background=True)
+    proc = subprocess.Popen(powershell(command))
+    try:
+        await until(lambda: written(guard.commands["ps1"].pid_file))
+        await post({"tool_name": "PowerShell", "tool_input": {"command": command}}, "ps1", None)
+        await guard.close()
+        assert proc.wait(timeout=10) is not None
+    finally:
+        proc.kill()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "AssertionError: passed 512 tests, tests/fixtures/certificate.pem not found",
+        "FileNotFoundError: certificate.pem",
+        "ValueError: invalid certificate chain in test data",
+    ],
+)
+def test_ac9_tool_errors_naming_a_certificate_are_not_network(text: str) -> None:
+    assert classify(text, progressed=True) == FailureKind.AI
+
+
+@pytest.mark.parametrize(
+    "text", [CERT, "self signed certificate in certificate chain", "Error: unable to verify the first certificate", "CERT_HAS_EXPIRED"]
+)
+def test_ac9_tls_failures_are_network(text: str) -> None:
+    assert classify(text, progressed=True) == FailureKind.NETWORK
+
+
+def run_bash(command: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([str(BASH), "-c", command], capture_output=True, text=True, timeout=60, check=False)
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("command", "code", "stdout"),
+    [
+        ("exit 3", 3, ""),
+        ("false", 1, ""),
+        ("# x\necho after-comment", 0, "after-comment\n"),
+        ("#!/bin/bash\n# x\necho two; exit 4", 4, "two\n"),
+        ("cat <<'EOF'\nhello $HOME\nEOF", 0, "hello $HOME\n"),
+        ("cat <<EOF | tr a-z A-Z\nhi\nEOF\nexit 5", 5, "HI\n"),
+        ("echo $? $#", 0, "0 0\n"),
+    ],
+)
+async def test_ac1_wrap_keeps_the_meaning_of_the_command(tmp_path, command: str, code: int, stdout: str) -> None:
+    guard = CommandGuard("run_c", 900, tmp_path / "cmd")
+    gate = AllowGate()
+    pre, post, _failure, _env = claude_hooks(guard, gate)
+    plain = run_bash(command)
+    done = run_bash(await wrapped(pre, "tu1", command))
+    assert (done.returncode, done.stdout, done.stderr) == (plain.returncode, plain.stdout, plain.stderr)
+    assert (done.returncode, done.stdout) == (code, stdout)
+    await post({"tool_name": "Bash", "tool_input": {"command": await wrapped(pre, "tu2", command)}}, "tu2", None)
+    assert gate.before[0]["command"] == command and gate.after[-1]["command"] == command  # audit: the AI's command
+    await guard.close()
+
+
+@needs_powershell
+@pytest.mark.parametrize(("command", "code"), [("exit 3", 3), ("# x\nWrite-Output hi; exit 4", 4), ("Write-Output ok", 0)])
+async def test_ac1_wrap_keeps_the_exit_code_of_powershell(tmp_path, command: str, code: int) -> None:
+    guard = CommandGuard("run_c", 900, tmp_path / "cmd")
+    pre, _post, _failure, _env = claude_hooks(guard, AllowGate())
+    done = subprocess.run(powershell(await wrapped(pre, "ps1", command, tool="PowerShell")), capture_output=True, timeout=60, check=False)
+    assert done.returncode == code
+    await guard.close()

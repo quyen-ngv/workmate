@@ -40,6 +40,7 @@ RESULT_PREVIEW = 400
 PROMPT_ARG_LIMIT = 8000
 
 INTERNAL_SERVER = "office"
+SHELLS = {"Bash": "sh", "PowerShell": "ps"}  # shell tools whose commands the office limits (engine/command_guard.py)
 
 
 class ClaudeSdkRuntime:
@@ -126,9 +127,10 @@ class ClaudeSdkRuntime:
             out: dict[str, Any] = {"hookEventName": "PreToolUse", "permissionDecision": res.decision.value}
             if res.reason:
                 out["permissionDecisionReason"] = res.reason
-            if guard is not None and res.decision == GateDecision.ALLOW and data["tool_name"] == "Bash" and args.get("command"):
+            tool = data["tool_name"]
+            if guard is not None and res.decision == GateDecision.ALLOW and tool in SHELLS and args.get("command"):
                 # Only after the gate allowed the command as written: the prefix lets the office stop it in time.
-                out["updatedInput"] = {**args, "command": guard.wrap(tool_use_id, str(args["command"]))}
+                out["updatedInput"] = {**args, "command": guard.wrap(tool_use_id, str(args["command"]), SHELLS[tool])}
             return {"hookSpecificOutput": out}
 
         def told(event: str, tool_use_id: str | None) -> dict[str, Any]:

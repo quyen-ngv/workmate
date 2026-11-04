@@ -6,7 +6,10 @@ timeout: the CLI never stops it). Past `limit_s` (awake time, engine/clock.py) t
 process tree and queues a note for the AI. When the run ends, every command still alive is killed.
 
 - Claude: the CLI runs the command, so the office only knows its process through a prefix added to the command
-  after the gate allowed it (`wrap`): the shell writes its own PID (the Windows PID under Git Bash) to a file.
+  after the gate allowed it (`wrap`): the shell (Bash or PowerShell) writes its own PID (the Windows PID under Git
+  Bash) to a file. That file is written by a command of the AI, so a PID read from it is only trusted for a process
+  the run's runtime started (`root`) after the command began; the checked psutil.Process is kept and killed (a PID
+  reused later is never killed).
 - Kiro: the office starts the terminal itself and gives its process (`watch`).
 """
 
@@ -16,6 +19,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +33,8 @@ from .clock import AwakeClock
 log = logging.getLogger(__name__)
 
 MARK = "# ao:guard"
+SH_PREFIX = "{ cat /proc/$$/winpid"
+PS_PREFIX = "Set-Content -LiteralPath "
 POLL_S = 1.0
 PID_GRACE_S = 10.0  # a command whose shell never wrote its PID file is dropped after this long once its tool ended
 
@@ -39,7 +45,9 @@ class Command:
     command: str
     started: float
     pid_file: Path | None = None
-    proc: psutil.Process | None = None
+    proc: psutil.Process | None = None  # checked: a process of the run's runtime, started after the command began
+    started_wall: float = field(default_factory=time.time)  # compared with the process's create_time
+    untrusted: bool = False  # its PID file named a process the guard must not kill
     tool_done: float | None = None  # when its tool call ended (still alive then: it runs in the background)
     on_stop: Callable[[str], None] | None = None  # Kiro: the note goes into the terminal output
     group: tuple[Path, int] | None = None  # Git Bash: (MSYS kill.exe, process group of the shell), see kill_msys_group
@@ -56,28 +64,33 @@ class CommandGuard:
     stopped: dict[str, str] = field(default_factory=dict)  # call id → note, told with that call's own result
     notes: list[str] = field(default_factory=list)  # notes of commands stopped in the background
     last_stop: float | None = None  # awake time of the last stop
+    root: Callable[[], int | None] | None = None  # PID of the run's runtime process (claude.exe, kiro-cli), when known
+    _root: psutil.Process | None = None
     _task: asyncio.Task[None] | None = None
 
     # ---- registering commands -------------------------------------------------------------------
 
-    def wrap(self, call_id: str | None, command: str) -> str:
-        """The command the Claude CLI runs instead: a prefix writes the shell's PID, then the command unchanged."""
+    def wrap(self, call_id: str | None, command: str, shell: str = "sh") -> str:
+        """The command the Claude CLI runs instead: a prefix line writes the shell's PID, then the command unchanged.
+        `shell`: "sh" (Bash tool) or "ps" (PowerShell tool)."""
         if not call_id or not command.strip():
             return command
         pid_file = self.folder / (re.sub(r"[^A-Za-z0-9_.-]", "_", call_id) + ".pid")
-        target = pid_file.as_posix()
+        target = pid_file.as_posix() if shell == "sh" else str(pid_file)
         if "'" in target:
             log.warning("run %s: cannot watch commands from %s", self.run_id, target)
             return command
         self.folder.mkdir(parents=True, exist_ok=True)
         self.commands[call_id] = Command(call_id, command, self.clock.now(), pid_file=pid_file)
+        if shell == "ps":
+            return f"{PS_PREFIX}'{target}' -Value @($PID, '.') -Encoding Ascii {MARK}\n{command}"
         # lines: the Windows PID (or $$ on POSIX), $$, under MSYS the shell's process group, then "." (complete)
-        return f"{{ cat /proc/$$/winpid 2>/dev/null || echo $$; echo $$; cat /proc/$$/pgid 2>/dev/null; echo .; }} > '{target}' {MARK}\n{command}"
+        return f"{SH_PREFIX} 2>/dev/null || echo $$; echo $$; cat /proc/$$/pgid 2>/dev/null; echo .; }} > '{target}' {MARK}\n{command}"
 
     @staticmethod
     def unwrap(command: str) -> str:
         head, sep, rest = command.partition(f" {MARK}\n")
-        return rest if sep and head.startswith("{ cat /proc/$$/winpid") else command
+        return rest if sep and head.startswith((SH_PREFIX, PS_PREFIX)) else command
 
     def watch(self, call_id: str, command: str, pid: int, on_stop: Callable[[str], None] | None = None) -> None:
         """A command the office started itself (Kiro terminal)."""
@@ -113,7 +126,7 @@ class CommandGuard:
         now = self.clock.now()
         for call_id, cmd in list(self.commands.items()):
             self._resolve(cmd)
-            if cmd.proc is not None and not _running(cmd.proc):
+            if cmd.untrusted or (cmd.proc is not None and not _running(cmd.proc)):
                 self.commands.pop(call_id, None)
                 continue
             if cmd.proc is None and cmd.tool_done is not None and now - cmd.tool_done > PID_GRACE_S:
@@ -137,17 +150,45 @@ class CommandGuard:
                         await self.on_stop(cmd.command, elapsed)
 
     def _resolve(self, cmd: Command) -> None:
-        if cmd.proc is not None or cmd.pid_file is None:
+        """Read the PID file of a command and check the process it names before the guard may ever kill it."""
+        if cmd.proc is not None or cmd.pid_file is None or cmd.untrusted:
             return
-        with contextlib.suppress(OSError, ValueError, psutil.Error):
+        try:
             lines = cmd.pid_file.read_text(encoding="ascii").split()
-            if not lines or lines[-1] != ".":  # the shell is still writing it
-                return
+        except (OSError, ValueError):
+            return
+        if not lines or lines[-1] != ".":  # the shell is still writing it
+            return
+        root = self._runtime()
+        if root is None:  # the runtime's process is not known (yet): nothing is trusted
+            return
+        try:
             proc = psutil.Process(int(lines[0]))
-            if len(lines) == 4 and lines[1] == lines[2]:  # an MSYS shell leading its own group (no job control)
+            trusted = proc.create_time() >= cmd.started_wall and root in proc.parents()
+        except (ValueError, psutil.Error):
+            trusted = False
+        if not trusted:
+            log.warning("run %s: PID file of command %s names a process outside this run; it is not watched", self.run_id, cmd.call_id)
+            cmd.untrusted = True
+            return
+        if len(lines) == 4 and lines[1] == lines[2]:  # an MSYS shell leading its own group (no job control)
+            with contextlib.suppress(OSError, ValueError, psutil.Error):
                 kill_exe = Path(proc.exe()).with_name("kill.exe")
                 cmd.group = (kill_exe, int(lines[2])) if kill_exe.is_file() else None
-            cmd.proc = proc
+        cmd.proc = proc
+
+    def _runtime(self) -> psutil.Process | None:
+        """The runtime process of this run, kept once seen: the turn may have ended (and forgotten it) by close()."""
+        if self._root is not None and _running(self._root):
+            return self._root
+        pid = self.root() if self.root is not None else None
+        if pid is None:
+            return None
+        try:
+            self._root = psutil.Process(pid)
+        except psutil.Error:
+            return None
+        return self._root
 
     def stopped_since(self, mark: float) -> bool:
         return self.last_stop is not None and self.last_stop >= mark
@@ -190,7 +231,7 @@ def _stop(cmd: Command) -> None:
     if cmd.group is not None:
         kill_msys_group(*cmd.group)
     if cmd.proc is not None:
-        kill_tree(cmd.proc.pid)
+        kill_tree(cmd.proc)  # the checked process itself: psutil refuses to kill a PID reused since
 
 
 def _running(proc: psutil.Process) -> bool:

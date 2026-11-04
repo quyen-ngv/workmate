@@ -122,6 +122,9 @@ class Executor:
                 await office.runs.event(run_id, "health", {"state": "command_timeout", "title": title})
 
             guard = CommandGuard(run_id, limit, office.settings.runs_dir / run_id / "cmd", clock, on_stop=command_stopped)
+            runtime_pid = getattr(office.runtime, "pid", None)
+            if runtime_pid is not None:
+                guard.root = lambda: runtime_pid(run_id)  # only processes this run's runtime started may be stopped
             guard.start()
             if stage_run is not None:
                 settings = office.settings

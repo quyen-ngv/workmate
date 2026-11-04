@@ -22,8 +22,15 @@ class FailureKind(StrEnum):
 
 RETRIED = {FailureKind.NETWORK, FailureKind.RUNTIME_START}
 
+# TLS failures by their own words (Node/OpenSSL), never the bare word "certificate": a test or tool error naming a
+# certificate file is the AI's work, not the network.
+TLS = (
+    r"self[- ]signed certificate|unable to (?:get|verify) (?:the )?(?:first |local issuer )?certificate"
+    r"|certificate (?:has expired|is not yet valid|verify failed)"
+    r"|(?-i:\b(?:CERT_HAS_EXPIRED|DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE)\b)"
+)
 NETWORK = re.compile(
-    r"unable to connect|certificate|connection (?:error|refused|reset)|(?-i:\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)\b)"
+    rf"unable to connect|{TLS}|connection (?:error|refused|reset)|(?-i:\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)\b)"
     r"|fetch failed|socket hang up|network error|overloaded|api error:? 5\d\d|status(?: code)?:? 5\d\d|\b529\b"
     r"|internal server error|service unavailable|bad gateway|gateway timeout",
     re.IGNORECASE,

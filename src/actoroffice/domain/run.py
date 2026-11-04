@@ -111,3 +111,4 @@ class TurnResult(BaseModel):
     deferred: DeferredTool | None = None
     rate_limit: RateLimit | None = None
     error: str | None = None
+    structured: dict[str, Any] | None = None  # the answer matching TurnSpec.output_schema, when the runtime supports it

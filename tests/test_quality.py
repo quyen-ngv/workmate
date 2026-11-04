@@ -549,6 +549,113 @@ async def test_non_json_round_keeps_stored_findings(office: Office, runtime: Fak
     assert check["status"] == "failed" and "reviewer vòng này không trả kết quả có cấu trúc" in check["summary"] and "F1" in check["summary"]
 
 
+# ---- SI-34: the reviewer answers through structured output, the JSON text stays the fallback ----------------
+
+
+def structured_reviewer(answer: dict, seen: list[tuple[str, str]]):
+    """A reviewer on a runtime with structured output: the answer comes back in TurnResult.structured, no text."""
+
+    async def script(ctx: TurnCtx) -> TurnResult:
+        from actoroffice.services.review import REVIEW_SCHEMA
+
+        assert ctx.spec.output_schema == REVIEW_SCHEMA
+        allowed = await ctx.gate.before_tool("StructuredOutput", answer, "tu1")
+        seen.append(("StructuredOutput", allowed.decision.value))
+        denied = await ctx.gate.before_tool("Bash", {"command": "ls"}, None)
+        seen.append(("Bash", denied.decision.value))
+        return TurnResult(status=TurnStatus.COMPLETED, session_id=f"s-{ctx.spec.run_id}", text="", structured=answer)
+
+    return script
+
+
+async def test_si34_ac1_structured_output_is_read(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    ticket_id = await review_ticket(office, tmp_path)
+    seen: list[tuple[str, str]] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        return ok(ctx)
+
+    answer = json.loads(findings(("medium", "thiếu kiểm tra số âm"), ("low", "tên biến")))
+    await run_review(office, runtime, ticket_id, work, structured_reviewer(answer, seen))
+    assert seen == [("StructuredOutput", "allow"), ("Bash", "deny")]  # the answer tool is allowed, nothing else changes
+    stored = [(f["id"], f["severity"], f["claim"]) for f in (await stored_review(office, ticket_id))["findings"]]
+    assert stored == [("F1", "medium", "thiếu kiểm tra số âm"), ("F2", "low", "tên biến")]
+    check = await review_check(office, ticket_id)
+    assert check["status"] == "failed" and "reviewer vòng này không trả" not in check["summary"]
+    errors = await office.db.fetchall("SELECT status FROM runs WHERE purpose = 'reviewer'")
+    assert [r["status"] for r in errors] == ["succeeded"]
+
+
+async def test_si34_ac1_empty_structured_answer_passes(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    ticket_id = await review_ticket(office, tmp_path)
+    outcomes: list[str] = []
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        outcomes.append(await ctx.office("stage_complete", {"summary": "x"}))
+        return ok(ctx)
+
+    await run_review(office, runtime, ticket_id, work, structured_reviewer({"findings": [], "previous": []}, []))
+    check = await review_check(office, ticket_id)
+    assert check["status"] == "passed" and check["summary"].startswith("0 high · 0 medium")
+
+
+async def test_si34_ac2_text_json_without_structured_still_read(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    from actoroffice.services.review import REVIEWER
+
+    ticket_id = await review_ticket(office, tmp_path)
+
+    async def work(ctx: TurnCtx) -> TurnResult:
+        change(ctx)
+        await ctx.office("stage_complete", {"summary": "x"})
+        return ok(ctx)
+
+    async def kiro_like(ctx: TurnCtx) -> TurnResult:  # no structured output: the JSON object comes as text
+        result = await reviewer("Kết quả:\n" + findings(("high", "thiếu khoá")))(ctx)
+        assert result.structured is None
+        return result
+
+    await run_review(office, runtime, ticket_id, work, kiro_like)
+    [f1] = (await stored_review(office, ticket_id))["findings"]
+    assert (f1["id"], f1["severity"], f1["claim"]) == ("F1", "high", "thiếu khoá")
+    assert "write ONLY the JSON object as your final text" in REVIEWER and "Never call a tool you were not given" in REVIEWER
+
+
+def test_si34_ac2_structured_without_findings_falls_back_to_text() -> None:
+    from actoroffice.services.review import parse_review, review_data
+
+    assert review_data(None) is None and review_data({"previous": []}) is None and review_data([]) is None
+    assert review_data({"findings": [{"claim": "a"}, "x"]}) == {"findings": [{"claim": "a"}], "previous": []}
+    assert parse_review(findings(("low", "c"))) == review_data(json.loads(findings(("low", "c"))))
+
+
+def test_si34_ac3_claude_options_output_format() -> None:
+    from claude_agent_sdk import ResultMessage
+
+    from actoroffice.runtimes.base import TurnSpec
+    from actoroffice.runtimes.claude_sdk import ClaudeSdkRuntime, _to_turn_result
+    from actoroffice.services.review import REVIEW_SCHEMA, _ReadOnlyGate
+
+    runtime = ClaudeSdkRuntime()
+    gate = _ReadOnlyGate(Path.cwd())
+    spec = TurnSpec(run_id="r1", prompt="p", cwd=Path.cwd(), system_prompt="s", model="m", tools=["Read"], output_schema=REVIEW_SCHEMA)
+    assert runtime._options(spec, gate).output_format == {"type": "json_schema", "schema": REVIEW_SCHEMA}
+    plain = TurnSpec(run_id="r2", prompt="p", cwd=Path.cwd(), system_prompt="s", model="m", tools=["Read"])
+    assert runtime._options(plain, gate).output_format is None
+
+    def result(structured: object) -> ResultMessage:
+        return ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1, session_id="s1", result="", structured_output=structured
+        )
+
+    answer = {"findings": [], "previous": []}
+    assert _to_turn_result(result(answer), [], None, None).structured == answer
+    assert _to_turn_result(result(None), ["text"], None, None).structured is None
+    assert _to_turn_result(result("not an object"), [], None, None).structured is None
+
+
 async def test_ac11_last_review_for_the_pr_stage(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
     ticket_id = await review_ticket(office, tmp_path)
 

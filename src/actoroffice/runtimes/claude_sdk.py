@@ -141,6 +141,8 @@ class ClaudeSdkRuntime:
             max_buffer_size=MAX_MESSAGE_BYTES,  # a big file read or tool result must not kill the run
             # The model decides when to think; "summarized" returns readable thinking so the user can follow it.
             thinking={"type": "adaptive", "display": "summarized"} if spec.show_thinking else None,
+            # The CLI then gives the model a StructuredOutput tool and returns its input as ResultMessage.structured_output.
+            output_format={"type": "json_schema", "schema": spec.output_schema} if spec.output_schema else None,
             cli_path=self.cli_path,
             env={"CLAUDE_AGENT_SDK_CLIENT_APP": "actoroffice/0.1", **spec.env},
         )
@@ -187,6 +189,7 @@ def _to_turn_result(
         "usage": usage,
         "cost_usd": float(result.total_cost_usd or 0.0),
         "rate_limit": rate_limit,
+        "structured": result.structured_output if isinstance(result.structured_output, dict) else None,
     }
     reason = result.terminal_reason or ""
     if result.deferred_tool_use is not None:

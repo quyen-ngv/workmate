@@ -54,6 +54,9 @@ class TurnSpec:
     # Extra MCP servers (a team's connectors): name → {"type": "http", "url", "headers"} or
     # {"type": "stdio", "command", "args", "env"}. Their tools go through the same gate ("external" rule).
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # JSON schema of the final answer: a runtime that supports structured output returns it in TurnResult.structured;
+    # the others ignore it (the caller still parses TurnResult.text).
+    output_schema: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

@@ -191,7 +191,7 @@ function renderSidebar() {
           <button class="tk ${state.focus === t.ticket ? "on" : ""}" data-open="${esc(t.ticket)}" title="${esc(t.title)}">
             <span class="dot ${esc(t.status)}"></span>
             <span class="col"><span class="name">${esc(t.title)}</span>
-              <span class="sub">${esc(t.ticket)} · ${esc(t.stage_title)}${t.activity ? " · " + esc(t.activity.title) : ""}</span></span>
+              <span class="sub">${esc(t.ticket)} · ${esc(t.stage_title)}${t.waiting_for ? " · " + esc(t.status_label) : t.activity ? " · " + esc(t.activity.title) : ""}</span></span>
             ${t.needs_viewer ? `<span class="badge">Cần bạn</span>` : `<span class="meta">${ago(t.activity?.at || t.updated_at)}</span>`}
           </button>`).join("")}`).join("") || (closed_count ? `<div class="empty">Không có việc đang làm.</div>` : `<div class="empty">Chưa có việc. Bấm + để giao việc cho AI.</div>`)}
       ${backlogSection}
@@ -429,7 +429,7 @@ function renderPane(key) {
     <div class="pane-head">
       <div class="pane-title"><span class="key">${esc(t.key)}</span><span class="title">${esc(t.title)}</span>
         ${closed ? `<span class="chip ${esc(t.status)}">${t.status === "cancelled" ? "Đã huỷ" : "Đã xong"} · ${esc(st.stage_title || "")}</span>`
-          : `<span class="chip ${esc(st.status)}">${esc(st.stage_title || "")} · ${esc(STATUS_LABEL[st.status] || st.status || "")}</span>`}</div>
+          : `<span class="chip ${esc(st.status)}">${esc(st.stage_title || "")} · ${esc(st.waiting_for ? st.status_label : STATUS_LABEL[st.status] || st.status || "")}</span>`}</div>
       <div class="stepper">${stages.map((s, i) => `<span class="${i === idx ? "cur" : i < idx ? "past" : ""}">${esc(s.id)}${s.gate ? ' <b class="gate">✋</b>' : ""}</span>`).join("→")}</div>
       <div class="pane-meta">
         ${st.who?.length ? `<span>chờ ${esc(st.who.join(", "))}</span>` : ""}
@@ -671,6 +671,8 @@ function projectForm(p, teamOpts) {
     ${p.id ? `<div class="form perm">
       <label>Quyền của AI<select data-perm-mode="${k}">${PERM_MODES.map(([v, l]) => `<option value="${v}" ${v === (p.permission_mode || "workspace") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
       <div class="b">${esc((PERM_MODES.find(([v]) => v === (p.permission_mode || "workspace")) || [])[2] || "")}</div>
+      <label class="check"><input type="checkbox" data-one-at-a-time="${k}" ${p.runs_one_at_a_time ? "checked" : ""}> Chạy từng ticket một</label>
+      <div class="b">Ticket bắt đầu sau chờ ticket trước của dự án xong rồi mới chạy. Tắt thì các ticket đang chờ chạy ngay.</div>
     </div>
     ${(p.allow_rules || []).length ? `<div class="b">Luôn cho phép: ${(p.allow_rules || []).map((r) => `<span class="chip">${esc(r)} <button class="x" data-rule-del="${k}" data-rule="${esc(r)}" title="Bỏ">×</button></span>`).join(" ")}</div>` : ""}` : ""}
     </div>`;
@@ -828,6 +830,12 @@ document.addEventListener("change", (e) => {
   proposalInput(e);
   const id = e.target.dataset?.permMode;
   if (id) act(async () => { await api(`/api/projects/${id}/permissions`, { method: "POST", body: { mode: e.target.value } }); toast("Đã đổi quyền của AI cho dự án"); await pageSetup(); });
+  const queue = e.target.dataset?.oneAtATime;
+  if (queue) act(async () => {
+    const res = await api(`/api/projects/${queue}/one-at-a-time`, { method: "POST", body: { enabled: e.target.checked } });
+    toast(res.runs_one_at_a_time ? "Dự án chạy từng ticket một" : `Đã tắt chạy từng ticket một${res.released ? `, thả ${res.released} ticket đang chờ` : ""}`);
+    await pageSetup();
+  });
 });
 
 document.addEventListener("keydown", (e) => {

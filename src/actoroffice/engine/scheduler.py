@@ -154,6 +154,10 @@ class Scheduler:
             return False
         if ticket.paused:
             return False  # stays pending until someone resumes the ticket
+        if ticket.status == TicketStatus.BLOCKED and await office.tickets.queue_blockers(ticket.id):
+            # waits its turn in the project's queue (SI-31): no run may make its worktree before the ticket in front
+            # is closed; the wake runs when BLOCKERS_RESOLVED is coalesced into it
+            return False
         # The stage is done and its gate card is open: the comments reach the AI after the answer.
         return not (ticket.stage and only_comments(wake.payload.get("reasons", [])) and await office.stages.waits_for_card(ticket))
 

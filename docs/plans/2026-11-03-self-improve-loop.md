@@ -48,3 +48,25 @@ Claude reviews and approves in place of the user; screenshots per case in `F:/_a
 | SI-30 | 22B (SI-25 #5) | code | merged with the button (0327ff2) | Merge errors named by kind (conflict vs other), no merge into a detached HEAD, repo reserved at the click, process tree killed on cancel, every merge failure audited. 0 high/medium, 0 tool approvals. `click_merge.py` now waits on the API: the diff on the page contained the result words. |
 
 New backlog: 23 (done as SI-18), 24 per-ticket temp folder counted as workspace, 25 reviewer calls a missing `StructuredOutput` tool before answering in text, 26 watchdog edit-count false positive; 22 now collects every open low finding of SI-13 and SI-16 to SI-23.
+
+## Round 3 (resumed 2026-11-04, harder tickets, scattered sources)
+
+The previous orchestrator session died at 02:00 with the same `Self-signed certificate` API error that failed SI-32's
+run; the loop was picked up by a new session. From here on, tickets are larger and their requirements are spread over
+several places on purpose (repo specs, the original design, decisions in comments on older tickets, this log), with
+some sources contradicting each other. Each such ticket has an answer key kept outside the repo, used to grade what
+the understand stage found.
+
+| Ticket | Backlog | Workflow | Result | What the run showed |
+|---|---|---|---|---|
+| SI-31 | SI-25 #6 | code | merged with the button (1f2ecf7) | Per-project queue: starting a ticket while another of the same project runs puts it behind (`ticket_blockers.kind = 'queue'`); closing releases the next. Review F1/F2 medium fixed (extra wakes of running tickets). SI-32..35 then ran in order by themselves. |
+| SI-32 | 07 | quick | merged with the button (9b85ee9) | pytest-cov, `[tool.coverage.run]`, `project set --profile` merges top-level keys. A full-suite command showed "xong (73.6 phút)" while the watchdog reported `slow` (305s) and `stalled` (4414s) without acting; the turn then failed with the certificate error and waited for ↻. Retried with a steer: `--cov` costs +12.5% (346s → 389s on a loaded machine). Open low: F1 (the test uses `--cov=pkg`, not the bare `--cov` + `source` the README recommends), F2 (a stale `.cov/lcov.info` is scored if the test command fails before writing it). |
+
+Observations for round 3:
+- Comments a person writes on a ticket before its first run never reach the AI: `_new_comments` returns nothing when
+  there is no previous run (`engine/executor.py`, `since is None`). The AI sees them only if it calls `ticket_get`.
+- 3 tests in `tests/test_lint_config.py` (`test_ac8_*`) fail when the suite runs in an office worktree under the
+  office data folder (`F:/_ao_self/ws/...`): `projects._validated` rejects a repo inside the data dir. Every ticket's
+  full-suite run reports 3 failures that are not its own.
+- Timing a command with `bash -c 'start=$(date +%s); …'` and a read-only `git -C <project repo> branch` both needed a
+  tool approval.

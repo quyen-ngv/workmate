@@ -528,6 +528,30 @@ async def test_ac8_turn_off_releases_queue_only(office: Office, tmp_path: Path) 
     assert await office.wakes.pending_for(ai.id, e.id) is not None
 
 
+async def test_ac8_turn_off_does_not_wake_released_tickets_again(office: Office, tmp_path: Path) -> None:
+    project = await code_project(office, tmp_path)
+    ai = await office.ensure_ai()
+    a = await begin(office, project, "SI-a")
+    b = await begin(office, project, "SI-b")
+    await close(office, a, S.DONE)  # SI-b runs now; its queue edge to the closed SI-a stays
+    await drop_wakes(office, b)
+
+    await office.projects.set_one_at_a_time(project.id, False)
+
+    assert await office.tickets.release_queue(project.id) == 0
+    assert await office.wakes.pending_for(ai.id, b.id) is None
+
+
+async def test_ac9_ticket_just_started_counts_as_latest(office: Office, tmp_path: Path) -> None:
+    """Review F2: a ticket whose first stage run is not written yet is the newest of the project, never the oldest."""
+    project = await code_project(office, tmp_path)
+    await begin(office, project, "SI-y")
+    x = await office.tickets.create("SI-x", description="x", project_id=project.id)
+    await office.db.execute("UPDATE tickets SET stage = 'understand', stage_template = 'code' WHERE id = ?", (x.id,))
+    z = await begin(office, project, "SI-z")
+    assert await office.tickets.queue_blockers(z.id) == [x.key]
+
+
 async def test_ac9_turn_on_keeps_running_then_queues_after_latest(office: Office, tmp_path: Path) -> None:
     project = await code_project(office, tmp_path)
     await office.projects.set_one_at_a_time(project.id, False)

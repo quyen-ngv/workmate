@@ -402,7 +402,8 @@ class TicketService:
         front = await tx.fetchone(
             "SELECT t.id, t.key FROM tickets t LEFT JOIN stage_runs r ON r.ticket_id = t.id "
             f"WHERE t.project_id = ? AND t.id != ? AND t.parent_id IS NULL AND t.stage IS NOT NULL AND t.status NOT IN ({','.join('?' * len(CLOSED))}) "
-            "GROUP BY t.id ORDER BY COALESCE(MIN(r.id), 0) DESC, t.id DESC LIMIT 1",
+            # a ticket whose first stage run is not written yet (it started a moment ago) is the newest one
+            "GROUP BY t.id ORDER BY MIN(r.id) IS NULL DESC, MIN(r.id) DESC, t.id DESC LIMIT 1",
             (project_id, ticket_id, *CLOSED),
         )
         if front is None:
@@ -420,8 +421,9 @@ class TicketService:
         Returns how many tickets were released."""
         async with self.db.tx() as tx:
             rows = await tx.fetchall(
+                # only tickets still waiting: a ticket that already ran keeps its edge to the closed one in front
                 "SELECT DISTINCT t.id, t.status, t.assignee_actor_id FROM ticket_blockers b JOIN tickets t ON t.id = b.ticket_id "
-                "WHERE b.kind = 'queue' AND t.project_id = ?",
+                "WHERE b.kind = 'queue' AND t.project_id = ? AND t.status = 'blocked'",
                 (project_id,),
             )
             await tx.execute(

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from actoroffice import proctree
 from actoroffice.domain.errors import Conflict, OfficeError
 from actoroffice.domain.run import Run, RunKind, RunStatus, TurnResult, TurnStatus, Usage, WakeRequest, WakeSource
 from actoroffice.domain.work import InteractionKind, InteractionStatus, Ticket, TicketStatus
@@ -27,7 +29,9 @@ from actoroffice.tools.registry import BoundTool, ToolCtx
 from actoroffice.tools.stage_tools import STAGE_TOOLS
 from actoroffice.tools.work_tools import CHAT_WORK_TOOLS, WORK_TOOLS
 
-from . import context, prompt_pack
+from . import context, failures, prompt_pack
+from .clock import AwakeClock
+from .command_guard import CommandGuard, command_limit
 from .gate import OfficeGate
 from .watchdog import Watchdog
 from .workspace import ticket_env, ticket_tmp
@@ -41,7 +45,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 S = TicketStatus
 MAX_CONTINUATIONS = 3  # automatic "continue" wakes in a row after an actor sets its ticket back to todo
-PROGRESS_EVENTS = {"text", "thinking", "tool_use"}  # once one arrives, a failed turn is not re-run by itself
+PROGRESS_EVENTS = {"text", "thinking", "tool_use"}  # once one arrives, only a network/API failure is re-run
+SHELL_TOOLS = {"Bash", "PowerShell"}
+ABORT_GRACE_S = 15.0  # a stalled runtime that was stopped has this long to return before its turn is cancelled
 
 
 class Executor:
@@ -68,7 +74,9 @@ class Executor:
 
         status = RunStatus.FAILED
         usage, cost, session_id, error = Usage(), 0.0, None, None
+        error_kind: str | None = None
         gate: OfficeGate | None = None
+        guard: CommandGuard | None = None
         try:
             project = await office.projects.get(ticket.project_id) if ticket.project_id else None
             root = await office.tickets.root_of(ticket.id)
@@ -106,8 +114,22 @@ class Executor:
             new_comments = await self._new_comments(actor.id, actor.name, ticket.id, run_id)
             answered = await self._answered(wake)
             office.gates[run_id] = gate
+            clock = AwakeClock()
+            limit = command_limit(project.profile if project else None, office.settings.command_timeout_s)
+
+            async def command_stopped(command: str, elapsed: float) -> None:
+                title = f"Đã dừng lệnh `{' '.join(command.split())[:80]}` sau {int(elapsed)}s (giới hạn {limit:g}s)"
+                await office.runs.event(run_id, "health", {"state": "command_timeout", "title": title})
+
+            guard = CommandGuard(run_id, limit, office.settings.runs_dir / run_id / "cmd", clock, on_stop=command_stopped)
+            runtime_pid = getattr(office.runtime, "pid", None)
+            if runtime_pid is not None:
+                guard.root = lambda: runtime_pid(run_id)  # only processes this run's runtime started may be stopped
+            guard.start()
             if stage_run is not None:
-                gate.watchdog = Watchdog(office, run_id, office.settings.stall_after_s, office.settings.slow_command_s)
+                settings = office.settings
+                stall_after = settings.stall_after_s_by_stage.get(stage_run.stage, settings.stall_after_s)
+                gate.watchdog = Watchdog(office, run_id, stall_after, settings.slow_command_s, command_limit_s=limit, clock=clock)
                 gate.watchdog.start()
             tools = TICKET_TOOLS
             mcp_servers: dict[str, Any] = {}
@@ -167,6 +189,7 @@ class Executor:
                     **(await office.access.env_for(ticket.id) if stage_run is not None else {}),
                 },
                 mcp_servers=mcp_servers,
+                command_guard=guard,
             )
             await office.runs.event(
                 run_id, "prompt", {"text": prompt, "resume": bool(resume), "cwd": str(ws.path), "stage": ticket.stage}
@@ -187,7 +210,9 @@ class Executor:
                 await office.runs.save_session(session_key, actor.id, session_id, str(ws.path))
             if stage_run is not None:
                 await office.stages.add_usage(stage_run.id, usage, cost, session_id)
-            status, error = await self._settle(result, ticket, run_id, actor.id, gate)
+            status, error = await self._settle(result, ticket, run_id, actor.id, gate, runtime_name(model))
+            if status == RunStatus.FAILED and result.status == TurnStatus.ERROR:
+                error_kind = result.failure_kind
         except OfficeError as exc:
             error = str(exc)
             await self._fallback(ticket, run_id, f"Lượt chạy lỗi: {exc}")
@@ -199,6 +224,11 @@ class Executor:
             office.gates.pop(run_id, None)
             if gate is not None and gate.watchdog is not None:
                 await gate.watchdog.stop()
+            if guard is not None:
+                try:
+                    await guard.close()  # background commands still alive (BR-2)
+                except Exception:
+                    log.exception("run %s: stopping its commands failed", run_id)
             try:
                 await office.ui.stop_run(run_id)  # the temporary app of ui_screenshot lives as long as the run
             except Exception:
@@ -212,6 +242,7 @@ class Executor:
                 cost_usd=cost,
                 tainted=bool(gate and gate.tainted),
                 error=error,
+                error_kind=error_kind,
                 stats=gate.stats.summary() if gate else None,
             )
             await office.wakes.finish(run_id)
@@ -316,6 +347,7 @@ class Executor:
         conv = await office.chat.get(wake.conversation_id)
         await office.runs.start(Run(id=run_id, actor_id=actor.id, kind=RunKind.CHAT, conversation_id=conv.id))
         status, error, usage, cost, session_id, tainted = RunStatus.FAILED, None, Usage(), 0.0, None, False
+        error_kind: str | None = None
         chat_gate: OfficeGate | None = None
         try:
             project = await office.projects.get(conv.project_id) if conv.project_id else None
@@ -385,11 +417,12 @@ class Executor:
                 await office.runs.save_session(session_key, actor.id, session_id, str(cwd))
             reply = "\n\n".join(r.strip() for r in replies if r.strip()) or result.text.strip()
             if result.status == TurnStatus.RATE_LIMITED:
-                await office.chat.post_system(conv.id, f"{actor.name} tạm dừng: đã chạm giới hạn sử dụng Claude.")
+                await office.chat.post_system(conv.id, f"{actor.name} tạm dừng: đã chạm giới hạn sử dụng {runtime_name(model)}.")
                 error = "rate limited"
             elif result.status in (TurnStatus.ERROR, TurnStatus.MAX_TURNS):
                 await office.chat.post_system(conv.id, f"{actor.name} gặp lỗi khi trả lời.")
                 error = result.error or result.status.value
+                error_kind = result.failure_kind
             else:
                 if reply and reply != context.NO_REPLY:
                     await office.chat.post_actor(conv.id, actor, reply, meta={"run_id": run_id})
@@ -406,6 +439,7 @@ class Executor:
                 cost_usd=cost,
                 tainted=tainted,
                 error=error,
+                error_kind=error_kind,
                 stats=chat_gate.stats.summary() if chat_gate else None,
             )
             await office.wakes.finish(run_id)
@@ -441,11 +475,16 @@ class Executor:
 
     async def _turn(self, spec: TurnSpec, gate: OfficeGate, *, extra_sink: Any = None) -> TurnResult:
         progressed = False
+        running: dict[str, str] = {}  # call id → shell command not finished yet (named when a cut-off turn resumes)
 
         async def sink(kind: str, payload: dict[str, Any]) -> None:
             nonlocal progressed
             if kind in PROGRESS_EVENTS:
                 progressed = True
+            if kind == "tool_use" and payload.get("tool") in SHELL_TOOLS and payload.get("id"):
+                running[str(payload["id"])] = str((payload.get("input") or {}).get("command") or "")
+            elif kind == "tool_result":
+                running.pop(str(payload.get("id")), None)
             activity = await self.office.runs.event(spec.run_id, kind, payload)
             if gate.watchdog is not None:
                 await gate.watchdog.observe(activity)
@@ -454,36 +493,100 @@ class Executor:
             if extra_sink is not None:
                 await extra_sink(kind, payload)
 
-        # A turn that errors before any token, content or tool call (CLI start-up timeout, lost CLI process, API
-        # overload) did nothing: run it again after a growing wait. Once the AI has worked, a re-run could repeat it.
+        # A turn that fails for a passing reason is run again after a growing wait, all reasons sharing the same
+        # tries (SI-38 BR-6): before doing anything (CLI start-up, SI-17), or on a network/API failure or a stall
+        # even after the AI has worked; the latter resumes its session with a note. Other errors are not retried.
         delays = self.office.settings.transient_retry_delays_s
-        runtime = "Kiro" if is_kiro(spec.model) else "Claude"
-        watched = _CountingGate(gate)
+        runtime = runtime_name(spec.model)
+        watchdog: Watchdog | None = gate.watchdog
+        guard: CommandGuard | None = spec.command_guard
+        retries = 0
+        spent, spent_cost = Usage(), 0.0  # tries cut off before this one: their tokens and cost are part of the turn
+
+        def counted(result: TurnResult) -> TurnResult:
+            result.usage, result.cost_usd = _add(spent, spent_cost, result)
+            return result
+
         try:
-            for attempt in range(len(delays) + 1):
-                result = await self.office.runtime.run_turn(spec, watched, sink)
+            while True:
+                progressed = False
+                running.clear()
+                watched = _CountingGate(gate)
+                stall = asyncio.Event()
+                if watchdog is not None:
+                    watchdog.reset()
+                    watchdog.on_stall = stall.set
+                mark = guard.clock.now() if guard is not None else 0.0
+                result = await self._run_once(spec, watched, sink, stall)
                 result.usage.model = result.usage.model or spec.model or ""
                 await self.office.runs.event(
                     spec.run_id,
                     "turn",
                     {"status": result.status.value, "usage": result.usage.model_dump(), "cost_usd": result.cost_usd, "error": result.error},
                 )
-                if result.status != TurnStatus.ERROR or progressed or watched.calls or _tokens(result.usage):
-                    return result
-                if attempt == len(delays):
-                    break
+                if result.status != TurnStatus.ERROR:
+                    return counted(result)
+                worked = bool(progressed or watched.calls or _tokens(result.usage))
+                kind = failures.classify(
+                    result.error, progressed=worked, stalled=stall.is_set(), command_killed=guard is not None and guard.stopped_since(mark)
+                )
+                result.failure_kind, result.retries = kind.value, retries
+                if kind not in failures.RETRIED or retries >= len(delays):
+                    return counted(result)
+                spent, spent_cost = _add(spent, spent_cost, result)
+                if worked:
+                    session = result.session_id or spec.resume_session_id
+                    if session:
+                        spec.resume_session_id = session
+                        spec.prompt = failures.resume_prompt(next(reversed(running.values()), None) or None)
+                delay = delays[retries]
+                retries += 1
                 await self.office.runs.event(
                     spec.run_id,
                     "retry",
-                    {"attempt": attempt + 1, "of": len(delays), "delay_s": delays[attempt], "error": result.error, "runtime": runtime},
+                    {"attempt": retries, "of": len(delays), "delay_s": delay, "error": result.error, "runtime": runtime, "kind": kind.value},
                 )
-                if not await self._wait_retry(spec.run_id, gate.ticket_id, delays[attempt]):
-                    return TurnResult(status=TurnStatus.CANCELLED, error="stopped while waiting to retry")
+                if not await self._wait_retry(spec.run_id, gate.ticket_id, delay):
+                    return counted(TurnResult(status=TurnStatus.CANCELLED, error="stopped while waiting to retry"))
         finally:
             self._stopped.discard(spec.run_id)
-        if delays:
-            result.error = f"{runtime} lỗi trước khi làm được gì {len(delays) + 1} lần liền: {result.error}. Bấm Thử lại ở giai đoạn."
-        return result
+            if watchdog is not None:
+                watchdog.on_stall = None
+
+    async def _run_once(self, spec: TurnSpec, gate: Any, sink: Any, stall: asyncio.Event) -> TurnResult:
+        """One try of a turn. When the watchdog finds it stalled, the runtime process is stopped (when it still
+        lives) and the try ends as an error; a runtime that does not return soon after is cancelled."""
+        runtime = self.office.runtime
+        turn = asyncio.create_task(runtime.run_turn(spec, gate, sink))
+        stalled = asyncio.create_task(stall.wait())
+        try:
+            await asyncio.wait({turn, stalled}, return_when=asyncio.FIRST_COMPLETED)
+            if turn.done():
+                return turn.result()
+            pid_of = getattr(runtime, "pid", None)
+            alive = proctree.alive(pid_of(spec.run_id) if pid_of is not None else None)
+            state = {True: "còn sống, dừng nó", False: "đã chết", None: "không rõ, dừng nó"}[alive]
+            await self.office.runs.event(
+                spec.run_id, "health", {"state": "stall_abort", "title": f"Kẹt: tiến trình {runtime_name(spec.model)} {state} rồi tự thử lại"}
+            )
+            abort = getattr(runtime, "abort", None)
+            if abort is not None and alive is not False:
+                await abort(spec.run_id)
+            try:
+                result = await asyncio.wait_for(asyncio.shield(turn), ABORT_GRACE_S)
+            except TimeoutError:
+                result = TurnResult(status=TurnStatus.ERROR)
+            if result.status in (TurnStatus.ERROR, TurnStatus.CANCELLED):
+                result.status = TurnStatus.ERROR
+                process = {True: "alive, stopped", False: "gone", None: "unknown, stopped"}[alive]
+                result.error = f"stalled: no event for the stall threshold (runtime process {process}); {result.error or ''}".rstrip("; ")
+            return result
+        finally:
+            stalled.cancel()
+            if not turn.done():
+                turn.cancel()
+                with contextlib.suppress(BaseException):
+                    await turn
 
     def stop(self, run_id: str) -> None:
         """Stop a run between two tries of a failed turn (the runtime has no process to interrupt then)."""
@@ -520,7 +623,7 @@ class Executor:
         return ticket.status == S.IN_PROGRESS and ticket.checkout_run_id == run_id
 
     async def _settle(
-        self, result: TurnResult, ticket: Ticket, run_id: str, actor_id: str, gate: OfficeGate
+        self, result: TurnResult, ticket: Ticket, run_id: str, actor_id: str, gate: OfficeGate, runtime: str = "Claude"
     ) -> tuple[RunStatus, str | None]:
         office = self.office
         current = await office.tickets.get(ticket.id)
@@ -541,7 +644,7 @@ class Executor:
             not_before = datetime.fromtimestamp(resets, UTC).isoformat(timespec="seconds") if resets else None
             if still_mine:
                 await office.tickets.transition(
-                    ticket.id, S.TODO, by="office", run_id=run_id, comment="Tạm dừng: hết hạn mức Claude. Sẽ tự làm tiếp khi hạn mức được làm mới."
+                    ticket.id, S.TODO, by="office", run_id=run_id, comment=f"Tạm dừng: hết hạn mức {runtime}. Sẽ tự làm tiếp khi hạn mức được làm mới."
                 )
             await office.wakes.enqueue(actor_id, WakeSource.MANUAL, ticket_id=ticket.id, payload={"retry": "rate_limit"}, not_before=not_before)
             return RunStatus.FAILED, "rate limited"
@@ -553,6 +656,9 @@ class Executor:
             return RunStatus.SUCCEEDED, "hết số bước của một lượt, đang làm tiếp"
 
         if result.status in (TurnStatus.ERROR, TurnStatus.CANCELLED, TurnStatus.MAX_TURNS):
+            if result.status == TurnStatus.ERROR:
+                result.failure_kind = result.failure_kind or failures.FailureKind.AI.value
+                result.error = failures.run_error(result.failure_kind, runtime, result.retries, result.error)
             note = {
                 TurnStatus.ERROR: f"Lượt chạy lỗi: {result.error}",
                 TurnStatus.CANCELLED: "Lượt chạy đã bị dừng.",
@@ -648,6 +754,10 @@ def _model_for(office: Office, actor: Actor, position: Position) -> str:
     if actor.name == office.settings.ai_name and office.settings.ai_model:
         return office.settings.ai_model
     return actor.model or position.model or office.settings.default_model
+
+
+def runtime_name(model: str | None) -> str:
+    return "Kiro" if is_kiro(model) else "Claude"
 
 
 def _runtime_suffix(model: str) -> str:

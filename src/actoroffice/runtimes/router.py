@@ -28,3 +28,17 @@ class RuntimeRouter:
     async def cancel(self, run_id: str) -> None:
         await self.claude.cancel(run_id)
         await self.kiro.cancel(run_id)
+
+    def pid(self, run_id: str) -> int | None:
+        for runtime in (self.claude, self.kiro):
+            pid = getattr(runtime, "pid", None)
+            found = pid(run_id) if pid is not None else None
+            if found is not None:
+                return found
+        return None
+
+    async def abort(self, run_id: str) -> None:
+        for runtime in (self.claude, self.kiro):
+            abort = getattr(runtime, "abort", None)
+            if abort is not None:
+                await abort(run_id)

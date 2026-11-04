@@ -288,6 +288,15 @@ function renderTimeline(items) {
   }
 }
 
+// The latest run failed: what kind of failure and whether a person must act (SI-38). runs[0] is the newest.
+const FAILURE_LABEL = { network: "mạng/API", runtime_start: "lỗi khởi động", command_timeout: "lệnh quá giờ", ai: "lỗi của AI" };
+function runError(runs) {
+  const run = (runs || [])[0];
+  if (!run || run.status !== "failed" || !run.error_kind) return "";
+  const passing = ["network", "runtime_start"].includes(run.error_kind);
+  return `<div class="run-error ${passing ? "passing" : ""}" data-run-error="${esc(run.error_kind)}"><span class="chip">${esc(FAILURE_LABEL[run.error_kind] || run.error_kind)}</span><span class="tx">${esc(run.error || "")}</span></div>`;
+}
+
 // Medium/high review findings with the AI's reply (gate card payload `review`, /stage `review`).
 function reviewList(items) {
   if (!(items || []).length) return "";
@@ -459,6 +468,7 @@ function renderPane(key) {
     </div>
     ${steps.length ? `<div class="steps">${steps.map((s, i) => `<div class="s ${s.done ? "done" : i === cur ? "cur" : ""}">${s.done ? "☑" : i === cur ? "▶" : "☐"} ${esc(s.text)}</div>`).join("")}</div>` : ""}
     ${t.stage === "pr" || closed ? reviewList(d.stage?.review) + reviewAcList(d.stage?.review_acs) + uiEvidenceList(d.stage?.ui_evidence, t.key) : ""}
+    ${closed ? "" : runError(d.detail.runs)}
     <div class="timeline">${renderTimeline(timeline(key)) || `<div class="empty">Chưa có hoạt động.</div>`}</div>
     ${pending.length ? `<div class="cards">${pending.map(card).join("")}</div>` : ""}
     ${closed ? "" : `<div class="composer"><textarea placeholder="Chỉ dẫn cho AI… Enter để gửi, Shift+Enter xuống dòng" data-steer></textarea><button class="btn primary" data-send>Gửi</button></div>`}`;

@@ -27,9 +27,10 @@ from claude_agent_sdk import (
 )
 
 from actoroffice.domain.run import DeferredTool, RateLimit, TurnResult, TurnStatus, Usage
+from actoroffice.proctree import kill_tree
 from actoroffice.tools.registry import BoundTool, ToolError
 
-from .base import EventSink, RuntimeCaps, ToolGate, TurnSpec
+from .base import EventSink, GateDecision, RuntimeCaps, ToolGate, TurnSpec
 
 log = logging.getLogger(__name__)
 THINKING_LIMIT = 6000
@@ -39,6 +40,7 @@ RESULT_PREVIEW = 400
 PROMPT_ARG_LIMIT = 8000
 
 INTERNAL_SERVER = "office"
+SHELLS = {"Bash": "sh", "PowerShell": "ps"}  # shell tools whose commands the office limits (engine/command_guard.py)
 
 
 class ClaudeSdkRuntime:
@@ -54,6 +56,18 @@ class ClaudeSdkRuntime:
         if client is not None:
             await client.interrupt()
 
+    def pid(self, run_id: str) -> int | None:
+        """The CLI process of a running turn. The SDK keeps it on a private attribute: None when that changes."""
+        client = self._clients.get(run_id)
+        process = getattr(getattr(client, "_transport", None), "_process", None)
+        pid = getattr(process, "pid", None)
+        return pid if isinstance(pid, int) else None
+
+    async def abort(self, run_id: str) -> None:
+        pid = self.pid(run_id)
+        if pid is not None:
+            kill_tree(pid)
+
     async def run_turn(self, spec: TurnSpec, gate: ToolGate, sink: EventSink) -> TurnResult:
         prompt_file = _prompt_file(spec.system_prompt)
         options = self._options(spec, gate, prompt_file)
@@ -62,6 +76,7 @@ class ClaudeSdkRuntime:
         result: ResultMessage | None = None
         assistant_error: str | None = None
         model = ""
+        session_id: str | None = None  # known from the start: a turn cut off without a result can still be resumed
         try:
             async with ClaudeSDKClient(options=options) as client:
                 self._clients[spec.run_id] = client
@@ -89,30 +104,48 @@ class ClaudeSdkRuntime:
                         await sink("rate_limit", rate_limit.model_dump())
                     elif isinstance(msg, SystemMessage) and msg.subtype == "init":
                         model = str((msg.data or {}).get("model") or "")
+                        session_id = str((msg.data or {}).get("session_id") or "") or None
                     elif isinstance(msg, SystemMessage) and msg.subtype == "compact_boundary":
                         await sink("compacted", {"data": msg.data})
                     elif isinstance(msg, ResultMessage):
                         result = msg
         except Exception as exc:  # the CLI process failed to start or crashed
             log.exception("claude run %s failed", spec.run_id)
-            return TurnResult(status=TurnStatus.ERROR, error=f"{type(exc).__name__}: {exc}", rate_limit=rate_limit)
+            return TurnResult(status=TurnStatus.ERROR, error=_error_text(exc), rate_limit=rate_limit, session_id=session_id)
         finally:
             self._clients.pop(spec.run_id, None)
             if prompt_file is not None:
                 prompt_file.unlink(missing_ok=True)
-        return _to_turn_result(result, texts, rate_limit, assistant_error, model)
+        return _to_turn_result(result, texts, rate_limit, assistant_error, model, session_id)
 
     def _options(self, spec: TurnSpec, gate: ToolGate, prompt_file: Path | None = None) -> ClaudeAgentOptions:
+        guard = spec.command_guard
+
         async def pre_tool_use(data: Any, tool_use_id: str | None, _ctx: Any) -> dict[str, Any]:
-            res = await gate.before_tool(data["tool_name"], data.get("tool_input") or {}, tool_use_id)
+            args = data.get("tool_input") or {}
+            res = await gate.before_tool(data["tool_name"], args, tool_use_id)
             out: dict[str, Any] = {"hookEventName": "PreToolUse", "permissionDecision": res.decision.value}
             if res.reason:
                 out["permissionDecisionReason"] = res.reason
+            tool = data["tool_name"]
+            if guard is not None and res.decision == GateDecision.ALLOW and tool in SHELLS and args.get("command"):
+                # Only after the gate allowed the command as written: the prefix lets the office stop it in time.
+                out["updatedInput"] = {**args, "command": guard.wrap(tool_use_id, str(args["command"]), SHELLS[tool])}
             return {"hookSpecificOutput": out}
 
-        async def post_tool_use(data: Any, _tool_use_id: str | None, _ctx: Any) -> dict[str, Any]:
-            await gate.after_tool(data["tool_name"], data.get("tool_input") or {}, data.get("tool_response"))
-            return {}
+        def told(event: str, tool_use_id: str | None) -> dict[str, Any]:
+            notes = guard.tool_ended(tool_use_id) if guard is not None else None
+            return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": notes}} if notes else {}
+
+        async def post_tool_use(data: Any, tool_use_id: str | None, _ctx: Any) -> dict[str, Any]:
+            args = data.get("tool_input") or {}
+            if guard is not None and isinstance(args.get("command"), str):
+                args = {**args, "command": guard.unwrap(args["command"])}
+            await gate.after_tool(data["tool_name"], args, data.get("tool_response"))
+            return told("PostToolUse", tool_use_id)
+
+        async def post_tool_use_failure(_data: Any, tool_use_id: str | None, _ctx: Any) -> dict[str, Any]:
+            return told("PostToolUseFailure", tool_use_id)
 
         async def can_use_tool(name: str, _args: dict[str, Any], _ctx: Any) -> Any:
             # Every call is decided by the PreToolUse hook; reaching here means the CLI asked on its own.
@@ -149,6 +182,7 @@ class ClaudeSdkRuntime:
             hooks={
                 "PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use], timeout=spec.hook_timeout_s)],
                 "PostToolUse": [HookMatcher(matcher=None, hooks=[post_tool_use])],
+                "PostToolUseFailure": [HookMatcher(matcher=None, hooks=[post_tool_use_failure])],
             },
             mcp_servers=mcp_servers,
             strict_mcp_config=True,
@@ -160,9 +194,28 @@ class ClaudeSdkRuntime:
             # The CLI then gives the model a StructuredOutput tool and returns its input as ResultMessage.structured_output.
             output_format={"type": "json_schema", "schema": spec.output_schema} if spec.output_schema else None,
             cli_path=self.cli_path,
-            env={"CLAUDE_AGENT_SDK_CLIENT_APP": "actoroffice/0.1", **spec.env},
+            env={"CLAUDE_AGENT_SDK_CLIENT_APP": "actoroffice/0.1", **_bash_timeouts(guard), **spec.env},
             extra_args=extra_args,
         )
+
+
+def _bash_timeouts(guard: Any) -> dict[str, str]:
+    """The CLI's own Bash timeout, a minute past the office limit: the office stops a long foreground command before
+    the CLI moves it to the background (the CLI never stops it)."""
+    if guard is None:
+        return {}
+    ms = str(int((guard.limit_s + 60) * 1000))
+    return {"BASH_DEFAULT_TIMEOUT_MS": ms, "BASH_MAX_TIMEOUT_MS": ms}
+
+
+def _error_text(exc: BaseException) -> str:
+    """The error of a turn that crashed, with its cause: the SDK reports a refused command line (WinError 206) as
+    "Claude Code not found", and only the cause tells the two apart."""
+    text = f"{type(exc).__name__}: {exc}"
+    cause = exc.__cause__
+    if cause is not None and str(cause) and str(cause) not in text:
+        text += f" (cause: {type(cause).__name__}: {cause})"
+    return text
 
 
 def _prompt_file(system_prompt: str) -> Path | None:
@@ -204,10 +257,17 @@ def _main_model(model_usage: dict[str, Any] | None) -> str:
 
 
 def _to_turn_result(
-    result: ResultMessage | None, texts: list[str], rate_limit: RateLimit | None, assistant_error: str | None, model: str = ""
+    result: ResultMessage | None,
+    texts: list[str],
+    rate_limit: RateLimit | None,
+    assistant_error: str | None,
+    model: str = "",
+    session_id: str | None = None,
 ) -> TurnResult:
     if result is None:
-        return TurnResult(status=TurnStatus.ERROR, error="no result from Claude", rate_limit=rate_limit, usage=Usage(model=model))
+        return TurnResult(
+            status=TurnStatus.ERROR, error="no result from Claude", rate_limit=rate_limit, usage=Usage(model=model), session_id=session_id
+        )
     usage = Usage.from_sdk(result.usage)
     usage.model = model or _main_model(result.model_usage)
     structured = getattr(result, "structured_output", None)

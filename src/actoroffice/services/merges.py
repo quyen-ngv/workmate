@@ -22,7 +22,7 @@ from actoroffice.domain.errors import Conflict, NotFound, OfficeError
 from actoroffice.domain.stage import StageOutcome
 from actoroffice.domain.work import Project, ProjectAccess, Ticket
 from actoroffice.engine.workspace import branch_name
-from actoroffice.services.automations import kill_tree
+from actoroffice.proctree import kill_tree
 from actoroffice.services.checks import IDENTITY, command_list, merge_failure, run_argv, test_env
 
 if TYPE_CHECKING:

@@ -57,6 +57,8 @@ class TurnSpec:
     # JSON schema of the final answer: a runtime that supports structured output returns it in TurnResult.structured;
     # the others ignore it (the caller still parses TurnResult.text).
     output_schema: dict[str, Any] | None = None
+    # engine/command_guard.py CommandGuard of the run: the runtime registers every shell command with it (time limit)
+    command_guard: Any = None
 
 
 @dataclass(frozen=True)
@@ -73,3 +75,7 @@ class AgentRuntime(Protocol):
     async def run_turn(self, spec: TurnSpec, gate: ToolGate, sink: EventSink) -> TurnResult: ...
 
     async def cancel(self, run_id: str) -> None: ...
+
+    # Optional (looked up with getattr; test fakes may leave them out):
+    #   pid(run_id) -> int | None      the CLI process of a running turn
+    #   async abort(run_id) -> None    kill that process tree: the turn then ends with an error (a stalled run)

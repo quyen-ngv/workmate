@@ -17,6 +17,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .failures import retry_title
+
 READ_TOOLS = {"Read", "NotebookRead", "list_dir", "doc_get", "ticket_get", "skill_read", "stage_info"}
 SEARCH_TOOLS = {"Grep", "Glob", "history_search", "memory_search", "kb_search", "rule_search", "WebSearch", "tickets_list"}
 SOURCE_TOOLS = {"WebFetch", "db_query", "db_schema", "logs_search", "logs_errors", "logs_cluster", "logs_trace", "kafka_peek", "mq_peek", "redis_scan"}
@@ -111,9 +113,11 @@ class ActivityTracker:
         if kind == "retry":
             return Activity(
                 kind="health",
-                title=f"{payload.get('runtime') or 'Claude'} gặp lỗi, thử lại lần {payload.get('attempt')}",
+                title=retry_title(  # retries before SI-38 had no kind: they were all start-up failures
+                    payload.get("kind") or "runtime_start", str(payload.get("runtime") or "AI"), int(payload.get("attempt") or 0), int(payload.get("of") or 0), float(payload.get("delay_s") or 0)
+                ),
                 status="error",
-                fields={"attempt": payload.get("attempt"), "delay_s": payload.get("delay_s")},
+                fields={"attempt": payload.get("attempt"), "delay_s": payload.get("delay_s"), "kind": payload.get("kind")},
             )
         if kind == "health":
             return Activity(kind="health", title=str(payload.get("title") or payload.get("state")), status="error", fields=payload)

@@ -133,6 +133,20 @@ async def seed(office: Office) -> None:
     await office.db.execute("UPDATE tickets SET status = ? WHERE id = ?", (TicketStatus.CANCELLED.value, cancelled))
     await proposals(office, team.id)
     await queue(office, team.id)
+    await failed_run(office, await ticket("Gửi email xác nhận hoàn tiền (lượt lỗi mạng)", "build"))
+
+
+async def failed_run(office: Office, ticket_id: int) -> None:
+    """SI-38: a ticket whose last run failed on the API connection after all its automatic retries."""
+    from actoroffice.domain.ids import new_id
+    from actoroffice.domain.run import Run, RunKind, RunStatus
+    from actoroffice.engine.failures import FailureKind, run_error
+
+    ai = await office.ensure_ai()
+    run_id = new_id("run")
+    await office.runs.start(Run(id=run_id, actor_id=ai.id, kind=RunKind.TICKET, ticket_id=ticket_id))
+    detail = "API Error: Unable to connect to API: Self-signed certificate detected"
+    await office.runs.finish(run_id, RunStatus.FAILED, error=run_error(FailureKind.NETWORK, "Claude", 3, detail), error_kind=FailureKind.NETWORK)
 
 
 async def queue(office: Office, team_id: str) -> None:

@@ -21,13 +21,13 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import psutil
 from pydantic import BaseModel
 
 from actoroffice.domain.dossier import SYNC_SECTION, parse_dossier, render_dossier, set_sync_line, sync_line
 from actoroffice.domain.errors import OfficeError
 from actoroffice.domain.stage import StageDef, StageRun
 from actoroffice.domain.work import Project, Ticket
+from actoroffice.proctree import kill_tree
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -237,12 +237,12 @@ async def run_argv(argv: list[str], cwd: Path, *, timeout: float, env: dict[str,
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
     except TimeoutError:
-        _kill_tree(proc.pid)
+        kill_tree(proc.pid)
         with contextlib.suppress(Exception):
             await proc.wait()
         return 124, f"timeout after {timeout:.0f}s", time.monotonic() - started
     except asyncio.CancelledError:
-        _kill_tree(proc.pid)  # a cancelled caller (a merge job closed with the office) leaves no process behind
+        kill_tree(proc.pid)  # a cancelled caller (a merge job closed with the office) leaves no process behind
         raise
     text = out.decode("utf-8", "replace").replace("\r\n", "\n")
     return proc.returncode or 0, text[-OUTPUT_TAIL * 10 :], time.monotonic() - started
@@ -265,15 +265,6 @@ def merge_failure(files: list[str], output: str) -> str:
     if files:
         return "xung đột ở: " + ", ".join(files)
     return "lỗi: " + (" ".join(output.split())[-300:] or "git không in gì")
-
-
-def _kill_tree(pid: int) -> None:
-    with contextlib.suppress(psutil.Error):
-        parent = psutil.Process(pid)
-        for child in parent.children(recursive=True):
-            with contextlib.suppress(psutil.Error):
-                child.kill()
-        parent.kill()
 
 
 # ---- builtin checks ----------------------------------------------------------------------------------

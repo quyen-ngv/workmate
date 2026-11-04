@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from actoroffice.domain.run import DeferredTool, TurnResult, TurnStatus, Usage
+from actoroffice.proctree import kill_tree
 
 from .base import EventSink, GateDecision, RuntimeCaps, ToolGate, TurnSpec
 from .office_mcp import SERVER_NAME, ToolServer
@@ -96,6 +97,15 @@ class KiroAcpRuntime:
         turn = self._turns.get(run_id)
         if turn is not None:
             await turn.cancel()
+
+    def pid(self, run_id: str) -> int | None:
+        turn = self._turns.get(run_id)
+        return turn.proc.pid if turn is not None and turn.proc is not None else None
+
+    async def abort(self, run_id: str) -> None:
+        pid = self.pid(run_id)
+        if pid is not None:
+            kill_tree(pid)
 
     async def run_turn(self, spec: TurnSpec, gate: ToolGate, sink: EventSink) -> TurnResult:
         argv = self._argv()
@@ -463,6 +473,11 @@ class _Turn:
         terminal = _Terminal(proc, int(params.get("outputByteLimit") or TERMINAL_OUTPUT))
         terminal.pump = asyncio.create_task(_pump(terminal))
         self.terminals[terminal_id] = terminal
+        if self.spec.command_guard is not None:
+            def told(note: str) -> None:
+                terminal.output += f"\n{note}\n".encode()
+
+            self.spec.command_guard.watch(f"{self.spec.run_id}:{terminal_id}", line, proc.pid, on_stop=told)
         return {"terminalId": terminal_id}
 
     def _terminal(self, params: dict[str, Any]) -> _Terminal:
@@ -573,6 +588,4 @@ def _children(pid: int) -> list[Any]:
 def _kill(proc: asyncio.subprocess.Process) -> None:
     if proc.returncode is not None:
         return
-    from actoroffice.services.automations import kill_tree
-
     kill_tree(proc.pid)

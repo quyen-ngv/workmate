@@ -1269,6 +1269,43 @@ async def test_si29_ac1_ac_coverage_outside_git_still_needs_handoff_line(office:
     assert result.status == "skipped" and result.summary == "không phải git worktree"
 
 
+FOUR_PART_HANDOFF = """\
+## Thay đổi chính
+- Rút gọn hướng dẫn handoff (AC-2 được kiểm ở bảng dưới).
+
+## Cách chạy và kiểm
+`uv run pytest tests/test_app.py -n0`
+
+## Bảng AC
+| AC | Test / cách kiểm |
+|---|---|
+| AC-1 | test_ac1_x |
+| AC-2 | đọc diff, khớp requirements |
+| AC-3 | test_ac3_x; không chụp được: máy không có trình duyệt |
+
+## Giới hạn đã biết
+- Không có.
+"""
+
+
+async def test_si35_ac2_four_part_handoff_still_read_by_checks(office: Office, tmp_path: Path) -> None:
+    """SI-35: a handoff in the new four-part shape still gives each check its AC line."""
+    from actoroffice.services.checks import handoff_line, review_acs, ui_evidence
+
+    # the first non-heading line naming the AC wins, even outside the table
+    assert handoff_line(FOUR_PART_HANDOFF, "AC-2") == "- Rút gọn hướng dẫn handoff (AC-2 được kiểm ở bảng dưới)."
+    table_only = FOUR_PART_HANDOFF.replace("(AC-2 được kiểm ở bảng dưới)", "")
+    assert handoff_line(table_only, "AC-2") == "| AC-2 | đọc diff, khớp requirements |"
+    assert [(a["id"], a["done"]) for a in review_acs(REVIEW_REQUIREMENTS, table_only)] == [("AC-2", "| AC-2 | đọc diff, khớp requirements |")]
+    ui_requirements = REVIEW_REQUIREMENTS.replace("- AC-3:", "- AC-3 [ui]:")
+    [item] = ui_evidence(ui_requirements, table_only, [])
+    assert item["id"] == "AC-3" and item["reasons"] == ["máy không có trình duyệt"]
+    ticket_id, repo = await review_build(office, tmp_path, handoff=table_only, tests="def test_ac1_x():\n    pass\n\n\ndef test_ac3_x():\n    pass\n")
+    result, _ = await run_checks(office, ticket_id, repo, "ac_coverage")
+    assert result.status == "passed", result.summary
+    assert result.data["no_handoff"] == [] and result.summary == "2/2 AC có test, 1 AC kiểm bằng review: AC-2"
+
+
 async def test_ac8_rules_gate_lists_review_acs(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
     from actoroffice.domain.stage import StageDef, StageTemplate
     from actoroffice.domain.team import TeamSettings

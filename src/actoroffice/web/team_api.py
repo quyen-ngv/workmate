@@ -124,21 +124,26 @@ def register(app: FastAPI, office: Office) -> None:
     # ---- board (sidebar) ----------------------------------------------------------------------------------
 
     @app.get("/api/board")
-    async def board(viewer: str = LOCAL_OWNER_ID, closed: bool = False, limit: int = CLOSED_PAGE, offset: int = 0) -> dict[str, Any]:
+    async def board(
+        viewer: str = LOCAL_OWNER_ID, closed: bool = False, limit: int = CLOSED_PAGE, offset: int = 0, team: str | None = None
+    ) -> dict[str, Any]:
         """Teams → tickets running through stages, each with its derived status; "needs you" for the viewer.
-        `closed=true`: one page of done/cancelled tickets instead, read from the tickets table only (no derived status)."""
-        closed_marks = ",".join("?" * len(CLOSED))
-        count = await office.db.fetchone(
-            f"SELECT COUNT(*) AS n FROM tickets WHERE stage IS NOT NULL AND status IN ({closed_marks})", [s.value for s in CLOSED]
-        )
+        `closed=true`: one page of done/cancelled tickets instead, read from the tickets table only (no derived status).
+        `team`: the closed page and `closed_count` only count that team's tickets (the sidebar's team filter)."""
+        closed_where = f"stage IS NOT NULL AND status IN ({','.join('?' * len(CLOSED))})"
+        closed_args: list[Any] = [s.value for s in CLOSED]
+        if team:
+            closed_where += " AND team_id = ?"
+            closed_args.append(team)
+        count = await office.db.fetchone(f"SELECT COUNT(*) AS n FROM tickets WHERE {closed_where}", closed_args)
         closed_count = count["n"] if count else 0
         if closed:
             limit = max(1, min(limit, CLOSED_MAX))
             offset = max(0, offset)
             page = await office.db.fetchall(
                 "SELECT id, key, title, team_id, stage, stage_template, status, updated_at FROM tickets"
-                f" WHERE stage IS NOT NULL AND status IN ({closed_marks}) ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
-                [*(s.value for s in CLOSED), limit + 1, offset],
+                f" WHERE {closed_where} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+                [*closed_args, limit + 1, offset],
             )
             return {
                 "tickets": [
@@ -165,6 +170,9 @@ def register(app: FastAPI, office: Office) -> None:
             st = await office.stages.status(ticket, viewer=viewer)
             last = await office.runs.last_activity(st["run_id"]) if st["run_id"] else None
             items.append({**st, "id": ticket.id, "team_id": ticket.team_id, "updated_at": ticket.updated_at, "activity": last})
+        by_team = await office.db.fetchall(
+            f"SELECT team_id, COUNT(*) AS n FROM tickets WHERE {closed_where} AND team_id IS NOT NULL GROUP BY team_id", closed_args
+        )
         team_rows = await teams.list_teams()
         backlog_count, backlog = await office.proposals.backlog()
         return {
@@ -172,6 +180,7 @@ def register(app: FastAPI, office: Office) -> None:
             "tickets": items,
             "needs_you": sum(1 for i in items if i["needs_viewer"]),
             "closed_count": closed_count,
+            "closed_by_team": {r["team_id"]: r["n"] for r in by_team},
             "backlog_count": backlog_count,
             "backlog": backlog,
             "projects": [{"id": p.id, "name": p.name} for p in await office.projects.list()],  # choices on proposal cards
@@ -215,9 +224,12 @@ def register(app: FastAPI, office: Office) -> None:
         if not ticket.stage:
             raise HTTPException(404, f"{ticket.key} không chạy theo quy trình giai đoạn")
         template = await office.stages.template_of(ticket)
+        shape = template.model_dump()
+        for s in shape["stages"]:
+            s["title"] = s["title"] or stage_title(s["id"])  # the reopen sheet shows names, sends ids
         return {
             "status": await office.stages.status(ticket, viewer=LOCAL_OWNER_ID),
-            "template": template.model_dump(),
+            "template": shape,
             "stage_runs": [r.model_dump() for r in await office.stages.runs(ticket.id)],
             "participants": [m.model_dump() for m in await teams.participants(ticket.id)],
             "review": await office.stages.last_review(ticket.id),

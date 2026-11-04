@@ -265,6 +265,76 @@ def test_ac6_team_js_reopen_sheet() -> None:
     assert 'cmd: "reopen"' in js and "Cần lý do" in js
 
 
+def test_ac1_closed_count_and_page_by_team(office_client) -> None:
+    office, c = office_client
+    login(c)
+    billing = c.post("/api/teams", json={"name": "Billing"}, headers=HEADERS).json()["id"]
+    ops = c.post("/api/teams", json={"name": "Ops"}, headers=HEADERS).json()["id"]
+    keys = _make_closed(office, c, 5, cancelled=set())
+
+    async def assign() -> None:
+        for i, key in enumerate(keys):
+            await office.db.execute("UPDATE tickets SET team_id = ? WHERE key = ?", (billing if i < 3 else ops, key))
+
+    c.portal.call(assign)
+    board = c.get("/api/board?viewer=user").json()
+    assert board["closed_count"] == 5 and board["closed_by_team"] == {billing: 3, ops: 2}
+    page = c.get(f"/api/board?closed=true&team={ops}").json()
+    assert [t["ticket"] for t in page["tickets"]] == [keys[4], keys[3]] and page["closed_count"] == 2
+    assert c.get("/api/board?closed=true").json()["closed_count"] == 5
+
+
+def test_ac1_team_js_closed_count_by_team() -> None:
+    js = _js()
+    side = _fn(js, "renderSidebar")
+    assert "state.team ? (state.board.closed_by_team || {})[state.team] || 0 : state.board.closed_count" in side
+    load = _fn(js, "loadClosed")
+    assert "&team=${encodeURIComponent(team)}" in load and "closed_by_team" in load
+    # switching team with the section open reloads it from the server
+    switch = js[js.index("if (ds.team !== undefined)") : js.index("if (ds.closedToggle !== undefined)")]
+    assert "state.closed.open" in switch and "loadClosed(0)" in switch
+
+
+def test_ac2_team_js_soon_reloads_open_closed_section() -> None:
+    soon = _fn(_js(), "soon")
+    assert "if (state.closed.open) await act(() => loadClosed(0))" in soon
+    assert soon.index("loadBoard") < soon.index("loadClosed(0)")
+
+
+def test_ac3_reopen_wakes_the_ai(office_client) -> None:
+    office, c = office_client
+    login(c)
+    key = c.post("/api/tasks", json={"title": "Xong", "template": "code"}, headers=HEADERS).json()["key"]
+    _close(office, c, key, "done")
+
+    async def clear() -> None:
+        await office.db.execute("UPDATE wake_requests SET status = 'done' WHERE ticket_id = (SELECT id FROM tickets WHERE key = ?)", (key,))
+
+    c.portal.call(clear)
+    r = c.post(f"/api/tickets/{key}/control", json={"cmd": "reopen", "stage": "build", "text": "thiếu test"}, headers=HEADERS)
+    assert r.status_code == 200
+
+    async def pending():
+        ticket = await office.tickets.get(key)
+        assert ticket.assignee_actor_id
+        return await office.wakes.pending_for(ticket.assignee_actor_id, ticket.id)
+
+    wake = c.portal.call(pending)
+    assert wake is not None and wake.source == "manual"
+    assert wake.payload["reasons"][0]["stage"] == "build" and wake.payload["reasons"][0]["reopened"] == "thiếu test"
+
+
+def test_ac4_stage_api_fills_stage_titles(office_client) -> None:
+    office, c = office_client
+    login(c)
+    key = c.post("/api/tasks", json={"title": "Xong", "template": "code"}, headers=HEADERS).json()["key"]
+    stages = c.get(f"/api/tickets/{key}/stage").json()["template"]["stages"]
+    assert [(s["id"], s["title"]) for s in stages][:3] == [("understand", "Tìm hiểu"), ("plan", "Lên kế hoạch"), ("build", "Làm")]
+    assert all(s["title"] for s in stages)
+    # the sheet shows the title and sends the id
+    assert '<option value="${esc(s.id)}"' in _fn(_js(), "pageReopen") and "esc(s.title || s.id)" in _fn(_js(), "pageReopen")
+
+
 def test_ac7_changes_of_office_merged_ticket(office_client) -> None:
     office, c = office_client
     login(c)

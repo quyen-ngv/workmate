@@ -52,12 +52,49 @@ When the prompt has "# Earlier findings", they were reported in an earlier round
 again as new findings. For each one marked RE-CHECK (the engineer says it is fixed), say in "previous" whether it
 is "resolved" or "still" there, with a short note. Do not judge the others.
 
-Answer with ONLY a JSON object, no prose:
+Your answer is this JSON object:
 {"findings": [{"severity": "high|medium|low", "file": "path", "line": 0, "claim": "what is wrong",
 "evidence": "the code or AC that shows it"}],
 "previous": [{"id": "F1", "status": "resolved|still", "note": "why"}]}
+If your tools include StructuredOutput, give the object to it once, at the end. Otherwise there is no tool for the
+answer: write ONLY the JSON object as your final text, no prose. Never call a tool you were not given.
 Use "high" only for problems that must be fixed before merging. Empty lists are valid answers.
 """
+
+# The reviewer's answer for runtimes with structured output (TurnSpec.output_schema); the same shape as above.
+REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "file": {"type": "string"},
+                    "line": {"type": ["integer", "null"]},
+                    "claim": {"type": "string"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["severity", "file", "claim"],
+            },
+        },
+        "previous": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "status": {"type": "string", "enum": ["resolved", "still"]},
+                    "note": {"type": "string"},
+                },
+                "required": ["id", "status"],
+            },
+        },
+    },
+    "required": ["findings", "previous"],
+}
+STRUCTURED_TOOL = "StructuredOutput"  # the tool the Claude CLI adds for output_format
 
 
 class ReviewError(OfficeError):
@@ -69,6 +106,8 @@ class _ReadOnlyGate:
         self.workspace = workspace.resolve()
 
     async def before_tool(self, tool: str, args: dict[str, Any], tool_use_id: str | None) -> GateResult:
+        if tool == STRUCTURED_TOOL:
+            return GateResult(GateDecision.ALLOW)  # only hands the answer back; reads and writes nothing
         if tool not in READ_ONLY:
             return GateResult(GateDecision.DENY, "The reviewer can only read (Read, Grep, Glob).")
         raw = args.get("file_path") or args.get("path")
@@ -142,6 +181,7 @@ class ReviewService:
             tools=sorted(READ_ONLY),
             max_turns=20,
             show_thinking=False,
+            output_schema=REVIEW_SCHEMA,
         )
 
         async def sink(kind: str, payload: dict[str, Any]) -> None:
@@ -159,7 +199,10 @@ class ReviewService:
                 usage=result.usage if result is not None else None,
                 cost_usd=result.cost_usd if result is not None else 0.0,
             )
-        parsed = parse_review(result.text) if result is not None else None
+        parsed = None
+        if result is not None:
+            # Structured output first; runtimes without it (Kiro) or an empty one fall back to the JSON in the text.
+            parsed = review_data(result.structured) or parse_review(result.text)
         # Read the findings again after the reviewer's turn before writing them back.
         state = (await office.stages.get_run(srun_id)).review
         rounds = await self._rounds(srun_id)
@@ -362,6 +405,11 @@ def parse_review(text: str) -> dict[str, list[dict[str, Any]]] | None:
         data = json.loads(m.group(0))
     except json.JSONDecodeError:
         return None
+    return review_data(data)
+
+
+def review_data(data: Any) -> dict[str, list[dict[str, Any]]] | None:
+    """Findings and verdicts from the reviewer's answer object (structured output or parsed text)."""
     findings = data.get("findings") if isinstance(data, dict) else None
     if not isinstance(findings, list):
         return None

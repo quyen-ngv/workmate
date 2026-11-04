@@ -602,3 +602,32 @@ def test_ac12_team_js_switch_and_waiting_label() -> None:
     assert "/api/projects/${queue}/one-at-a-time" in js and "enabled: e.target.checked" in js
     assert 't.waiting_for ? " · " + esc(t.status_label)' in js  # sidebar
     assert "st.waiting_for ? st.status_label" in _fn(js, "renderPane")  # pane
+
+
+def test_ac15_pane_shows_the_failure_kind_of_the_last_run(office_client) -> None:
+    """SI-38 AC-15: the ticket API returns the kind of a failed run, and the pane shows its label and guidance."""
+    from actoroffice.domain.run import Run, RunKind, RunStatus
+    from actoroffice.engine.failures import FailureKind, run_error
+
+    office, c = office_client
+    login(c)
+    task = c.post("/api/tasks", json={"title": "Gửi email hoàn tiền", "template": "code"}, headers=HEADERS).json()
+    error = run_error(FailureKind.NETWORK, "Claude", 3, "API Error: Unable to connect to API")
+
+    async def failed() -> None:
+        ticket = await office.tickets.get(task["key"])
+        ai = await office.ensure_ai()
+        await office.runs.start(Run(id="run_net", actor_id=ai.id, kind=RunKind.TICKET, ticket_id=ticket.id))
+        await office.runs.finish("run_net", RunStatus.FAILED, error=error, error_kind=FailureKind.NETWORK)
+
+    c.portal.call(failed)
+    [run] = [r for r in c.get(f"/api/tickets/{task['key']}").json()["runs"] if r["id"] == "run_net"]
+    assert run["error_kind"] == "network" and "mạng/API" in run["error"] and "bấm Thử lại" in run["error"]
+
+    js = _js()
+    label = _fn(js, "runError")
+    assert 'run.status !== "failed" || !run.error_kind' in label and "FAILURE_LABEL[run.error_kind]" in label and "esc(run.error" in label
+    assert 'network: "mạng/API"' in js and 'command_timeout: "lệnh quá giờ"' in js
+    assert '${closed ? "" : runError(d.detail.runs)}' in _fn(js, "renderPane")
+    css = (TEAM_JS.parent / "team.css").read_text(encoding="utf-8")
+    assert ".run-error {" in css and ".run-error.passing" in css

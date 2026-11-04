@@ -98,6 +98,13 @@ class ProjectService:
         self.bus.publish("project.changed", project=updated.model_dump())
         return updated
 
+    async def set_one_at_a_time(self, project_id: str, enabled: bool) -> Project:
+        """The project's "Chạy từng ticket một" option (SI-31). Only stores it: the caller releases the queue."""
+        updated = (await self.get(project_id)).model_copy(update={"one_at_a_time": enabled})
+        await self.db.execute("UPDATE projects SET config_json = ? WHERE id = ?", (updated.model_dump_json(), project_id))
+        self.bus.publish("project.changed", project=updated.model_dump())
+        return updated
+
     async def find(self, ref: str) -> Project | None:
         for project in await self.list():
             if ref in (project.id, project.name):

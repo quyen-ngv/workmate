@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from .org import WorkspaceKind
 
@@ -33,6 +33,15 @@ class Project(BaseModel):
     # How much the AI may do without a click (security/policy.py): read_only | workspace | full.
     permission_mode: str = "workspace"
     allow_rules: list[str] = Field(default_factory=list)  # "always allow" rules chosen on approval cards
+    # "Chạy từng ticket một" (SI-31): None = the default, on for code projects people work in (worktree/direct).
+    one_at_a_time: bool | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def runs_one_at_a_time(self) -> bool:
+        if self.one_at_a_time is not None:
+            return self.one_at_a_time
+        return self.kind == "code" and self.access in (ProjectAccess.WORKTREE, ProjectAccess.DIRECT)
 
     @property
     def workspace_kind(self) -> WorkspaceKind:

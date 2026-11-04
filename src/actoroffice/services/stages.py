@@ -90,11 +90,17 @@ class StageService:
             raise StageError(f"Không có mẫu giai đoạn '{template}'")
         first = tpl.stages[0]
         ai = await office.ensure_ai()
-        await office.db.execute(
-            "UPDATE tickets SET stage = ?, stage_template = ?, team_id = ?, owner_user_id = COALESCE(?, owner_user_id), "
-            "mode = COALESCE(?, mode), paused = 0, updated_at = ? WHERE id = ?",
-            (first.id, tpl.name, team_id, owner_user_id, mode, utcnow(), ticket.id),
-        )
+        # sub-tickets never queue: they are part of the work of their root ticket (SI-31)
+        project_id = ticket.project_id if ticket.parent_id is None else None
+        queued = (await office.projects.get(project_id)).runs_one_at_a_time if project_id else False
+        async with office.db.tx() as tx:  # one write lock: two starts in one project cannot both find it free
+            await tx.execute(
+                "UPDATE tickets SET stage = ?, stage_template = ?, team_id = ?, owner_user_id = COALESCE(?, owner_user_id), "
+                "mode = COALESCE(?, mode), paused = 0, updated_at = ? WHERE id = ?",
+                (first.id, tpl.name, team_id, owner_user_id, mode, utcnow(), ticket.id),
+            )
+            if queued and project_id:
+                await office.tickets.queue_behind(tx, ticket.id, project_id)
         await self._open_run(ticket.id, first.id)
         await self.conversation_of(await office.tickets.get(ticket.id))
         await office.tickets.add_comment(ticket.id, f"Bắt đầu quy trình '{tpl.name}': {self._route(tpl)}", author_kind="system", author_id=None)
@@ -718,12 +724,17 @@ class StageService:
         who: list[str] = []
         needs_viewer = False
         status = StageStatus.IDLE
+        label: str | None = None
+        waiting = await office.tickets.queue_blockers(ticket.id) if ticket.stage and ticket.status == S.BLOCKED else []
         if ticket.status == S.DONE:
             status = StageStatus.DONE
         elif not ticket.stage:
             status = StageStatus.NOT_STARTED
         elif ticket.paused:
             status = StageStatus.PAUSED
+        elif waiting:  # waits its turn in the project's queue: its held wake must not read as "queued" (SI-31)
+            status = StageStatus.BLOCKED
+            label = f"đang chờ {', '.join(waiting)} xong"
         elif pending:
             status = StageStatus.NEEDS_YOU
             for item in pending:
@@ -757,7 +768,8 @@ class StageService:
             "stage_title": stage_title(ticket.stage),
             "template": ticket.stage_template,
             "status": status.value,
-            "status_label": STAGE_STATUS_VI[status],
+            "status_label": label or STAGE_STATUS_VI[status],
+            "waiting_for": waiting[0] if waiting else None,
             "who": who,
             "needs_viewer": needs_viewer,
             "run_id": running[0].id if running else None,

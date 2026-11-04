@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 
 from actoroffice.app import Office
 from actoroffice.config import Settings
 from actoroffice.domain.errors import PolicyDenied
+from actoroffice.domain.ids import new_id
 from actoroffice.domain.run import TurnResult, TurnStatus, Usage
-from actoroffice.domain.work import InteractionKind, InteractionStatus, TicketStatus
+from actoroffice.domain.work import InteractionKind, InteractionStatus, Project, ProjectAccess, Ticket, TicketStatus
 from actoroffice.runtimes.base import GateDecision
+from actoroffice.tools.proposal_tools import propose_tickets
 
 from .fakes import FakeRuntime, TurnCtx
 from .seed import seed_db
@@ -334,3 +340,254 @@ async def test_question_for_a_role_and_people_lookup(office: Office, people) -> 
         await office.answer(item.id, {"answer": "a"}, by=minh.id)
     resolved = await office.answer(item.id, {"answer": "a"}, by=hoa.id)
     assert resolved.status == InteractionStatus.ANSWERED and resolved.response["answered_by"] == "Hoa"
+
+
+# ---- SI-31: one ticket at a time per project ------------------------------------------------------------
+
+
+IDENTITY = ["-c", "user.name=t", "-c", "user.email=t@x", "-c", "commit.gpgsign=false"]
+
+
+def git(path: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(path), *IDENTITY, *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+async def code_project(office: Office, tmp_path: Path, name: str = "Leave") -> Project:
+    """A code project on a git worktree (an empty folder becomes a repo with one commit on main)."""
+    return await office.projects.create(name, path=str(tmp_path / name.lower()), access=ProjectAccess.WORKTREE)
+
+
+async def begin(office: Office, project: Project, title: str) -> Ticket:
+    ticket = await office.tickets.create(title, description="x", project_id=project.id)
+    return await office.stages.start(ticket.id, template="code", by="user")
+
+
+async def drop_wakes(office: Office, *tickets: Ticket) -> None:
+    for ticket in tickets:
+        await office.db.execute("DELETE FROM wake_requests WHERE ticket_id = ?", (ticket.id,))
+
+
+async def close(office: Office, ticket: Ticket, to: TicketStatus) -> None:
+    if to == S.DONE:
+        ai = await office.ensure_ai()
+        run_id = new_id("run")
+        await office.tickets.checkout(ticket.id, ai.id, run_id)
+        await office.tickets.transition(ticket.id, S.DONE, by="Copilot", run_id=run_id)
+    else:
+        await office.tickets.transition(ticket.id, to, by="user")
+
+
+async def assert_waits(office: Office, ticket: Ticket, front: Ticket) -> None:
+    """`ticket` waits for `front` in the project's queue: blocked, no run starts for it, its wake is kept."""
+    current = await office.tickets.get(ticket.id)
+    assert current.status == S.BLOCKED
+    assert await office.tickets.open_blockers(ticket.id) == [front.key]
+    assert await office.tickets.queue_blockers(ticket.id) == [front.key]
+    assert await office.scheduler.tick() == []
+    assert await office.wakes.pending_for((await office.ensure_ai()).id, ticket.id) is not None
+
+
+@pytest.mark.parametrize("path", ["stages.start", "backlog", "proposal"])
+async def test_ac1_second_ticket_waits(office: Office, tmp_path: Path, path: str) -> None:
+    from .test_propose_tickets import cards, ctx_for
+
+    project = await code_project(office, tmp_path)
+    a = await begin(office, project, "SI-a")
+    await drop_wakes(office, a)  # SI-a's own run is not what this test looks at
+    if path == "stages.start":
+        b = await begin(office, project, "SI-b")
+    elif path == "backlog":
+        b = await office.tickets.create("SI-b", description="x", project_id=project.id, status=S.BACKLOG)
+        b = await office.proposals.start_backlog(b.key, by="user")
+    else:
+        dm = await office.chat.dm((await office.ensure_ai()).id)
+        item = {"title": "SI-b", "why": "w", "description": "d", "workflow": "code", "project": project.name}
+        await propose_tickets({"items": [item]}, await ctx_for(office, conversation=dm.id))
+        [card] = await cards(office)
+        await office.answer(card.id, {"approved": True}, by="user")
+        b = await office.tickets.get((await office.interactions.get(card.id)).response["created"][0])
+    assert b.stage == "understand"
+    await assert_waits(office, b, a)
+    comments = [c.body for c in await office.tickets.comments(b.id)]
+    assert any(f"Chờ {a.key} xong" in body for body in comments)
+
+
+async def test_ac2_status_waiting_label_beats_pending_wake(office: Office, tmp_path: Path) -> None:
+    project = await code_project(office, tmp_path)
+    a = await begin(office, project, "SI-a")
+    b = await begin(office, project, "SI-b")
+    assert await office.wakes.pending_for((await office.ensure_ai()).id, b.id) is not None
+    status = await office.stages.status(b.id)
+    assert (status["status"], status["status_label"], status["waiting_for"]) == ("blocked", f"đang chờ {a.key} xong", a.key)
+    plain = await office.stages.status(a.id)
+    assert plain["status"] == "queued" and plain["waiting_for"] is None
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+async def test_ac3_done_releases_and_worktree_from_latest_main(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
+    project = await code_project(office, tmp_path)
+    repo = Path(project.path or "")
+    a = await begin(office, project, "SI-a")
+    await drop_wakes(office, a)
+    b = await begin(office, project, "SI-b")
+    (repo / "a.py").write_text("a = 1\n", encoding="utf-8")
+    git(repo, "add", "a.py")
+    git(repo, "commit", "-q", "-m", "SI-a merged")
+    tip = git(repo, "rev-parse", "main")
+
+    await close(office, a, S.DONE)
+
+    assert (await office.tickets.get(b.id)).status == S.TODO
+    assert await office.tickets.open_blockers(b.id) == []
+    wake = await office.wakes.pending_for((await office.ensure_ai()).id, b.id)
+    assert wake is not None and "blockers_resolved" in [r["source"] for r in wake.payload["reasons"]]
+    heads: list[str] = []
+
+    async def first_turn(ctx: TurnCtx) -> TurnResult:
+        heads.append(git(ctx.spec.cwd, "rev-parse", "HEAD"))
+        return done(ctx)
+
+    runtime.scripts.append(first_turn)
+    assert len(await office.scheduler.tick()) == 1
+    await office.scheduler.wait_idle(timeout=20)
+    assert heads[0] == tip
+
+
+async def test_ac4_cancel_releases(office: Office, tmp_path: Path) -> None:
+    project = await code_project(office, tmp_path)
+    a = await begin(office, project, "SI-a")
+    b = await begin(office, project, "SI-b")
+    await close(office, a, S.CANCELLED)
+    assert (await office.tickets.get(b.id)).status == S.TODO
+    assert await office.wakes.pending_for((await office.ensure_ai()).id, b.id) is not None
+    assert (await office.stages.status(b.id))["waiting_for"] is None
+
+
+async def test_ac5_cancel_middle_moves_up(office: Office, tmp_path: Path) -> None:
+    project = await code_project(office, tmp_path)
+    a = await begin(office, project, "SI-a")
+    await drop_wakes(office, a)
+    b = await begin(office, project, "SI-b")
+    c = await begin(office, project, "SI-c")
+    assert await office.tickets.queue_blockers(c.id) == [b.key]
+
+    await close(office, b, S.CANCELLED)
+
+    await assert_waits(office, c, a)
+    assert (await office.stages.status(c.id))["status_label"] == f"đang chờ {a.key} xong"
+    await close(office, a, S.DONE)
+    assert (await office.tickets.get(c.id)).status == S.TODO
+    assert await office.tickets.open_blockers(c.id) == []
+
+
+async def test_ac6_option_off_runs_as_before(office: Office, tmp_path: Path) -> None:
+    project = await code_project(office, tmp_path)
+    await office.projects.set_one_at_a_time(project.id, False)
+    await begin(office, project, "SI-a")
+    b = await begin(office, project, "SI-b")
+    assert b.status == S.TODO
+    assert await office.tickets.open_blockers(b.id) == [] and await office.tickets.queue_blockers(b.id) == []
+    assert await office.wakes.pending_for((await office.ensure_ai()).id, b.id) is not None
+
+
+async def test_ac7_subtickets_and_plain_tickets_not_queued(office: Office, tmp_path: Path) -> None:
+    project = await code_project(office, tmp_path)
+    ai = await office.ensure_ai()
+    a = await begin(office, project, "SI-a")
+    a1 = await office.tickets.create("SI-a1", description="x", parent_id=a.id, assignee_actor_id=ai.id)
+    t = await office.tickets.create("SI-t", description="x", project_id=project.id, assignee_actor_id=ai.id)
+    for ticket in (a1, t):
+        current = await office.tickets.get(ticket.id)
+        assert current.status == S.TODO and await office.tickets.open_blockers(ticket.id) == []
+        assert await office.wakes.pending_for(ai.id, ticket.id) is not None
+
+    await close(office, a, S.DONE)
+    b = await begin(office, project, "SI-b")
+    assert b.status == S.TODO and await office.tickets.open_blockers(b.id) == []
+
+
+async def test_ac8_turn_off_releases_queue_only(office: Office, tmp_path: Path) -> None:
+    project = await code_project(office, tmp_path)
+    ai = await office.ensure_ai()
+    a = await begin(office, project, "SI-a")
+    d = await office.tickets.create("SI-d", description="x")  # a real dependency, in another project
+    b = await office.tickets.create("SI-b", description="x", project_id=project.id, blocked_by=[d.id])
+    b = await office.stages.start(b.id, template="code", by="user")
+    e = await begin(office, project, "SI-e")
+    assert sorted(await office.tickets.open_blockers(b.id)) == sorted([a.key, d.key])
+    await drop_wakes(office, e)
+
+    project = await office.projects.set_one_at_a_time(project.id, False)
+    released = await office.tickets.release_queue(project.id)
+
+    assert released == 1 and not project.runs_one_at_a_time
+    assert (await office.tickets.get(b.id)).status == S.BLOCKED
+    assert await office.tickets.open_blockers(b.id) == [d.key] and await office.tickets.queue_blockers(b.id) == []
+    assert (await office.stages.status(b.id))["waiting_for"] is None
+    assert (await office.tickets.get(e.id)).status == S.TODO and await office.tickets.open_blockers(e.id) == []
+    assert await office.wakes.pending_for(ai.id, e.id) is not None
+
+
+async def test_ac8_turn_off_does_not_wake_released_tickets_again(office: Office, tmp_path: Path) -> None:
+    project = await code_project(office, tmp_path)
+    ai = await office.ensure_ai()
+    a = await begin(office, project, "SI-a")
+    b = await begin(office, project, "SI-b")
+    await close(office, a, S.DONE)  # SI-b runs now; its queue edge to the closed SI-a stays
+    await drop_wakes(office, b)
+
+    await office.projects.set_one_at_a_time(project.id, False)
+
+    assert await office.tickets.release_queue(project.id) == 0
+    assert await office.wakes.pending_for(ai.id, b.id) is None
+
+
+async def test_ac9_ticket_just_started_counts_as_latest(office: Office, tmp_path: Path) -> None:
+    """Review F2: a ticket whose first stage run is not written yet is the newest of the project, never the oldest."""
+    project = await code_project(office, tmp_path)
+    await begin(office, project, "SI-y")
+    x = await office.tickets.create("SI-x", description="x", project_id=project.id)
+    await office.db.execute("UPDATE tickets SET stage = 'understand', stage_template = 'code' WHERE id = ?", (x.id,))
+    z = await begin(office, project, "SI-z")
+    assert await office.tickets.queue_blockers(z.id) == [x.key]
+
+
+async def test_ac9_turn_on_keeps_running_then_queues_after_latest(office: Office, tmp_path: Path) -> None:
+    project = await code_project(office, tmp_path)
+    await office.projects.set_one_at_a_time(project.id, False)
+    a = await begin(office, project, "SI-a")
+    b = await begin(office, project, "SI-b")
+
+    project = await office.projects.set_one_at_a_time(project.id, True)
+
+    assert project.runs_one_at_a_time
+    for ticket in (a, b):
+        assert (await office.tickets.get(ticket.id)).status == S.TODO and await office.tickets.open_blockers(ticket.id) == []
+    c = await begin(office, project, "SI-c")
+    assert await office.tickets.queue_blockers(c.id) == [b.key]
+
+
+async def test_ac10_defaults_by_kind_and_access(office: Office, tmp_path: Path) -> None:
+    cases = [("code", ProjectAccess.WORKTREE, True), ("code", ProjectAccess.DIRECT, True), ("code", ProjectAccess.READ_ONLY, False), ("reference", ProjectAccess.WORKTREE, False)]
+    for kind, access, expected in cases:
+        stored = Project(id=f"old-{kind}-{access.value}", name=f"{kind}-{access.value}", kind=kind, access=access).model_dump(exclude={"one_at_a_time", "runs_one_at_a_time"})
+        assert "one_at_a_time" not in stored  # a project saved before SI-31
+        await office.db.execute(
+            "INSERT INTO projects(id, name, config_json, created_at) VALUES (?, ?, ?, ?)", (stored["id"], stored["name"], json.dumps(stored), "2026-11-01T00:00:00Z")
+        )
+        assert (await office.projects.get(stored["id"])).runs_one_at_a_time is expected
+        folder = tmp_path / f"new-{kind}-{access.value}"
+        folder.mkdir()
+        created = await office.projects.create(f"new-{kind}-{access.value}", path=str(folder), access=access)
+        created = await office.projects.configure(created.id, kind=kind)
+        assert created.runs_one_at_a_time is expected
+        assert created.model_dump()["runs_one_at_a_time"] is expected
+
+
+async def test_ac10_migration_adds_blocker_kind(office: Office) -> None:
+    columns = {r["name"]: r for r in await office.db.fetchall("PRAGMA table_info(ticket_blockers)")}
+    assert columns["kind"]["dflt_value"] == "'dep'" and columns["kind"]["notnull"] == 1
+    a = await office.tickets.create("A", description="x")
+    b = await office.tickets.create("B", description="x", blocked_by=[a.id])
+    row = await office.db.fetchone("SELECT kind FROM ticket_blockers WHERE ticket_id = ?", (b.id,))
+    assert row["kind"] == "dep" and await office.tickets.queue_blockers(b.id) == []

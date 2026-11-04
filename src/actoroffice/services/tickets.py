@@ -381,28 +381,93 @@ class TicketService:
         async with self.db.tx() as tx:
             return await self._open_blockers(tx, ticket_id)
 
-    async def _open_blockers(self, tx: Tx, ticket_id: int) -> list[str]:
+    async def queue_blockers(self, ticket_id: int) -> list[str]:
+        """The open tickets this one waits for only because its project runs one ticket at a time (SI-31)."""
+        async with self.db.tx() as tx:
+            return await self._open_blockers(tx, ticket_id, kind="queue")
+
+    async def _open_blockers(self, tx: Tx, ticket_id: int, *, kind: str | None = None) -> list[str]:
         rows = await tx.fetchall(
             "SELECT t.key FROM ticket_blockers b JOIN tickets t ON t.id = b.blocker_id "
-            f"WHERE b.ticket_id = ? AND t.status NOT IN ({','.join('?' * len(CLOSED))})",
-            (ticket_id, *CLOSED),
+            f"WHERE b.ticket_id = ? AND t.status NOT IN ({','.join('?' * len(CLOSED))})" + (" AND b.kind = ?" if kind else "") + " ORDER BY t.id",
+            (ticket_id, *CLOSED, *([kind] if kind else [])),
         )
         return [r["key"] for r in rows]
 
+    async def queue_behind(self, tx: Tx, ticket_id: int, project_id: str) -> str | None:
+        """Make a root ticket that starts its workflow wait for the project's ticket that started last (SI-31).
+
+        A ticket "holds the project" when it is a root ticket on a workflow and still open, waiting ones included,
+        so the waiting tickets form a chain. Returns the key waited for, or None when the project is free."""
+        front = await tx.fetchone(
+            "SELECT t.id, t.key FROM tickets t LEFT JOIN stage_runs r ON r.ticket_id = t.id "
+            f"WHERE t.project_id = ? AND t.id != ? AND t.parent_id IS NULL AND t.stage IS NOT NULL AND t.status NOT IN ({','.join('?' * len(CLOSED))}) "
+            # a ticket whose first stage run is not written yet (it started a moment ago) is the newest one
+            "GROUP BY t.id ORDER BY MIN(r.id) IS NULL DESC, MIN(r.id) DESC, t.id DESC LIMIT 1",
+            (project_id, ticket_id, *CLOSED),
+        )
+        if front is None:
+            return None
+        await tx.execute("INSERT OR IGNORE INTO ticket_blockers(ticket_id, blocker_id, kind) VALUES (?, ?, 'queue')", (ticket_id, front["id"]))
+        await tx.execute(
+            f"UPDATE tickets SET status = 'blocked', updated_at = ? WHERE id = ? AND status NOT IN ({','.join('?' * len(CLOSED))})",
+            (utcnow(), ticket_id, *CLOSED),
+        )
+        await self._system_comment(tx, ticket_id, f"Chờ {front['key']} xong (dự án chạy từng ticket một)")
+        return str(front["key"])
+
+    async def release_queue(self, project_id: str) -> int:
+        """The project stopped running one ticket at a time: drop its queue waits; real dependencies stay (SI-31).
+        Returns how many tickets were released."""
+        async with self.db.tx() as tx:
+            rows = await tx.fetchall(
+                # only tickets still waiting: a ticket that already ran keeps its edge to the closed one in front
+                "SELECT DISTINCT t.id, t.status, t.assignee_actor_id FROM ticket_blockers b JOIN tickets t ON t.id = b.ticket_id "
+                "WHERE b.kind = 'queue' AND t.project_id = ? AND t.status = 'blocked'",
+                (project_id,),
+            )
+            await tx.execute(
+                "DELETE FROM ticket_blockers WHERE kind = 'queue' AND ticket_id IN (SELECT id FROM tickets WHERE project_id = ?)", (project_id,)
+            )
+            released = [row["id"] for row in rows if await self._release(tx, row)]
+            updated = [await self._get(tx, ticket_id) for ticket_id in released]
+        for ticket in updated:
+            self.bus.publish("ticket.updated", ticket=ticket.model_dump(), previous=S.BLOCKED.value, by="office")
+        return len(released)
+
     async def _unblock_dependents(self, tx: Tx, closed_id: int) -> None:
+        # A waiting ticket closed in the middle of a project queue: the tickets behind it wait for its own front now.
+        fronts = await tx.fetchall(
+            "SELECT b.blocker_id FROM ticket_blockers b JOIN tickets t ON t.id = b.blocker_id "
+            f"WHERE b.ticket_id = ? AND b.kind = 'queue' AND t.status NOT IN ({','.join('?' * len(CLOSED))})",
+            (closed_id, *CLOSED),
+        )
         dependents = await tx.fetchall(
-            "SELECT t.id, t.status, t.assignee_actor_id FROM ticket_blockers b JOIN tickets t ON t.id = b.ticket_id "
+            "SELECT t.id, t.status, t.assignee_actor_id, b.kind FROM ticket_blockers b JOIN tickets t ON t.id = b.ticket_id "
             "WHERE b.blocker_id = ?",
             (closed_id,),
         )
         for dep in dependents:
-            if await self._open_blockers(tx, dep["id"]):
-                continue
-            if dep["status"] == S.BLOCKED.value:
-                await tx.execute("UPDATE tickets SET status = 'todo', updated_at = ? WHERE id = ?", (utcnow(), dep["id"]))
-                await self._system_comment(tx, dep["id"], "All blockers resolved → todo")
-            if dep["assignee_actor_id"] and dep["status"] not in CLOSED:
-                await self.wakes.enqueue(dep["assignee_actor_id"], WakeSource.BLOCKERS_RESOLVED, ticket_id=dep["id"], tx=tx)
+            if dep["kind"] == "queue" and fronts and dep["status"] not in CLOSED:
+                for front in fronts:
+                    await tx.execute(
+                        "INSERT OR IGNORE INTO ticket_blockers(ticket_id, blocker_id, kind) VALUES (?, ?, 'queue')", (dep["id"], front["blocker_id"])
+                    )
+                keys = await self._open_blockers(tx, dep["id"], kind="queue")
+                await self._system_comment(tx, dep["id"], f"Chờ {', '.join(keys)} xong (ticket phía trước đã đóng)")
+            await self._release(tx, dep)
+
+    async def _release(self, tx: Tx, dep: dict[str, Any]) -> bool:
+        """A ticket whose blockers are all closed: blocked → todo and wake its assignee. True when it moved to todo."""
+        if await self._open_blockers(tx, dep["id"]):
+            return False
+        moved = dep["status"] == S.BLOCKED.value
+        if moved:
+            await tx.execute("UPDATE tickets SET status = 'todo', updated_at = ? WHERE id = ?", (utcnow(), dep["id"]))
+            await self._system_comment(tx, dep["id"], "All blockers resolved → todo")
+        if dep["assignee_actor_id"] and dep["status"] not in CLOSED:
+            await self.wakes.enqueue(dep["assignee_actor_id"], WakeSource.BLOCKERS_RESOLVED, ticket_id=dep["id"], tx=tx)
+        return moved
 
     # ---- helpers ----------------------------------------------------------------------------
 

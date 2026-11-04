@@ -444,6 +444,10 @@ class PermissionsBody(BaseModel):
     allow_rules: list[str] | None = None
 
 
+class OneAtATimeBody(BaseModel):
+    enabled: bool
+
+
 class AiBody(BaseModel):
     model: str
 
@@ -679,6 +683,21 @@ def register_setup(app: FastAPI, office: Office) -> None:
         )
         # pending cards the new permission allows are approved by themselves (a narrower one approves nothing)
         return {**project.model_dump(), "auto_approved": await office.permissions_recheck(project_id=project.id)}
+
+    @app.post("/api/projects/{project_id}/one-at-a-time")
+    async def project_one_at_a_time(project_id: str, body: OneAtATimeBody) -> dict[str, Any]:
+        """The project's "Chạy từng ticket một" switch (SI-31). Off releases every ticket waiting only for its turn;
+        on leaves the running tickets alone: only tickets started afterwards wait."""
+        before = await office.projects.get(project_id)
+        project = await office.projects.set_one_at_a_time(project_id, body.enabled)
+        released = 0 if project.runs_one_at_a_time else await office.tickets.release_queue(project.id)
+        await office.audit.record(
+            "project:one_at_a_time", "changed", target=project.name,
+            detail={"from": before.runs_one_at_a_time, "to": project.runs_one_at_a_time, "released": released},
+        )
+        if released:
+            office.scheduler.kick()
+        return {**project.model_dump(), "released": released}
 
     @app.post("/api/setup/ai")
     async def setup_ai(body: AiBody) -> dict[str, Any]:

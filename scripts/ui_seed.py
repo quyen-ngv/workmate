@@ -132,6 +132,19 @@ async def seed(office: Office) -> None:
     cancelled = await ticket("Xuất báo cáo PDF (huỷ)", "plan")
     await office.db.execute("UPDATE tickets SET status = ? WHERE id = ?", (TicketStatus.CANCELLED.value, cancelled))
     await proposals(office, team.id)
+    await queue(office, team.id)
+
+
+async def queue(office: Office, team_id: str) -> None:
+    """SI-31: a code project that runs one ticket at a time, with one ticket running and one waiting its turn."""
+    from actoroffice.domain.work import Project, ProjectAccess
+
+    # stored as is: the settings form only shows it, no git repo is needed (and none is made outside AO_UI_DATA)
+    project = Project(id="prj-orders", name="orders", path=str(office.settings.data_dir.parent / "orders"), access=ProjectAccess.WORKTREE, team_id=team_id)
+    await office.projects._insert(project)
+    for title in ("Lọc đơn theo trạng thái", "Xuất danh sách đơn ra CSV (chờ ticket trước)"):
+        created = await office.tickets.create(title, description=title, project_id=project.id, created_by="user")
+        await office.stages.start(created.id, template="code", by=LOCAL_OWNER_ID, team_id=team_id)
 
 
 PROPOSED = [

@@ -276,4 +276,5 @@ button:focus-visible { outline: 1px solid var(--line-strong); outline-offset: 1p
 .chip .x { background: none; border: 0; padding: 0 0 0 var(--gap-1); color: var(--faint); }
 .chip .x:hover { color: var(--danger); }
 .form.perm { margin-top: var(--gap-2); }
+.form label.check { display: flex; align-items: center; gap: var(--gap-1); font-size: var(--fs-sm); color: var(--text); }
 .card .opts code { font-size: var(--fs-xs); }

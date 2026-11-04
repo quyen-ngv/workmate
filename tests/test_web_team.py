@@ -432,3 +432,101 @@ def test_ac13_board_backlog_and_start(office_client) -> None:
     blocked = c.post(f"/api/tickets/{k2}/backlog/start", headers=HEADERS).json()
     assert blocked["status"] == "blocked" and blocked["stage_template"] == "quick" and blocked["stage"]
     assert c.post(f"/api/tickets/{k3}/backlog/start", headers=HEADERS).status_code == 409
+
+
+# ---- SI-31: one ticket at a time per project ------------------------------------------------------------------
+
+
+def _code_project(office: Office, c: TestClient, tmp_path: Path, name: str = "Leave") -> str:
+    from actoroffice.domain.work import ProjectAccess
+
+    async def make() -> str:
+        return (await office.projects.create(name, path=str(tmp_path / name.lower()), access=ProjectAccess.WORKTREE)).id
+
+    return c.portal.call(make)
+
+
+def _task(c: TestClient, project_id: str, title: str) -> dict:
+    return c.post("/api/tasks", json={"title": title, "template": "code", "project_id": project_id}, headers=HEADERS).json()
+
+
+@pytest.mark.parametrize("path", ["tasks", "stages/start", "backlog/start"])
+def test_ac1_tasks_and_stage_start_queue(office_client, tmp_path: Path, path: str) -> None:
+    from actoroffice.domain.work import TicketStatus
+
+    office, c = office_client
+    login(c)
+    project_id = _code_project(office, c, tmp_path)
+    a = _task(c, project_id, "SI-a")
+
+    async def drop_a() -> None:
+        await office.db.execute("DELETE FROM wake_requests WHERE ticket_id = ?", (a["id"],))
+
+    c.portal.call(drop_a)
+    if path == "tasks":
+        b = _task(c, project_id, "SI-b")
+    else:
+        status = TicketStatus.BACKLOG if path == "backlog/start" else TicketStatus.TODO
+
+        async def make() -> str:
+            return (await office.tickets.create("SI-b", description="x", project_id=project_id, status=status)).key
+
+        key = c.portal.call(make)
+        body = {"template": "code"} if path == "stages/start" else None
+        response = c.post(f"/api/tickets/{key}/{path}", json=body, headers=HEADERS)
+        assert response.status_code == 200, response.text
+        b = response.json()
+    assert b["status"] == "blocked" and b["stage"] == "understand"
+
+    async def check() -> tuple[list[str], list[str]]:
+        return await office.tickets.open_blockers(b["id"]), await office.scheduler.tick()
+
+    blockers, started = c.portal.call(check)
+    assert blockers == [a["key"]] and started == []
+
+
+def test_ac2_board_shows_waiting(office_client, tmp_path: Path) -> None:
+    office, c = office_client
+    login(c)
+    project_id = _code_project(office, c, tmp_path)
+    a = _task(c, project_id, "SI-a")
+    b = _task(c, project_id, "SI-b")
+    row = next(t for t in c.get("/api/board", headers=HEADERS).json()["tickets"] if t["ticket"] == b["key"])
+    assert (row["status"], row["status_label"], row["waiting_for"]) == ("blocked", f"đang chờ {a['key']} xong", a["key"])
+    stage = c.get(f"/api/tickets/{b['key']}/stage", headers=HEADERS).json()["status"]
+    assert stage["status_label"] == f"đang chờ {a['key']} xong"
+
+
+def test_ac11_save_option_audited(office_client, tmp_path: Path) -> None:
+    office, c = office_client
+    login(c)
+    project_id = _code_project(office, c, tmp_path)
+    _task(c, project_id, "SI-a")
+    b = _task(c, project_id, "SI-b")
+
+    off = c.post(f"/api/projects/{project_id}/one-at-a-time", json={"enabled": False}, headers=HEADERS)
+    assert off.status_code == 200
+    assert off.json()["runs_one_at_a_time"] is False and off.json()["one_at_a_time"] is False and off.json()["released"] == 1
+    on = c.post(f"/api/projects/{project_id}/one-at-a-time", json={"enabled": True}, headers=HEADERS).json()
+    assert on["runs_one_at_a_time"] is True and on["released"] == 0
+    assert c.post("/api/projects/nope/one-at-a-time", json={"enabled": True}, headers=HEADERS).status_code == 404
+
+    async def read() -> tuple[bool, list[dict], str]:
+        rows = await office.db.fetchall("SELECT detail_json FROM audit_log WHERE action = 'project:one_at_a_time' ORDER BY id")
+        project = await office.projects.get(project_id)
+        return project.runs_one_at_a_time, [json.loads(r["detail_json"]) for r in rows], (await office.tickets.get(b["key"])).status.value
+
+    stored, audit, b_status = c.portal.call(read)
+    assert stored is True and b_status == "todo"
+    assert audit == [{"from": True, "to": False, "released": 1}, {"from": False, "to": True, "released": 0}]
+    listed = next(p for p in c.get("/api/setup", headers=HEADERS).json()["projects"] if p["id"] == project_id)
+    assert listed["runs_one_at_a_time"] is True
+
+
+def test_ac12_team_js_switch_and_waiting_label() -> None:
+    js = _js()
+    form = _fn(js, "projectForm")
+    assert 'data-one-at-a-time="${k}"' in form and 'p.runs_one_at_a_time ? "checked"' in form and "Chạy từng ticket một" in form
+    assert "/api/projects/${queue}/one-at-a-time" in js and "enabled: e.target.checked" in js
+    assert 't.waiting_for ? " · " + esc(t.status_label)' in js  # sidebar
+    assert "st.waiting_for ? st.status_label" in _fn(js, "renderPane")  # pane

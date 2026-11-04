@@ -130,6 +130,38 @@ def test_ac11_stage_guides_mention_review_acs() -> None:
     assert "[review]" not in _stage("quick", "scope") and "[review]" not in _stage("quick", "build")
 
 
+HANDOFF_PARTS = "Write the document `handoff` with four parts only: main changes (a few lines), how to run and check, the AC table"
+POINT_TO_HANDOFF = "When there is a `handoff`, the technical and tests sections keep their design and flow notes"
+
+
+@pytest.mark.parametrize("template_name", ["code", "automation"])
+def test_si35_ac1_build_handoff_has_four_parts(template_name: str) -> None:
+    """SI-35: the handoff keeps the AC table the checks read, and no longer repeats the technical details."""
+    build = _stage(template_name, "build")
+    assert HANDOFF_PARTS in build
+    assert "(one line per AC id → its test or how you checked it), known limits" in build
+    # handoff_line takes the first line naming an AC, so AC ids stay out of the other parts (review F1)
+    assert "Write AC ids only in the AC table: the checks take the first line that names an AC." in build
+    assert "Technical details (design, flows, why) go in dossier section technical, not in the handoff." in build
+    assert "what changed, how to run, how to test, AC → test map, known limits" not in build
+    assert HANDOFF_PARTS not in _stage("quick", "build")  # the quick build writes no handoff, only a screenshot line
+
+
+@pytest.mark.parametrize("template_name", ["code", "automation", "research", "doc"])
+def test_si35_ac1_close_points_to_handoff_instead_of_copying(template_name: str) -> None:
+    close = _stage(template_name, "close")
+    assert "Complete every dossier section and the links." in close
+    # the details live in the dossier, only the handoff's own content is summarized (review F2)
+    assert f"{POINT_TO_HANDOFF} but do not copy its list of changes or its AC table: summarize them in a few lines and point to the handoff." in close
+
+
+def test_si35_ac3_new_guides_only_where_they_apply() -> None:
+    for template_name, stage_id in [("code", "understand"), ("code", "plan"), ("code", "pr"), ("quick", "scope"), ("quick", "pr")]:
+        stage = _stage(template_name, stage_id)
+        assert HANDOFF_PARTS not in stage and POINT_TO_HANDOFF not in stage
+    assert POINT_TO_HANDOFF not in _stage("code", "build") and HANDOFF_PARTS not in _stage("code", "close")
+
+
 CHECK_EDITS = "After a few edits of one file, run a syntax check"
 
 

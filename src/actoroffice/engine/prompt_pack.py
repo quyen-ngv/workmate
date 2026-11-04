@@ -159,7 +159,10 @@ Goal: working, tested changes that follow the approved plan.
 - Temp files: use $TMPDIR (the ticket's temp folder, never committed), not /tmp: writing outside the workspace
   needs a click.
 - Commit with clear messages. Do not push to the main branch.
-- Write the document `handoff`: what changed, how to run, how to test, AC → test map, known limits.
+- Write the document `handoff` with four parts only: main changes (a few lines), how to run and check, the AC table
+  (one line per AC id → its test or how you checked it), known limits. Write AC ids only in the AC table: the
+  checks take the first line that names an AC. Technical details (design, flows, why) go in dossier section
+  technical, not in the handoff.
 - An AC tagged [review] needs no test, but the AC table of the `handoff` must have a line with its id saying how
   you checked it (people confirm it at the gate).
 - For each AC tagged [ui] take at least one screenshot with ui_screenshot (ac = its id, a caption, the actions that
@@ -197,6 +200,8 @@ Goal: the deliverable the requirements describe.
     "close": """\
 Goal: what the team learned is written down and confirmed by people.
 - Read the dossier, comments, plan and handoff. Complete every dossier section and the links.
+- When there is a `handoff`, the technical and tests sections keep their design and flow notes but do not copy its
+  list of changes or its AC table: summarize them in a few lines and point to the handoff.
 - Save 3–10 reusable knowledge items with kb_note, only what helps future tickets:
   fact (business rules, terms) · code_note (where/how in code; anchor = the file and commit) · decision (what,
   why, who) · contract (an API/topic/queue: spec location, auth kind — never a secret —, owner, masked samples,

@@ -917,8 +917,32 @@ async def check_kb_noted(ctx: CheckContext) -> CheckResult:
     return CheckResult(id="kb_noted", status="failed", summary="chưa ghi kiến thức nào (kb_note), hoặc ghi 'none' trong kb-draft nếu thật sự không có")
 
 
+SOURCE_STAGES = ("understand", "scope")
+
+
+async def check_sources_read(ctx: CheckContext) -> CheckResult:
+    """Every source the ticket names that the AI must read was read (run activity), skipped with a reason, or
+    could not be read (SI-39). External URLs and other teams' tickets are not required."""
+    if ctx.stage.id not in SOURCE_STAGES:
+        return CheckResult(id="sources_read", status="skipped", summary="chỉ kiểm ở bước Tìm hiểu / Chốt cách sửa")
+    sources = await ctx.office.sources.list(ctx.ticket)
+    if not sources:
+        return CheckResult(id="sources_read", status="skipped", summary="ticket không nhắc nguồn nào")
+    unread = [s["display"] for s in sources if s["required"] and s["status"] == "unread"]
+    counts: dict[str, int] = {}
+    for s in sources:
+        counts[s["status"]] = counts.get(s["status"], 0) + 1
+    data = {"unread": unread, "counts": counts}
+    if unread:
+        return CheckResult(
+            id="sources_read", status="failed", summary=f"chưa đọc: {', '.join(unread)} (đọc, hoặc source_skip kèm lý do)", data=data
+        )
+    return CheckResult(id="sources_read", status="passed", summary=f"{len(sources)} nguồn đã xử lý", data=data)
+
+
 BUILTIN.update(
     {
+        "sources_read": check_sources_read,
         "kb_noted": check_kb_noted,
         "ac_coverage": check_ac_coverage,
         "ui_evidence": check_ui_evidence,

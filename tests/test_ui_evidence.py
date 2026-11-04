@@ -700,8 +700,9 @@ def test_ac12_seed_script_fills_temp_home(tmp_path: Path) -> None:
     try:
         rows = db.execute("SELECT stage, status FROM tickets WHERE stage IS NOT NULL").fetchall()
         # SI-24 added a research ticket at produce and the "run now" ticket of a proposal; SI-31 a running and a waiting
-        # ticket; SI-38 a ticket whose last run failed on the API connection
-        assert len(rows) == 10
+        # ticket; SI-38 a ticket whose last run failed on the API connection; SI-39 a ticket with sources
+        assert len(rows) == 11
+        assert db.execute("SELECT COUNT(*) FROM ticket_sources WHERE status = 'read' AND locator = ':120'").fetchone()[0] == 1
         assert db.execute("SELECT COUNT(*) FROM runs WHERE status = 'failed' AND error_kind = 'network'").fetchone()[0] == 1
         assert db.execute("SELECT COUNT(*) FROM ticket_blockers WHERE kind = 'queue'").fetchone()[0] == 1
         assert {r[0] for r in rows} >= {"understand", "build", "pr", "produce"}

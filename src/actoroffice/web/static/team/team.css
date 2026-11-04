@@ -238,6 +238,23 @@ pre.diff .h { color: var(--info); display: block; }
 .rule { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--gap-2); margin-bottom: var(--gap-2); }
 .rule .h { display: flex; gap: var(--gap-2); align-items: center; }
 .rule .b { color: var(--muted); font-size: var(--fs-sm); white-space: pre-wrap; margin-top: var(--gap-1); }
+/* Nguồn tab (SI-39): one source per row, its place (:120, §5.5) right after the path */
+.src { border-bottom: 1px solid var(--line); padding: var(--gap-2) 0; }
+.src .h { display: flex; gap: var(--gap-2); align-items: center; }
+.src .src-ref { flex: 1; min-width: 0; font-family: var(--mono); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.src a.src-ref { color: var(--accent); text-decoration: none; }
+.src a.src-ref:hover { text-decoration: underline; }
+.src .src-loc { color: var(--warn); }
+.src .b { color: var(--muted); font-size: var(--fs-sm); white-space: pre-wrap; margin-top: var(--gap-1); }
+.src .src-note { color: var(--faint); }
+.chip.src-read { color: var(--ok); border-color: var(--ok); background: var(--ok-bg); }
+.chip.src-unread { color: var(--needs); border-color: var(--needs); background: var(--needs-bg); }
+.chip.src-error { color: var(--danger); border-color: var(--danger); background: var(--danger-bg); }
+.chip.src-skipped, .chip.src-external, .chip.src-out_of_scope { color: var(--faint); border-style: dashed; }
+pre.src-file { margin: 0; font-family: var(--mono); font-size: var(--fs-sm); white-space: pre; overflow-x: auto; }
+pre.src-file .ln { display: block; }
+pre.src-file .ln i { display: inline-block; min-width: 4em; padding-right: var(--gap-2); color: var(--faint); font-style: normal; text-align: right; user-select: none; }
+pre.src-file .ln.hl { background: var(--accent-bg); }
 
 /* ---- overlay pages ---------------------------------------------------------------------------- */
 #overlay { position: fixed; inset: 0; background: rgb(0 0 0 / 0.55); display: grid; place-items: center; z-index: 10; }

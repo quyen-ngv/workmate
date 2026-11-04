@@ -111,7 +111,8 @@ class Executor:
                 seen_change_id=changes[-1].id if changes else 0,
                 seen_steer_id=await office.tickets.last_comment_id(ticket.id, "steer"),
             )
-            new_comments = await self._new_comments(actor.id, actor.name, ticket.id, run_id)
+            await office.sources.ensure(ticket)  # a ticket from before SI-39 gets its sources now
+            new_comments, first_run = await self._new_comments(actor.id, actor.name, ticket.id, run_id)
             answered = await self._answered(wake)
             office.gates[run_id] = gate
             clock = AwakeClock()
@@ -194,6 +195,8 @@ class Executor:
             await office.runs.event(
                 run_id, "prompt", {"text": prompt, "resume": bool(resume), "cwd": str(ws.path), "stage": ticket.stage}
             )
+            if first_run and new_comments:
+                await office.sources.add_comments(ticket.id, new_comments)  # in the prompt: read
 
             result = await self._turn(spec, gate)
             for _ in range(office.settings.corrective_turns):
@@ -321,6 +324,7 @@ class Executor:
             new_comments=new_comments,
             changes=changes,
             office_runs_tests=bool(command_list((project.profile if project else None) or {}, "test")),
+            sources=await office.sources.list(ticket) if "sources_read" in stage.checks else None,
         )
 
     async def _drop_seen(self, actor_id: str, ticket_id: int, gate: OfficeGate, status: RunStatus) -> None:
@@ -710,12 +714,14 @@ class Executor:
         except OfficeError:
             log.exception("could not record fallback for %s", ticket.key)
 
-    async def _new_comments(self, actor_id: str, actor_name: str, ticket_id: int, run_id: str) -> list:
+    async def _new_comments(self, actor_id: str, actor_name: str, ticket_id: int, run_id: str) -> tuple[list, bool]:
+        """Comments since the actor's last run on the ticket, and whether this is its first run. The first run gets
+        what people wrote before it (SI-39); system notices reach it through SI-41, not here."""
         since = await self.office.runs.previous_start(actor_id, ticket_id, run_id)
-        if since is None:
-            return []
         comments = await self.office.tickets.comments(ticket_id, limit=200)
-        return [c for c in comments if c.created_at >= since and c.author_id != actor_name and c.author_kind != "system"]
+        if since is None:
+            return [c for c in comments if c.author_kind == "user"], True
+        return [c for c in comments if c.created_at >= since and c.author_id != actor_name and c.author_kind != "system"], False
 
     async def _answered(self, wake: WakeRequest) -> list:
         ids = [r["interaction_id"] for r in wake.payload.get("reasons", []) if r.get("interaction_id")]

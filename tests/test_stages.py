@@ -120,7 +120,7 @@ async def test_code_ticket_goes_through_stages_with_role_gates(office: Office, r
 
     gate = (await pending(office, InteractionKind.APPROVE_STAGE, ticket.id))[0]
     assert gate.payload["approver_names"] == ["Lan"] and gate.payload["stage"] == "understand"
-    assert {c["id"] for c in gate.payload["checks"]} == {"outputs", "ac_testable"}
+    assert {c["id"] for c in gate.payload["checks"]} == {"outputs", "ac_testable", "sources_read"}  # SI-39
     with pytest.raises(PolicyDenied):
         await office.answer(gate.id, {"approved": True}, by=hoa.id)
 

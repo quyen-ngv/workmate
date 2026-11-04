@@ -130,7 +130,11 @@ class StageService:
         kb = await office.knowledge.for_ticket(ticket)
         similar: list[dict[str, Any]] = []
         seen: set[str] = {ticket.key}
-        for hit in await office.memory.history(actor, query, limit=20):
+        hits = await office.memory.history(actor, query, limit=20)
+        extra = await office.sources.search_text(ticket)  # titles of the ticket's sources (SI-39)
+        if extra:
+            hits += await office.memory.history(actor, extra, limit=10)
+        for hit in hits:
             key = hit.get("ticket_key")
             if not key or key in seen:
                 continue

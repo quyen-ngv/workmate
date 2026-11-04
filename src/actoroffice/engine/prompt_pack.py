@@ -225,6 +225,15 @@ MAIN_SYNC = (
     "  If main_synced fails on a conflict, run `git merge <main>` in your working directory,\n"
     "  resolve the conflicts, commit, then call stage_complete again (repo:* checks are skipped until it passes)."
 )
+SOURCES_RULE = (
+    "- Sources of this ticket (listed below, found in its description and people's comments): read every one that is\n"
+    "  required (ticket_get / doc_get for a ticket, Read for a file, jira_issue, wiki_page), or call\n"
+    "  source_skip(ref, reason) when it does not bear on the ticket. Reading is recorded from your activity; the check\n"
+    "  sources_read fails while a required source is unread. External URLs and other teams' tickets are not required.\n"
+    "- Write every source in dossier section links: đã đọc / không liên quan (lý do) / không đọc được (lỗi).\n"
+    "- When two sources contradict each other, the document you write (requirements, or the plan in a quick ticket)\n"
+    "  says which one you follow and why: by default the newer one; when unsure, ask people."
+)
 OFFICE_RUNS_TESTS = {
     "Run the project's build/test/lint if it has them.": (
         "Run the build/lint if it has them, but only the tests for what you changed (their test file, or -k), not the\n"
@@ -268,6 +277,7 @@ def build(
     new_comments: list[Comment],
     changes: list[Comment],
     office_runs_tests: bool = False,
+    sources: list[dict[str, Any]] | None = None,
 ) -> StagePrompt:
     parts: dict[str, str] = {}
     team = f" of team {team_name}" if team_name else ""
@@ -321,6 +331,8 @@ def build(
             f"Mode: {'assume (when people do not answer, continue with your recommended answer and record the assumption)' if ticket.mode == 'assume' else 'wait for answers to blocking questions'}.",
             "People on this ticket:" if people_lines else "No people registered on this ticket yet (questions go to the owner).",
             *people_lines,
+            "",
+            _sources_block(sources) if sources and "sources_read" in stage.checks else "",
         ]
     ).strip()
     body = dossier.strip()
@@ -382,7 +394,22 @@ def _instructions(template: StageTemplate, stage: StageDef, office_runs_tests: b
         text += "\n" + MAIN_SYNC
     if "review_clean" in stage.checks:
         text += "\n" + REVIEW_REPLY
+    if "sources_read" in stage.checks:
+        text += "\n" + SOURCES_RULE
     return text
+
+
+def _sources_block(sources: list[dict[str, Any]]) -> str:
+    """One line per source with its status. Another team's ticket shows its key only (no title, SI-39)."""
+    lines = ["# Sources of this ticket"]
+    for s in sources:
+        line = f"- [{s['kind']}] {s['display']} — {s['label']}"
+        if s.get("reason"):
+            line += f" ({s['reason']})"
+        if s.get("error"):
+            line += f": {s['error']}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def disposition_reminder(ticket_key: str) -> str:

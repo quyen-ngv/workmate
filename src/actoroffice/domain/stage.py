@@ -123,7 +123,7 @@ def _code() -> StageTemplate:
     return StageTemplate(
         name="code",
         stages=[
-            StageDef(id="understand", outputs=["requirements", "dossier"], checks=["outputs", "ac_testable"], gate="requirement"),
+            StageDef(id="understand", outputs=["requirements", "dossier"], checks=["outputs", "ac_testable", "sources_read"], gate="requirement"),
             StageDef(id="plan", outputs=["plan"], checks=["outputs", "plan_has_ac_map", "plan_has_options"], gate="plan"),
             StageDef(
                 id="build",
@@ -157,7 +157,7 @@ def _quick() -> StageTemplate:
     return StageTemplate(
         name="quick",
         stages=[
-            StageDef(id="scope", outputs=["plan"], checks=["outputs", "plan_ac"], gate="plan"),
+            StageDef(id="scope", outputs=["plan"], checks=["outputs", "plan_ac", "sources_read"], gate="plan"),
             StageDef(id="build", checks=["main_synced", "ui_evidence", "no_secrets", "log_lint", "repo:build", "repo:test", "repo:lint", "review_clean"]),
             StageDef(id="pr", checks=["pr_linked"], gate="merge"),
         ],

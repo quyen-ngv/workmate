@@ -102,17 +102,25 @@ async function loadBoard() {
 }
 
 // One page of done/cancelled tickets (offset 0 starts over).
+let closedSeq = 0;
+// Only the latest call applies its page: an older one (other team, or "Xem thêm" overtaken by a reload) is dropped.
 async function loadClosed(offset = 0) {
+  const seq = ++closedSeq;
   state.closed.loading = true;
   renderSidebar();
   try {
-    const page = await api(`/api/board?closed=true&limit=20&offset=${offset}`);
+    const team = state.team;
+    const page = await api(`/api/board?closed=true&limit=20&offset=${offset}${team ? `&team=${encodeURIComponent(team)}` : ""}`);
+    if (seq !== closedSeq) return;
     state.closed.items = offset ? [...state.closed.items, ...page.tickets] : page.tickets;
     state.closed.has_more = page.has_more;
-    state.board.closed_count = page.closed_count;
+    if (team) state.board.closed_by_team = { ...state.board.closed_by_team, [team]: page.closed_count };
+    else state.board.closed_count = page.closed_count;
   } finally {
-    state.closed.loading = false;
-    renderSidebar();
+    if (seq === closedSeq) {
+      state.closed.loading = false;
+      renderSidebar();
+    }
   }
 }
 
@@ -149,7 +157,9 @@ function ticketInfo(key) {
 // ---- sidebar -------------------------------------------------------------------------------------------------
 
 function renderSidebar() {
-  const { teams, tickets, needs_you, closed_count } = state.board;
+  const { teams, tickets, needs_you } = state.board;
+  // "Đã xong (N)" follows the team filter, like the list under it
+  const closed_count = state.team ? (state.board.closed_by_team || {})[state.team] || 0 : state.board.closed_count;
   const visible = tickets.filter((t) => !state.team || t.team_id === state.team);
   const closed = state.closed;
   const closedItems = closed.items.filter((t) => !state.team || t.team_id === state.team);
@@ -696,7 +706,12 @@ document.addEventListener("click", (e) => {
   const ds = t.dataset;
   if (ds.open) { e.preventDefault(); $("#overlay").hidden = true; openTicket(ds.open); return; }
   if (ds.shot) { sheet(ds.shotTitle || "Ảnh chụp", `<img class="shot-full" src="${esc(ds.shot)}" alt="${esc(ds.shotTitle || "")}">`); return; }
-  if (ds.team !== undefined) { state.team = ds.team || null; renderSidebar(); return; }
+  if (ds.team !== undefined) {
+    state.team = ds.team || null;
+    if (state.closed.open) return act(() => loadClosed(0)); // the open list is paged by team on the server
+    renderSidebar();
+    return;
+  }
   if (ds.closedToggle !== undefined) {
     state.closed.open = !state.closed.open;
     if (state.closed.open) return act(() => loadClosed(0));
@@ -862,6 +877,7 @@ function soon(key) {
     const keys = [...refreshing].filter((k) => state.open.includes(k));
     refreshing.clear();
     await act(loadBoard);
+    if (state.closed.open) await act(() => loadClosed(0)); // a ticket may just have closed
     for (const k of keys) await act(() => loadTicket(k));
     if (keys.some((k) => paneKeys().includes(k))) renderPanes();
   }, 400);

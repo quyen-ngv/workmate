@@ -185,7 +185,18 @@ async def cmd_project(office: Office, args: argparse.Namespace) -> None:
     if project is None:
         raise OfficeError(f"Không có project '{args.name}'")
     team = await office.teams.get_team(args.team) if args.team else None
-    profile = _json.loads(args.profile) if args.profile else None
+    profile = None
+    if args.profile:
+        # merge by top-level key so setting one key keeps the others; a null value removes the key
+        changes = _json.loads(args.profile)
+        if not isinstance(changes, dict):
+            raise OfficeError("--profile phải là một JSON object")
+        profile = dict(project.profile)
+        for key, value in changes.items():
+            if value is None:
+                profile.pop(key, None)
+            else:
+                profile[key] = value
     project = await office.projects.configure(
         project.id, team_id=team.id if team else None, kind=args.kind, repo_url=args.repo_url, profile=profile
     )
@@ -381,7 +392,7 @@ def register(sub: Any) -> None:
     p.add_argument("--team")
     p.add_argument("--kind", choices=["code", "reference", "automation"])
     p.add_argument("--repo-url")
-    p.add_argument("--profile", help="JSON: setup/build/test/lint/run argv lists, test_glob, os overrides")
+    p.add_argument("--profile", help="JSON merged into the profile by top-level key (null removes a key): setup/build/test/lint/run argv lists, test_glob, coverage, os overrides")
     p.set_defaults(fn=cmd_project)
 
     p = sub.add_parser("resource", help="shared environments: list | add <name> --kind http --config '{\"base_url\": …}' --secret-json '{\"headers\": {…}}'")

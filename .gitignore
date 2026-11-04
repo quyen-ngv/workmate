@@ -9,6 +9,11 @@ wheels/
 # Virtual environments
 .venv
 
+# Coverage data and reports (README "Coverage")
+.coverage
+.coverage.*
+.cov/
+
 # Local data and secrets
 .actoroffice/
 .env

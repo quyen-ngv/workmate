@@ -201,6 +201,25 @@ uv run ruff check src tests         # rules and line length are set in pyproject
 The project profile's lint command (web Cài đặt → "Lệnh lint") should be `uv run ruff check src tests`, so the
 `repo:lint` check runs it at the build stage. There is no auto-formatter (`ruff format` is not used).
 
+### Coverage
+
+Coverage is off for a plain `pytest` run; ask for it with `--cov` (pytest-cov combines the xdist workers' data):
+
+```bash
+uv run pytest -q --cov --cov-report=lcov:.cov/lcov.info   # report in .cov/ (git-ignored, like .coverage*)
+```
+
+So that the `coverage_changed_lines` check (build stage of the code workflow) measures the lines a ticket changed,
+make that the profile's test command (web Cài đặt → "Lệnh test") and declare the report:
+
+```bash
+uv run actoroffice project set actor-office --profile '{"coverage": {"kind": "lcov", "path": ".cov/lcov.info", "min": 80}}'
+```
+
+`kind` is `lcov`, `cobertura` or `jacoco`; `path` is relative to the worktree; `min` is the % of changed lines that
+must be covered (default 80). `--profile` merges by top-level key, so `test`, `lint` and `ui` stay as they are;
+`{"coverage": null}` removes the key.
+
 ## UI evidence (screenshots taken by the AI)
 
 Acceptance criteria tagged `[ui]` (e.g. `AC-4 [ui]: …`, also `AC-4 [ui] [review]`) need a screenshot at the build

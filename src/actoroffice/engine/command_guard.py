@@ -22,7 +22,7 @@ from pathlib import Path
 
 import psutil
 
-from actoroffice.proctree import kill_tree
+from actoroffice.proctree import kill_msys_group, kill_tree
 
 from .clock import AwakeClock
 
@@ -42,6 +42,7 @@ class Command:
     proc: psutil.Process | None = None
     tool_done: float | None = None  # when its tool call ended (still alive then: it runs in the background)
     on_stop: Callable[[str], None] | None = None  # Kiro: the note goes into the terminal output
+    group: tuple[Path, int] | None = None  # Git Bash: (MSYS kill.exe, process group of the shell), see kill_msys_group
 
 
 @dataclass
@@ -70,7 +71,8 @@ class CommandGuard:
             return command
         self.folder.mkdir(parents=True, exist_ok=True)
         self.commands[call_id] = Command(call_id, command, self.clock.now(), pid_file=pid_file)
-        return f"{{ cat /proc/$$/winpid 2>/dev/null || echo $$; }} > '{target}' {MARK}\n{command}"
+        # lines: the Windows PID (or $$ on POSIX), $$, under MSYS the shell's process group, then "." (complete)
+        return f"{{ cat /proc/$$/winpid 2>/dev/null || echo $$; echo $$; cat /proc/$$/pgid 2>/dev/null; echo .; }} > '{target}' {MARK}\n{command}"
 
     @staticmethod
     def unwrap(command: str) -> str:
@@ -121,7 +123,7 @@ class CommandGuard:
             elapsed = now - cmd.started
             if elapsed > self.limit_s and cmd.proc is not None:
                 self.commands.pop(call_id, None)
-                kill_tree(cmd.proc.pid)
+                _stop(cmd)
                 self.last_stop = now
                 note = stop_note(cmd.command, elapsed, self.limit_s)
                 if cmd.on_stop is not None:
@@ -138,7 +140,14 @@ class CommandGuard:
         if cmd.proc is not None or cmd.pid_file is None:
             return
         with contextlib.suppress(OSError, ValueError, psutil.Error):
-            cmd.proc = psutil.Process(int(cmd.pid_file.read_text(encoding="ascii").strip()))
+            lines = cmd.pid_file.read_text(encoding="ascii").split()
+            if not lines or lines[-1] != ".":  # the shell is still writing it
+                return
+            proc = psutil.Process(int(lines[0]))
+            if len(lines) == 4 and lines[1] == lines[2]:  # an MSYS shell leading its own group (no job control)
+                kill_exe = Path(proc.exe()).with_name("kill.exe")
+                cmd.group = (kill_exe, int(lines[2])) if kill_exe.is_file() else None
+            cmd.proc = proc
 
     def stopped_since(self, mark: float) -> bool:
         return self.last_stop is not None and self.last_stop >= mark
@@ -152,7 +161,7 @@ class CommandGuard:
         for cmd in list(self.commands.values()):
             self._resolve(cmd)
             if cmd.proc is not None and _running(cmd.proc):
-                kill_tree(cmd.proc.pid)
+                _stop(cmd)
         self.commands.clear()
         for pid_file in self.folder.glob("*.pid") if self.folder.is_dir() else []:
             pid_file.unlink(missing_ok=True)
@@ -173,6 +182,15 @@ def stop_note(command: str, elapsed: float, limit_s: float) -> str:
 
 def _seconds(value: float) -> str:
     return f"{int(value)}s" if float(value).is_integer() else f"{value}s"
+
+
+def _stop(cmd: Command) -> None:
+    """Kill a command: its MSYS process group first (the programs Windows no longer lists under the shell), then
+    the shell's process tree (native programs, and everything on POSIX)."""
+    if cmd.group is not None:
+        kill_msys_group(*cmd.group)
+    if cmd.proc is not None:
+        kill_tree(cmd.proc.pid)
 
 
 def _running(proc: psutil.Process) -> bool:

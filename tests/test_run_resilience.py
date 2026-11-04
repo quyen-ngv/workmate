@@ -113,6 +113,21 @@ def gone(procs: list[psutil.Process]) -> bool:
     return all(not p.is_running() or p.status() == psutil.STATUS_ZOMBIE for p in procs)
 
 
+def sleeps(*seconds: str) -> list[psutil.Process]:
+    """`sleep N` processes found by their command line: under Git Bash they are not in the shell's Windows tree."""
+    found = []
+    for p in psutil.process_iter(["name", "cmdline"]):
+        cmdline = p.info["cmdline"] or []
+        if (p.info["name"] or "").startswith("sleep") and len(cmdline) == 2 and cmdline[1] in seconds:
+            found.append(p)
+    return found
+
+
+def written(pid_file: Path) -> bool:
+    """The command's shell wrote its PID file completely (the redirect creates it first, empty)."""
+    return pid_file.exists() and pid_file.read_text().split()[-1:] == ["."]
+
+
 # ---- office fixtures ----------------------------------------------------------------------------------------
 
 
@@ -177,19 +192,19 @@ async def test_ac1_claude_bash_over_limit_killed_tree(tmp_path) -> None:
     gate = AllowGate()
     pre, post, _failure, env = claude_hooks(guard, gate)
     assert env["BASH_MAX_TIMEOUT_MS"] == str(960_000)  # the CLI waits past the office limit
-    command = "sleep 60 & sleep 60"
+    command = "sleep 6101 & sleep 6102"
     proc = subprocess.Popen([BASH, "-c", await wrapped(pre, "tu1", command)])
     try:
-        await until(lambda: guard.commands["tu1"].pid_file.exists() and len(tree(proc.pid)) >= 3)
-        procs = tree(proc.pid)  # the shell and both sleeps
+        await until(lambda: written(guard.commands["tu1"].pid_file) and len(sleeps("6101", "6102")) == 2)
+        procs = tree(proc.pid) + sleeps("6101", "6102")  # the shell, Git Bash's launcher on Windows, both sleeps
         await advance(clock, guard, 899)
         assert gone(procs) is False
         await advance(clock, guard, 3)
         psutil.wait_procs(procs, timeout=10)
-        assert gone(procs)
+        assert gone(procs) and sleeps("6101", "6102") == []
         out = await post({"tool_name": "Bash", "tool_input": {"command": await wrapped(pre, "tu-other", "true")}}, "tu1", None)
         note = out["hookSpecificOutput"]["additionalContext"]
-        assert "sleep 60 & sleep 60" in note and "after 90" in note and "limit 900s" in note and "narrower" in note
+        assert "sleep 6101 & sleep 6102" in note and "after 90" in note and "limit 900s" in note and "narrower" in note
         assert gate.after[-1]["command"] == "true"  # the office records the command as the AI wrote it
     finally:
         proc.kill()
@@ -256,19 +271,19 @@ async def test_ac3_background_command_limited(tmp_path) -> None:
     guard = CommandGuard("run_c", 900, tmp_path / "cmd", AwakeClock(raw=clock))
     gate = AllowGate()
     pre, post, _failure, _env = claude_hooks(guard, gate)
-    proc = subprocess.Popen([BASH, "-c", await wrapped(pre, "bg1", "sleep 60", run_in_background=True)])
+    proc = subprocess.Popen([BASH, "-c", await wrapped(pre, "bg1", "sleep 6103", run_in_background=True)])
     try:
         pid_file = guard.commands["bg1"].pid_file
-        await until(lambda: pid_file.exists() and pid_file.read_text().strip())
+        await until(lambda: written(pid_file) and len(sleeps("6103")) == 1)
         # run_in_background: the tool call returns at once, the command goes on
         assert await post({"tool_name": "Bash", "tool_input": {"command": "x"}}, "bg1", None) == {}
-        procs = tree(proc.pid)
+        procs = tree(proc.pid) + sleeps("6103")
         await advance(clock, guard, 901)
         psutil.wait_procs(procs, timeout=10)
-        assert gone(procs)
+        assert gone(procs) and sleeps("6103") == []
         # told with the next tool result, whatever the tool
         out = await post({"tool_name": "Read", "tool_input": {"file_path": "a.py"}}, "tu2", None)
-        assert "sleep 60" in out["hookSpecificOutput"]["additionalContext"]
+        assert "sleep 6103" in out["hookSpecificOutput"]["additionalContext"]
     finally:
         proc.kill()
         await guard.close()

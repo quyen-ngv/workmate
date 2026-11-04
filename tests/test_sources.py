@@ -229,6 +229,21 @@ async def test_ac5_sources_read_passes_from_activity(office: Office) -> None:
     assert {s["status"] for s in await sources(office, ticket)} == {"read"}
 
 
+@pytest.mark.parametrize("command", ["ls docs/x.md", "git add docs/x.md", "rm docs/x.md", "wc -l docs/x.md", "sed -i s/a/b/ docs/x.md", "echo docs/x.md"])
+async def test_ac5_commands_that_do_not_read_the_file_do_not_count(office: Office, command: str) -> None:
+    ticket = await staged(office, "Hoàn tiền", "Theo docs/x.md")
+    await tool_call(office, ticket.id, "Bash", {"command": command})
+    assert [s["status"] for s in await sources(office, ticket)] == ["unread"]
+    assert (await run_check(office, ticket)).status == "failed"
+
+
+@pytest.mark.parametrize("command", ["cat docs/x.md", "head -n 50 ./docs/x.md", "tail docs/x.md", "Get-Content docs\\x.md"])
+async def test_ac5_commands_that_print_the_file_count(office: Office, command: str) -> None:
+    ticket = await staged(office, "Hoàn tiền", "Theo docs/x.md")
+    await tool_call(office, ticket.id, "Bash", {"command": command})
+    assert [s["status"] for s in await sources(office, ticket)] == ["read"]
+
+
 async def test_ac5_source_skip_needs_reason(office: Office) -> None:
     other = await office.tickets.create("Luật hoàn tiền", description="")
     ticket = await staged(office, "Hoàn tiền", f"Theo {other.key}")

@@ -29,6 +29,8 @@ ERROR_LIMIT = 300
 COMMENT_POSITION = 100_000  # people's comments come after the description's sources
 FILE_READ_TOOLS = {"Read", "NotebookRead"}
 TOKEN_SPLIT = re.compile(r"[\s'\"<>|;&()]+")
+# A shell command that prints a file's content (R4): one command per call, so its first word is the program
+FILE_READ_COMMAND = re.compile(r"^\s*(?:cat|head|tail|less|more|nl|bat|type|sed\s+-n|Get-Content|gc)\b(?!\s*(?:>|$))", re.IGNORECASE)
 
 
 async def sync_tx(tx: Tx, ticket_id: int, description: str) -> None:
@@ -302,8 +304,9 @@ def _matches(kind: str, ref: str, fields: dict[str, Any]) -> bool:
         paths: list[str] = []
         if tool in FILE_READ_TOOLS:
             paths.append(str(fields.get("path") or ""))
-        if fields.get("command"):
-            paths += TOKEN_SPLIT.split(str(fields["command"]))
+        command = str(fields.get("command") or "")
+        if FILE_READ_COMMAND.match(command):  # only a command that prints the file counts, not `ls` / `git add` / `rm`
+            paths += TOKEN_SPLIT.split(command)
         return any(_same_file(p, ref) for p in paths if p)
     return False
 

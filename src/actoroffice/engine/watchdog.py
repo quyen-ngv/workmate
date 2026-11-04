@@ -150,11 +150,13 @@ class Watchdog:
         slept = self.clock.take_unreported()
         if slept:
             await self._health("sleep", f"Máy ngủ {int(slept)}s: không tính vào thời gian kẹt hay thời gian của lệnh")
-        busy = any(now - started < self.command_limit_s for _command, started in self.running.values())
-        if not busy and now - self.last_event > self.stall_after_s and "stalled" not in self.reported:
+        # a running command counts as activity up to its limit: once past it the guard stops it, and the runtime then
+        # gets the whole stall threshold to answer (the CLI's own timeout is the limit + 60 s), not a stall at once
+        quiet_since = max([self.last_event, *(started + self.command_limit_s for _command, started in self.running.values())])
+        if now - quiet_since > self.stall_after_s and "stalled" not in self.reported:
             self.reported.add("stalled")
             self.stalled = True
-            await self._health("stalled", f"Có vẻ bị kẹt: {int(now - self.last_event)}s không có hoạt động; dừng lượt này rồi tự thử lại")
+            await self._health("stalled", f"Có vẻ bị kẹt: {int(now - quiet_since)}s không có hoạt động; dừng lượt này rồi tự thử lại")
             if self.on_stall is not None:
                 self.on_stall()
         for call, (command, started) in list(self.running.items()):

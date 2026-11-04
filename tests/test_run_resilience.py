@@ -375,8 +375,13 @@ async def test_ac5_running_command_not_stall() -> None:
     await dog.observe({"kind": "command", "status": "running", "call_id": "t1", "fields": {"command": "uv run pytest"}})
     await tick(dog, clock, 700)
     assert "stalled" not in states(seen) and "slow" in states(seen)
-    await tick(dog, clock, 300)  # past the command limit (900 s): waiting on it is no reason any more
-    assert "stalled" in states(seen)
+    # just past the command limit (900 s): the guard is stopping it and the CLI answers within a minute (review F1)
+    await tick(dog, clock, 300)
+    assert "stalled" not in states(seen) and not dog.stalled
+    await tick(dog, clock, 490)  # 890 s: no answer yet, still within the stage threshold after the limit
+    assert "stalled" not in states(seen)
+    await tick(dog, clock, 30)  # the limit plus the whole stage threshold with no answer: stalled
+    assert states(seen).count("stalled") == 1 and dog.stalled
 
 
 async def test_ac5_executor_uses_the_stage_threshold(office: Office, runtime: FakeRuntime) -> None:

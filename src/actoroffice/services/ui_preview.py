@@ -33,6 +33,7 @@ import psutil
 
 from actoroffice.engine.browser import Browser, PlaywrightBrowser, is_loopback
 from actoroffice.engine.workspace import PORTS_PER_TICKET, ticket_env
+from actoroffice.proctree import kill_tree
 
 from .checks import command_list, run_argv, test_env
 
@@ -135,19 +136,6 @@ def is_loopback_ip(ip: str) -> bool:
         return ipaddress.ip_address(ip.split("%")[0]).is_loopback
     except ValueError:
         return False
-
-
-def _kill_and_wait(pid: int, timeout: float = 10) -> None:
-    """Kill a process and all its children, then wait until they are gone (their files are released)."""
-    try:
-        parent = psutil.Process(pid)
-        procs = [parent, *parent.children(recursive=True)]
-    except psutil.Error:
-        return
-    for proc in procs:
-        with contextlib.suppress(psutil.Error):
-            proc.kill()
-    psutil.wait_procs(procs, timeout=timeout)
 
 
 def rmtree(path: Path) -> None:
@@ -269,7 +257,7 @@ class UiPreviewService:
         if preview is None:
             return
         if preview.proc is not None and preview.proc.returncode is None:
-            await asyncio.to_thread(_kill_and_wait, preview.proc.pid)
+            await asyncio.to_thread(kill_tree, preview.proc.pid, 10)
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(preview.proc.wait(), 10)
         if preview.log_file is not None:

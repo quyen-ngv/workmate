@@ -21,7 +21,9 @@ class Settings(BaseModel):
     kiro_cli_path: str | None = None  # None = kiro-cli on PATH (actors whose model is "kiro" or "kiro:<model>")
     kiro_engine: str = "v3"  # Kiro CLI ACP engine: "v3" (current) or "v2"
     corrective_turns: int = 1  # extra turns to make an actor set a final ticket status
-    transient_retry_delays_s: list[float] = [30, 120]  # waits before re-running a turn that failed before doing anything
+    # Waits before re-running a turn that failed for a passing reason (start-up, network/API, stall): one per retry.
+    transient_retry_delays_s: list[float] = [30, 120, 300]
+    command_timeout_s: float = 900  # hard limit of one AI shell command; a project overrides it in its profile
     max_unattended_agent_messages: int = 8  # actor↔actor chat messages in a row before pausing for the user
     web_host: str = "127.0.0.1"
     web_port: int = 8765
@@ -29,7 +31,8 @@ class Settings(BaseModel):
     ai_name: str = "Copilot"  # the single AI engineer every team works with
     ai_model: str | None = None  # None = default_model; "kiro" / "kiro:<id>" runs it on Kiro CLI
     jira_poll_s: float = 60  # Jira mirror interval in seconds (0 = off)
-    stall_after_s: float = 900  # watchdog: a run with no event for this long is reported as stalled
+    stall_after_s: float = 900  # watchdog: a run with no event for this long is stalled (stages not listed below)
+    stall_after_s_by_stage: dict[str, float] = {"understand": 600, "build": 900}
     slow_command_s: float = 300  # watchdog: one command running longer than this is reported as slow
     ai_review: bool = True  # an independent reviewer session reads the diff before a build stage finishes
     environment: dict = {}  # what this machine can run (written by `actoroffice doctor` / init)

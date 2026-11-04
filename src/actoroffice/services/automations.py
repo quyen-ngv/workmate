@@ -24,14 +24,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import psutil
-
 from actoroffice.core.events import EventBus
 from actoroffice.core.schedule import describe, from_iso, local_now, next_after, normalize_repeat, parse_when, to_utc_iso
 from actoroffice.domain.automation import Automation, AutomationRun, AutomationStatus, Step, StepType
 from actoroffice.domain.errors import Conflict, NotFound, OfficeError
 from actoroffice.domain.ids import new_id, utcnow
 from actoroffice.domain.work import InteractionKind, Priority, TicketStatus
+from actoroffice.proctree import kill_tree
 from actoroffice.store import Database
 
 if TYPE_CHECKING:
@@ -590,15 +589,3 @@ async def _execute(folder: Path, entry: str, timeout_s: int, name: str) -> tuple
         kill_tree(proc.pid)
         raise
     return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
-
-
-def kill_tree(pid: int) -> None:
-    try:
-        parent = psutil.Process(pid)
-    except psutil.Error:
-        return
-    for child in parent.children(recursive=True):
-        with contextlib.suppress(psutil.Error):
-            child.kill()
-    with contextlib.suppress(psutil.Error):
-        parent.kill()

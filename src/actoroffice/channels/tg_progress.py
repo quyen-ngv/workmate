@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -24,6 +25,8 @@ from . import tg_format as fmt
 if TYPE_CHECKING:
     from .telegram import TelegramBridge
 
+log = logging.getLogger(__name__)
+RETRIED_KINDS = {"network", "runtime_start"}  # engine/failures.py RETRIED: a failed run of these used up its retries
 EDIT_EVERY_S = 10.0
 SHOW_LINES = 15
 FINAL_LINES = 30
@@ -151,6 +154,8 @@ class LiveProgress:
             p.flush = asyncio.create_task(self._later(p, wait))
 
     async def finished(self, run_id: str, run: dict[str, Any] | None, status: str) -> None:
+        if status == "failed" and run and run.get("error_kind") in RETRIED_KINDS and run.get("ticket_id"):
+            await self._out_of_retries(run)
         p = self.runs.pop(run_id, None)
         if p is None:
             return
@@ -178,6 +183,20 @@ class LiveProgress:
             head += f"\n<i>{fmt.esc(fmt.usage_line(run.get('usage') or {}, run.get('stats') or {}, None, run.get('cost_usd')))}</i>"
         with contextlib.suppress(Exception):
             await self.bridge._edit(p.message_id, head + self._steps_block(p) + self._quote(p.lines[-FINAL_LINES:]), self._buttons(p, final=True))
+
+    async def _out_of_retries(self, run: dict[str, Any]) -> None:
+        """A run failed for a passing reason after all its automatic retries (SI-38 BR-8): a new message in the
+        ticket's topic (an edit of the progress card notifies nobody), even with progress cards turned off."""
+        try:
+            ticket = await self.office.tickets.get(run["ticket_id"])
+            conv_id = await self.office.notifier._ticket_conv(ticket.model_dump())
+            thread = await self.bridge.topic_for(conv_id) if conv_id else None
+            if conv_id and thread is None:
+                return
+            text = f"⚠️ {ticket.key} · {fmt.esc(ticket.title[:80])} — hết lượt tự thử lại\n{fmt.esc(str(run.get('error') or '')[:600])}"
+            await self.bridge.send(thread, text)
+        except Exception:
+            log.exception("telegram: could not report run %s out of retries", run.get("id"))
 
     def _text(self, p: Progress) -> str:
         secs = int(time.monotonic() - p.started)

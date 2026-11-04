@@ -71,7 +71,7 @@ async def test_ac1_startup_error_once_then_runs(office: Office, runtime: FakeRun
     assert first.status == RunStatus.SUCCEEDED
     retries = await events(office, first.id, "retry")
     assert [e["payload"]["attempt"] for e in retries] == [1]
-    assert retries[0]["activity"]["title"] == "Claude gặp lỗi, thử lại lần 1"
+    assert retries[0]["activity"]["title"] == "Claude · lỗi khởi động: tự thử lại lần 1/2 sau 0s, không cần làm gì"  # SI-38 BR-7
 
 
 async def test_ac2_startup_error_every_time_fails_after_three_calls(office: Office, runtime: FakeRuntime) -> None:
@@ -80,7 +80,8 @@ async def test_ac2_startup_error_every_time_fails_after_three_calls(office: Offi
 
     assert len(runtime.specs) == 3 and len(runs) == 1
     assert runs[0].status == RunStatus.FAILED
-    assert "3 lần" in (runs[0].error or "") and INIT_TIMEOUT in (runs[0].error or "")
+    assert "đã thử lại 2 lần" in (runs[0].error or "") and INIT_TIMEOUT in (runs[0].error or "")
+    assert runs[0].error_kind == "runtime_start"
     assert [e["payload"]["attempt"] for e in await events(office, runs[0].id, "retry")] == [1, 2]
     assert (await office.stages.status(ticket_id))["status"] == "failed"
 
@@ -147,10 +148,11 @@ async def test_si29_ac4_kiro_failure_names_kiro(office: Office, runtime: FakeRun
 
     [run] = await office.runs.for_ticket(ticket.id)
     assert runtime.specs[0].model == "kiro" and run.status == RunStatus.FAILED
-    assert (run.error or "").startswith("Kiro lỗi trước khi làm được gì 3 lần liền: ")
-    assert "Claude" not in (run.error or "") and "khởi động" not in (run.error or "")
+    # SI-38 BR-7 names the failure kind (SI-29 left "khởi động" out while errors were not classified)
+    assert (run.error or "").startswith("Kiro · lỗi khởi động: đã thử lại 2 lần; ")
+    assert "Claude" not in (run.error or "")
     titles = [e["activity"]["title"] for e in await events(office, run.id, "retry")]
-    assert titles == ["Kiro gặp lỗi, thử lại lần 1", "Kiro gặp lỗi, thử lại lần 2"]
+    assert titles == [f"Kiro · lỗi khởi động: tự thử lại lần {n}/2 sau 0s, không cần làm gì" for n in (1, 2)]
 
 
 async def test_si29_ac5_chat_startup_error_once_then_replies(office: Office, runtime: FakeRuntime) -> None:

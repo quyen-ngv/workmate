@@ -3,7 +3,9 @@ going round in circles, says so in the activity stream, and stops loops by makin
 developer instead.
 
 - slow:     one command has been running longer than `slow_command_s`
-- stalled:  no event at all for `stall_after_s`
+- stalled:  no event at all for `stall_after_s` (per stage) while no command is running within its limit; the
+            executor then stops the runtime and retries the turn as a network/API failure (SI-38 BR-4). Time the
+            machine slept is not counted (engine/clock.py)
 - editing:  10 different edits of one file with no command (test/build run) in between: a warning, and the next
             edit of that file is held back once with a reminder to run a syntax check or the related tests
 - looping:  the same failing command 3 times, the same part of a file read 4 times, the same edit made twice
@@ -17,12 +19,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .activity import describe_call
+from .clock import AwakeClock
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -44,7 +47,11 @@ class Watchdog:
     run_id: str
     stall_after_s: float
     slow_command_s: float
-    last_event: float = field(default_factory=time.monotonic)
+    command_limit_s: float = 900  # a command running longer is not a reason to wait: the guard stops it
+    clock: AwakeClock = field(default_factory=AwakeClock)
+    on_stall: Callable[[], None] | None = None  # the executor's hook: stop the runtime and retry
+    last_event: float = 0.0
+    stalled: bool = False
     failures: Counter[str] = field(default_factory=Counter)
     reads: Counter[str] = field(default_factory=Counter)
     edits_since_command: Counter[str] = field(default_factory=Counter)
@@ -57,6 +64,16 @@ class Watchdog:
     nudged_sig: str | None = None  # the edit held back, so making it again is not counted as a repeat
     _task: asyncio.Task[None] | None = None
 
+    def __post_init__(self) -> None:
+        self.last_event = self.clock.now()
+
+    def reset(self) -> None:
+        """A new try of the turn: nothing is running, the stall clock starts again."""
+        self.last_event = self.clock.now()
+        self.stalled = False
+        self.running.clear()
+        self.reported = {r for r in self.reported if r == "told"}
+
     def start(self) -> None:
         self._task = asyncio.create_task(self._watch(), name=f"watchdog-{self.run_id}")
 
@@ -67,7 +84,7 @@ class Watchdog:
                 await self._task
 
     async def observe(self, activity: dict[str, Any] | None) -> None:
-        self.last_event = time.monotonic()
+        self.last_event = self.clock.now()
         self.reported.discard("stalled")
         if not activity:
             return
@@ -76,7 +93,7 @@ class Watchdog:
         if kind == "command":
             command = normalize_command(str(fields.get("command") or ""))
             if status == "running" and call:
-                self.running[call] = (command, time.monotonic())
+                self.running[call] = (command, self.clock.now())
                 return
             self.running.pop(str(call), None)
             self.edits_since_command.clear()
@@ -126,11 +143,21 @@ class Watchdog:
     async def _watch(self) -> None:
         while True:
             await asyncio.sleep(min(15.0, max(1.0, self.stall_after_s / 4)))
-            now = time.monotonic()
-            if now - self.last_event > self.stall_after_s and "stalled" not in self.reported:
-                self.reported.add("stalled")
-                await self._health("stalled", f"Có vẻ bị kẹt: {int(now - self.last_event)}s không có hoạt động")
-            for call, (command, started) in list(self.running.items()):
+            await self.check()
+
+    async def check(self) -> None:
+        now = self.clock.now()
+        slept = self.clock.take_unreported()
+        if slept:
+            await self._health("sleep", f"Máy ngủ {int(slept)}s: không tính vào thời gian kẹt hay thời gian của lệnh")
+        busy = any(now - started < self.command_limit_s for _command, started in self.running.values())
+        if not busy and now - self.last_event > self.stall_after_s and "stalled" not in self.reported:
+            self.reported.add("stalled")
+            self.stalled = True
+            await self._health("stalled", f"Có vẻ bị kẹt: {int(now - self.last_event)}s không có hoạt động; dừng lượt này rồi tự thử lại")
+            if self.on_stall is not None:
+                self.on_stall()
+        for call, (command, started) in list(self.running.items()):
                 key = f"slow:{call}"
                 if now - started > self.slow_command_s and key not in self.reported:
                     self.reported.add(key)

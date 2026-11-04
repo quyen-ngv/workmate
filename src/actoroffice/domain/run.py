@@ -75,6 +75,7 @@ class Run(BaseModel):
     cost_usd: float = 0.0
     tainted: bool = False
     error: str | None = None
+    error_kind: str | None = None  # engine/failures.py FailureKind, set when the run failed
     started_at: str | None = None
     finished_at: str | None = None
     stats: dict[str, Any] = Field(default_factory=dict)  # what the run did: files, lines, commands (engine/stats.py)
@@ -111,4 +112,6 @@ class TurnResult(BaseModel):
     deferred: DeferredTool | None = None
     rate_limit: RateLimit | None = None
     error: str | None = None
+    failure_kind: str | None = None  # engine/failures.py FailureKind, set by the executor on an ERROR turn
+    retries: int = 0  # automatic retries the executor made before this result
     structured: dict[str, Any] | None = None  # the answer matching TurnSpec.output_schema, when the runtime supports it

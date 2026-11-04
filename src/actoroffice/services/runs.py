@@ -45,13 +45,14 @@ class RunService:
         cost_usd: float = 0.0,
         tainted: bool = False,
         error: str | None = None,
+        error_kind: str | None = None,
         stats: dict[str, Any] | None = None,
     ) -> None:
         if stats is not None:
             await self.db.execute("UPDATE runs SET stats_json = ? WHERE id = ?", (json.dumps(stats, ensure_ascii=False), run_id))
         await self.db.execute(
             "UPDATE runs SET status = ?, session_after = COALESCE(?, session_after), usage_json = ?, cost_usd = ?, "
-            "tainted = ?, error = ?, finished_at = ? WHERE id = ?",
+            "tainted = ?, error = ?, error_kind = ?, finished_at = ? WHERE id = ?",
             (
                 status.value,
                 session_after,
@@ -59,6 +60,7 @@ class RunService:
                 cost_usd,
                 1 if tainted else 0,
                 self.redact(error)[:2000] if error else None,
+                error_kind,
                 utcnow(),
                 run_id,
             ),
@@ -300,6 +302,7 @@ def _run(row: dict[str, Any]) -> Run:
         cost_usd=row["cost_usd"],
         tainted=bool(row["tainted"]),
         error=row["error"],
+        error_kind=row.get("error_kind"),
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         stats=json.loads(row.get("stats_json") or "{}"),

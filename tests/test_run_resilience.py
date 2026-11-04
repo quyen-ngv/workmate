@@ -548,7 +548,7 @@ async def test_ac11_resume_after_progress_names_command(office: Office, runtime:
         await ctx.sink("tool_use", {"tool": "Read", "input": {"file_path": "plan.md"}, "id": "t0"})
         await ctx.sink("tool_result", {"id": "t0", "error": False, "text": "ok"})
         await ctx.sink("tool_use", {"tool": "Bash", "input": {"command": "uv run pytest tests/test_x.py"}, "id": "t1"})
-        return TurnResult(status=TurnStatus.ERROR, error=CERT, session_id="sess-A", usage=Usage(input_tokens=90_000))
+        return TurnResult(status=TurnStatus.ERROR, error=CERT, session_id="sess-A", usage=Usage(input_tokens=90_000), cost_usd=0.5)
 
     async def resumed(ctx: TurnCtx) -> TurnResult:
         seen.append((ctx.spec.resume_session_id, ctx.spec.prompt))
@@ -557,6 +557,8 @@ async def test_ac11_resume_after_progress_names_command(office: Office, runtime:
     runtime.scripts += [cut_off, resumed]
     _ticket, [run] = await run_ticket(office)
     assert run.status == RunStatus.SUCCEEDED
+    # review F5: the tokens and cost of the try cut off count too, not only those of the resumed try
+    assert (run.usage.input_tokens, run.usage.output_tokens, run.cost_usd) == (90_010, 5, 0.5)
     [(session, prompt)] = seen
     assert session == "sess-A" and "mất kết nối API" in prompt and "`uv run pytest tests/test_x.py`" in prompt
     assert "check the result of your last command" in prompt

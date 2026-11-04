@@ -501,6 +501,12 @@ class Executor:
         watchdog: Watchdog | None = gate.watchdog
         guard: CommandGuard | None = spec.command_guard
         retries = 0
+        spent, spent_cost = Usage(), 0.0  # tries cut off before this one: their tokens and cost are part of the turn
+
+        def counted(result: TurnResult) -> TurnResult:
+            result.usage, result.cost_usd = _add(spent, spent_cost, result)
+            return result
+
         try:
             while True:
                 progressed = False
@@ -519,14 +525,15 @@ class Executor:
                     {"status": result.status.value, "usage": result.usage.model_dump(), "cost_usd": result.cost_usd, "error": result.error},
                 )
                 if result.status != TurnStatus.ERROR:
-                    return result
+                    return counted(result)
                 worked = bool(progressed or watched.calls or _tokens(result.usage))
                 kind = failures.classify(
                     result.error, progressed=worked, stalled=stall.is_set(), command_killed=guard is not None and guard.stopped_since(mark)
                 )
                 result.failure_kind, result.retries = kind.value, retries
                 if kind not in failures.RETRIED or retries >= len(delays):
-                    return result
+                    return counted(result)
+                spent, spent_cost = _add(spent, spent_cost, result)
                 if worked:
                     session = result.session_id or spec.resume_session_id
                     if session:
@@ -540,7 +547,7 @@ class Executor:
                     {"attempt": retries, "of": len(delays), "delay_s": delay, "error": result.error, "runtime": runtime, "kind": kind.value},
                 )
                 if not await self._wait_retry(spec.run_id, gate.ticket_id, delay):
-                    return TurnResult(status=TurnStatus.CANCELLED, error="stopped while waiting to retry")
+                    return counted(TurnResult(status=TurnStatus.CANCELLED, error="stopped while waiting to retry"))
         finally:
             self._stopped.discard(spec.run_id)
             if watchdog is not None:

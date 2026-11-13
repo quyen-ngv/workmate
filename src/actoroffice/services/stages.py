@@ -35,6 +35,7 @@ from actoroffice.domain.team import LOCAL_OWNER_ID, ROLE_VI
 from actoroffice.domain.work import Interaction, InteractionKind, Ticket, TicketStatus
 
 from .checks import CheckResult, CheckRunner, review_acs, ui_evidence
+from .docflow import spawn_of
 from .review import gate_items
 
 if TYPE_CHECKING:
@@ -345,7 +346,8 @@ class StageService:
                 await self._set_status(ticket.id, S.IN_REVIEW, run_id=run_id, comment=self._external_note(stage.gate))
                 await self._publish(ticket.id)
                 return {"ok": True, "gate": stage.gate, "external": True, "checks": [r.model_dump() for r in results]}
-            item = await self._open_gate(ticket, stage, stage.gate, summary, results, run_id=run_id, extra=extra)
+            submit = await self._submitters(ticket, policy)
+            item = await self._open_gate(ticket, stage, stage.gate, summary, results, run_id=run_id, extra=extra, submit=submit)
             await self._set_status(ticket.id, S.IN_REVIEW, run_id=run_id, comment=None)
             await self._publish(ticket.id)
             return {"ok": True, "gate": stage.gate, "interaction_id": item.id, "approvers": item.payload.get("approver_names"), "checks": [r.model_dump() for r in results]}
@@ -377,15 +379,27 @@ class StageService:
         *,
         run_id: str | None,
         extra: list[Any] | None = None,
+        submit: list[Any] | None = None,
     ) -> Interaction:
+        """`submit`: the people who hand the stage over first ("dev gửi, lead duyệt"). The card then goes to them, and
+        to the approvers only after one of them sends it."""
         office = self.office
         from actoroffice.domain.stage import GatePolicy
 
         policy = await office.teams.gate_policy(ticket, gate) if gate != "rules" else GatePolicy(roles=[], fallback="owner")
+        final_roles = list(policy.roles)
+        if submit:
+            policy = policy.model_copy(update={"roles": list(policy.submit_by), "min": 1, "fallback": None})
         for rule in extra or []:  # e.g. migrations changed → a lead must approve too
             roles = [r for r in rule.spec.get("roles") or [] if r not in policy.roles]
             policy = policy.model_copy(update={"roles": policy.roles + roles, "min": max(policy.min, int(rule.spec.get("min") or 1))})
-        approvers = await office.teams.approvers(ticket, policy)
+        approvers = submit or await office.teams.approvers(ticket, policy)
+        if not approvers and gate != "rules":
+            # nobody holds the role: say so now instead of letting the ticket wait in silence
+            await office.tickets.add_comment(
+                ticket.id, f"⚠️ Chưa có ai giữ vai {' / '.join(policy.roles) or gate} để duyệt {stage_title(stage.id)}. Thêm người vào team hoặc vào ticket.",
+                author_kind="system", author_id=None,
+            )  # fmt: skip
         docs = []
         for key in [o for out in stage.outputs for o in out.split("|")]:
             doc = await office.tickets.get_document(ticket.id, key)
@@ -416,6 +430,19 @@ class StageService:
             "review_acs": await self.review_acs(ticket.id) if stage.id in ("build", "pr") else [],
             "ui_evidence": await self.ui_evidence(ticket.id) if stage.id in ("build", "pr") else [],
         }
+        if submit:
+            payload["phase"] = "submit"
+            payload["final_roles"] = final_roles
+            payload["final_roles_label"] = " / ".join(ROLE_VI.get(r, r) for r in final_roles)  # type: ignore[call-overload]
+        if "doc_rules" in stage.checks:
+            payload["doc_core"] = await office.docs.approval_view(ticket, stage)
+            spawn = spawn_of(ticket.stage_template, stage.id)
+            if spawn is not None:
+                people = await office.teams.members(ticket.team_id) if ticket.team_id else []
+                payload["spawn"] = {
+                    "flows": list(spawn.flows), "assign": list(spawn.assign),
+                    "people": [{"id": m.user.id, "name": m.user.name} for m in people if set(m.roles) & set(spawn.assign)],
+                }  # fmt: skip
         if gate == "knowledge":
             drafts = [i for i in await office.knowledge.list(ticket_id=ticket.id) if i.status == "draft"]
             payload["kb"] = [f"{n}. [{i.kind}] {i.title}: {i.content[:240]}" for n, i in enumerate(drafts, 1)]
@@ -436,6 +463,8 @@ class StageService:
         approved = bool(response.get("approved"))
         note = str(response.get("note") or "").strip()
         name = await self._name(by)
+        if item.payload.get("phase") == "submit":
+            return await self._answer_submit(item, ticket, approved, note, by=by, name=name)
         if item.payload.get("gate") == "knowledge":
             # Knowledge is confirmed, not redone: "bỏ 2, 5" keeps the rest; a plain rejection drops everything.
             partial = not approved and bool(re.search(r"\d", note))
@@ -472,15 +501,52 @@ class StageService:
             await office.tickets.add_comment(ticket.id, comment, author_kind="system", author_id=None)
             if item.payload.get("gate") == "requirement" and ticket.jira_key:
                 await office.jira.requirements_approved(ticket.id, name)
+            created: list[Ticket] = []
+            if "doc_core" in item.payload:
+                await office.docs.on_approved(ticket, item)
+                created = await office.docs.spawn(ticket, response, by=by)
             if item.payload.get("gate") == "plan":
                 granted = await office.access.approve_with_plan(ticket.id, by=by)
                 if granted:
                     await office.tickets.add_comment(ticket.id, f"🔑 Cấp quyền cùng plan: {', '.join(granted)}", author_kind="system", author_id=None)
             await self.advance(ticket.id, by=by)
+            if created:  # the epic waits for its tasks; closing the last one wakes it
+                await self._set_status(ticket.id, S.BLOCKED, run_id=None, comment=f"Chờ {len(created)} task con: {', '.join(c.key for c in created)}.")
+                await self._publish(ticket.id)
         else:
             comment = f"👎 {name} chưa duyệt {stage_title(ticket.stage)}" + (f": {note}" if note else "")
             await office.tickets.add_comment(ticket.id, comment, author_kind="system", author_id=None)
             await self._redo(ticket, reason=note or "người duyệt yêu cầu làm lại", by=by)
+        return resolved
+
+    async def _submitters(self, ticket: Ticket, policy: Any) -> list[Any]:
+        """The people who must hand the stage over before its approvers see it: the ticket's participants holding a
+        `submit_by` role (the developer the task was given to). Nobody: the card goes straight to the approvers."""
+        if not policy.submit_by:
+            return []
+        wanted = set(policy.submit_by)
+        people = [m.user for m in await self.office.teams.participants(ticket.id) if wanted & set(m.roles)]
+        if not people:
+            await self.office.tickets.add_comment(
+                ticket.id, f"ℹ️ Task chưa được giao cho ai giữ vai {' / '.join(policy.submit_by)}: gửi thẳng tới người duyệt.", author_kind="system", author_id=None
+            )
+        return people
+
+    async def _answer_submit(self, item: Interaction, ticket: Ticket, approved: bool, note: str, *, by: str, name: str) -> Interaction:
+        """The author's card: send the stage to the approvers, or keep working on it."""
+        office = self.office
+        resolved = await office.interactions.resolve(item.id, {"approved": approved, "note": note, "by_name": name}, by=by)
+        stage = await self.stage_def(ticket)
+        if not approved:
+            await office.tickets.add_comment(ticket.id, f"✏️ {name} muốn sửa tiếp {stage_title(ticket.stage)}" + (f": {note}" if note else ""), author_kind="system", author_id=None)
+            await self._redo(ticket, reason=note or "người viết muốn sửa tiếp trước khi gửi duyệt", by=by)
+            return resolved
+        label = item.payload.get("final_roles_label") or "người duyệt"
+        await office.tickets.add_comment(ticket.id, f"📨 {name} gửi {stage_title(ticket.stage)} cho {label} duyệt" + (f": {note}" if note else ""), author_kind="system", author_id=None)
+        srun = await self.current_run(ticket)
+        results = [CheckResult.model_validate(c) for c in (srun.checks if srun else [])]
+        await self._open_gate(ticket, stage, str(item.payload.get("gate")), str(item.payload.get("summary") or ""), results, run_id=None)
+        await self._publish(ticket.id)
         return resolved
 
     async def _may_answer(self, by: str, ticket: Ticket, roles: list[str]) -> bool:

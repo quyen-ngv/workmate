@@ -133,3 +133,25 @@ async def test_the_actors_model_picks_the_runtime():
 
 async def _ignore(_kind: str, _data: dict[str, Any]) -> None:
     return None
+
+
+async def test_a_tool_that_breaks_answers_with_an_error_and_keeps_the_server(workspace: Path):
+    from actoroffice.runtimes.office_mcp import ToolServer
+
+    async def broken(args: dict[str, Any], _ctx: Any) -> str:
+        return args["missing"]
+
+    server = ToolServer([BoundTool(ToolDef("broken", "Breaks", schema({}, required=[]), broken), ctx=None), office_tool([])], Gate(workspace))  # type: ignore[arg-type]
+    reply = await server.call("broken", {})
+    assert reply["isError"] and "KeyError" in reply["text"]
+    assert (await server.call("ticket_comment", {"body": "vẫn chạy"}))["text"] == "Comment added."
+
+
+async def test_the_first_prompt_waits_until_the_agent_listed_the_office_tools(workspace: Path):
+    from actoroffice.runtimes.office_mcp import ToolServer
+
+    server = ToolServer([office_tool([])], Gate(workspace))
+    assert await server.wait_listed(0.05) is False
+    server.listed.set()  # what the `list` request of the agent's MCP shim does
+    assert await server.wait_listed(0.05) is True
+    assert KiroAcpRuntime(command=AGENT).mcp_ready_s == 0 and KiroAcpRuntime().mcp_ready_s > 0

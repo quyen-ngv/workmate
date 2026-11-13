@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import secrets
 import socket
@@ -24,6 +25,8 @@ from typing import Any
 from actoroffice.tools.registry import BoundTool, ToolError
 
 from .base import GateDecision, ToolGate
+
+log = logging.getLogger(__name__)
 
 TOKEN_ENV = "ACTOROFFICE_MCP_TOKEN"
 SERVER_NAME = "office"
@@ -39,6 +42,14 @@ class ToolServer:
         self.token = secrets.token_hex(16)
         self.deferred: tuple[str, dict[str, Any]] | None = None  # a call the user has to approve later
         self._server: asyncio.base_events.Server | None = None
+        self.listed = asyncio.Event()  # the agent has asked for the tools at least once
+
+    async def wait_listed(self, timeout: float) -> bool:
+        try:
+            await asyncio.wait_for(self.listed.wait(), timeout)
+        except TimeoutError:
+            return False
+        return True
 
     async def start(self) -> int:
         self._server = await asyncio.start_server(self._client, "127.0.0.1", 0, limit=MAX_LINE)
@@ -71,6 +82,9 @@ class ToolServer:
             error = False
         except ToolError as exc:
             text, error = str(exc), True
+        except Exception as exc:  # a tool that breaks answers with an error; it must not drop the agent's connection
+            log.exception("office tool %s failed", name)
+            text, error = f"{name} failed: {type(exc).__name__}: {exc}", True
         await self.gate.after_tool(f"mcp__{SERVER_NAME}__{name}", args, text)
         return {"text": text, "isError": error}
 
@@ -82,6 +96,7 @@ class ToolServer:
                     break
                 if request.get("op") == "list":
                     reply: Any = self.listing()
+                    self.listed.set()
                 else:
                     reply = await self.call(str(request.get("name", "")), request.get("args") or {})
                 writer.write(json.dumps({"id": request.get("id"), "result": reply}, ensure_ascii=False).encode() + b"\n")

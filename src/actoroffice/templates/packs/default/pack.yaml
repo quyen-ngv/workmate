@@ -1,0 +1,172 @@
+# Bộ chuẩn mặc định (docs/specs/2026-11-13-doc-core.md mục 4.1).
+# Đơn vị muốn chuẩn khác: tạo thư mục riêng có pack.yaml viết `extends: default` rồi chỉ khai phần khác.
+name: default
+version: 1
+extends: null
+roles: [ba, dev, lead]            # chuỗi tự do; adapter tài khoản ánh xạ người thật vào đây
+
+syntax:                           # từ khoá parser nhận; đơn vị viết tiếng Anh thì đổi ở đây
+  trace: ["Truy vết"]
+  source: ["Nguồn"]
+  changes: ["Thay đổi"]
+  answer: ["Trả lời"]
+  tags: {new: "mới", technical: "kỹ thuật", review: "review"}
+  version_line: 'Phiên bản: \d+'
+  changelog: "Change log"
+
+item_kinds:
+  REQ: {title: "Yêu cầu từ epic"}
+  F:   {title: "Hiện trạng",         needs_evidence: true}    # phải trích nguồn đọc được
+  Q:   {title: "Câu hỏi mở",         blocks_gate: true}       # còn mở thì không qua gate
+  A:   {title: "Giả định",           confirm_at_gate: true}   # hiện trên thẻ duyệt
+  T:   {title: "Task"}                                        # một mục của breakdown, thành ticket con khi duyệt
+  US:  {title: "User story"}
+  AC:  {title: "Tiêu chí chấp nhận", pattern: 'AC-\d+\.\d+'}
+  BR:  {title: "Quy tắc nghiệp vụ"}
+  C:   {title: "Thay đổi thiết kế"}
+  D:   {title: "Quyết định kỹ thuật"}
+
+doc_types:
+  analysis:
+    template: templates/analysis.md
+    sections: [Phạm vi, Yêu cầu, Hiện trạng, Mâu thuẫn và thiếu, Câu hỏi mở, Giả định, Change log]
+    items: [REQ, F, Q, A]
+  breakdown:                       # danh sách task của epic
+    template: templates/breakdown.md
+    sections: [Mục tiêu, Danh sách task, Thứ tự và phụ thuộc, Change log]
+    items: [T]
+    based_on: [analysis]
+  spec:                            # "nghiệp vụ" của một task
+    template: templates/spec.md
+    sections: [Mục tiêu, User stories, Quy tắc nghiệp vụ, Thay đổi so với hiện trạng, Phụ thuộc, Giả định, Change log]
+    items: [US, AC, BR, A]
+    based_on: [analysis]           # của ticket cha nếu không có ở ticket này
+  design:
+    template: templates/design.md
+    sections: [Bối cảnh, Thay đổi, Mô hình dữ liệu, Giao diện, Quyết định, Kiểm thử, Rủi ro, Truy vết, Các bước làm, Change log]
+    items: [C, D, A]
+    based_on: [spec, analysis]
+
+rules:                             # mỗi luật = một kiểu nguyên thuỷ + tham số. Thêm luật không cần code
+  R-TEMPLATE:  {type: template,  docs: "*",                                   severity: error}
+  R-COVER-REQ: {type: cover,     each: analysis.REQ, by: [spec.AC, spec.BR, breakdown.T], unless_section: "Ngoài phạm vi", severity: error}
+  R-COVER-AC:  {type: cover,     each: [spec.AC, spec.BR], by: design.C,      severity: error}
+  R-NO-ORPHAN: {type: traces_to, each: design.C, to: [spec.AC, spec.BR], unless_tag: technical, severity: warn}
+  R-EVIDENCE:  {type: evidence,  kinds: [F], also: design.C, unless_tag: new, severity: error}
+  R-FRESH:     {type: fresh,     providers: code,                             severity: error}
+  R-BASELINE:  {type: baseline,  docs: [breakdown, spec, design],             severity: error}
+  R-OPEN-Q:    {type: answered,  kinds: [Q],                                  severity: error}
+  R-DECLARED:  {type: declared_change, each: [spec.BR, design.C], against: analysis.F, severity: warn}
+
+crosschecks:                       # lượt đối chiếu AI: cặp nào, ở gate nào
+  X-SPEC-EPIC:   {left: spec,   right: analysis, at: [business]}
+  X-DESIGN-SPEC: {left: design, right: spec,     at: [design]}
+  X-DESIGN-CODE: {left: design, right: evidence, at: [design]}
+  X-SPEC-CODE:   {left: spec,   right: analysis.F, at: [business, design]}
+
+on_change:                         # phản ứng khi có thay đổi sau khi đã duyệt
+  upstream_changed: {when_item_affected: revise, otherwise: ignore}
+  evidence_stale:   {before_approval: block, after_approval: notify_author}
+  # giá trị: ignore | notify_author | revise | reopen_gate | block
+
+flows:
+  epic:
+    - id: analyze
+      outputs: [analysis]
+      checks: [outputs, sources_read, doc_rules]
+      gate: analysis
+      instructions: |
+        Analyse the epic for the BA. Read every source the ticket names, then the code it touches: start with
+        code_pack(<the epic in a few words>), then code_search / code_outline / code_refs / code_read. Do not read
+        whole files when an outline answers the question.
+        Write the document `analysis`: each requirement of the epic is one `REQ-n`; each statement about how the
+        system works today is one `F-n` with a `Nguồn:` line pointing at the code or document that shows it; what is
+        unclear is a `Q-n` (ask the BA with ask_human, then record `Trả lời:`); what you assume is an `A-n`.
+        Do not design and do not propose tasks yet.
+        Every document follows its template: read it first with doc_template(<type>). Keep every heading.
+        Machine-read lines, written directly under an item: `Truy vết: <ids>` (ids of other documents are written
+        `<TICKET>/<id>`, e.g. `AO-12/REQ-2`), `Nguồn: <repo:path:start-end | ticket key | URL>`, `Thay đổi: F-n`,
+        `Trả lời: …` under an answered question. Take every `Nguồn:` from a tool result (code_search, code_read,
+        code_symbol give it ready to paste): the office opens each one and refuses a source that does not exist.
+        Before stage_complete call doc_check and fix every error it lists.
+    - id: breakdown
+      outputs: [breakdown]
+      checks: [outputs, doc_rules, crosscheck_clean]
+      gate: business
+      instructions: |
+        Turn the approved analysis into tasks for the BA to confirm. Write the document `breakdown`: one `T-n` per
+        task (a title a developer understands, what it covers, `Truy vết:` to the REQ it serves, dependencies on other
+        T). Then, for every `T-n`, write its business spec as the document `spec.T-n` from the `spec` template: user
+        stories `US-n`, acceptance criteria `AC-n.m` (Given / When / Then), business rules `BR-n`. Each AC or BR
+        traces to the requirement it comes from as `<this ticket key>/REQ-n`. A rule that goes against how the system
+        works today names that fact with `Thay đổi: <this ticket key>/F-n`. Every REQ of the analysis must be covered
+        by at least one AC, BR or T, or be listed under "Ngoài phạm vi" with the reason.
+        Do not design. When the BA approves, each T becomes a ticket with its spec and is handed to a developer.
+        Every document follows its template: read it first with doc_template(<type>). Keep every heading.
+        Machine-read lines, written directly under an item: `Truy vết: <ids>` (ids of other documents are written
+        `<TICKET>/<id>`, e.g. `AO-12/REQ-2`), `Nguồn: <repo:path:start-end | ticket key | URL>`, `Thay đổi: F-n`,
+        `Trả lời: …` under an answered question. Take every `Nguồn:` from a tool result (code_search, code_read,
+        code_symbol give it ready to paste): the office opens each one and refuses a source that does not exist.
+        Before stage_complete call doc_check and fix every error it lists.
+      spawn:                       # khi gate duyệt: mỗi mục của breakdown thành ticket con
+        flows: [task, task-spec]   # người duyệt chọn cho từng mục; cái đầu là mặc định
+        copy: [spec]               # tài liệu chép sang ticket con, đánh dấu đã duyệt
+        assign: [dev]              # vai trò người duyệt phải chọn người cho từng mục
+    - {id: close,     outputs: [dossier],   checks: [outputs, kb_noted],                gate: knowledge}
+  task-spec:
+    - id: design
+      outputs: [design]
+      checks: [outputs, sources_read, doc_rules, crosscheck_clean]
+      gate: design
+      instructions: |
+        Design this task with the developer it was handed to. Its business spec is the document `spec` (already
+        approved): do not change it; if it is wrong or incomplete, say so with ask_human. The epic's analysis is on the
+        parent ticket (doc_get with its key).
+        Write the document `design`: each change is one `C-n` naming the files and symbols it touches, with
+        `Truy vết:` to the AC / BR it implements and `Nguồn:` to the existing code it changes (code_read gives the
+        line). Something that does not exist yet is tagged `[mới]` and needs no source; a change that serves no AC
+        (a refactoring the work needs) is tagged `[kỹ thuật]` with the reason. Each technical decision is a `D-n`
+        with the options considered. Every AC and BR of the spec must be covered by at least one C. Use code_impact
+        on what you change and name every caller, endpoint, topic or table the design must take care of.
+        The section "Các bước làm" lists the build steps in order; they are what the build stage follows.
+        Every document follows its template: read it first with doc_template(<type>). Keep every heading.
+        Machine-read lines, written directly under an item: `Truy vết: <ids>` (ids of other documents are written
+        `<TICKET>/<id>`, e.g. `AO-12/REQ-2`), `Nguồn: <repo:path:start-end | ticket key | URL>`, `Thay đổi: F-n`,
+        `Trả lời: …` under an answered question. Take every `Nguồn:` from a tool result (code_search, code_read,
+        code_symbol give it ready to paste): the office opens each one and refuses a source that does not exist.
+        Before stage_complete call doc_check and fix every error it lists.
+  task:
+    - id: design
+      outputs: [design]
+      checks: [outputs, sources_read, doc_rules, crosscheck_clean]
+      gate: design
+      instructions: |
+        Design this task with the developer it was handed to. Its business spec is the document `spec` (already
+        approved): do not change it; if it is wrong or incomplete, say so with ask_human. The epic's analysis is on the
+        parent ticket (doc_get with its key).
+        Write the document `design`: each change is one `C-n` naming the files and symbols it touches, with
+        `Truy vết:` to the AC / BR it implements and `Nguồn:` to the existing code it changes (code_read gives the
+        line). Something that does not exist yet is tagged `[mới]` and needs no source; a change that serves no AC
+        (a refactoring the work needs) is tagged `[kỹ thuật]` with the reason. Each technical decision is a `D-n`
+        with the options considered. Every AC and BR of the spec must be covered by at least one C. Use code_impact
+        on what you change and name every caller, endpoint, topic or table the design must take care of.
+        The section "Các bước làm" lists the build steps in order; they are what the build stage follows.
+        Every document follows its template: read it first with doc_template(<type>). Keep every heading.
+        Machine-read lines, written directly under an item: `Truy vết: <ids>` (ids of other documents are written
+        `<TICKET>/<id>`, e.g. `AO-12/REQ-2`), `Nguồn: <repo:path:start-end | ticket key | URL>`, `Thay đổi: F-n`,
+        `Trả lời: …` under an answered question. Take every `Nguồn:` from a tool result (code_search, code_read,
+        code_symbol give it ready to paste): the office opens each one and refuses a source that does not exist.
+        Before stage_complete call doc_check and fix every error it lists.
+    - {id: build}
+    - {id: pr, gate: merge}
+    - {id: close, gate: knowledge}
+
+gates:
+  analysis: {roles: [ba], fallback: owner}
+  business: {roles: [ba], fallback: owner}
+  design:
+    roles: [lead]
+    fallback: null
+    submit_by: [dev]               # dev gửi, lead duyệt
+    accept_findings: [lead]        # ai được "chấp nhận" điểm lệch; bỏ trống = bằng `roles`
+    show: [trace_table, assumptions, declared_changes, accepted_findings, baseline]

@@ -731,3 +731,51 @@ STAGE_TOOLS += [
         kb_note,
     ),
 ]
+
+
+async def doc_check(args: dict[str, Any], ctx: ToolCtx) -> str:
+    """The Doc Core rules on the documents of the current stage (or on one document), before the gate does it."""
+    office = ctx.office
+    ticket = await _stage_ctx(ctx)
+    key = str(args.get("key") or "").strip()
+    try:
+        if key:
+            findings = await office.docs.check(ticket, keys={office.docs.core_key(ticket, key)})
+        else:
+            findings = await office.docs.check(ticket, await office.stages.stage_def(ticket))
+    except OfficeError as exc:
+        raise ToolError(str(exc)) from exc
+    errors = [f for f in findings if f.status == "open" and f.severity == "error"]
+    warnings = [f for f in findings if f.status == "open" and f.severity != "error"]
+    if not errors and not warnings:
+        return "Tài liệu đúng mẫu và khớp: không có điểm nào cần sửa."
+    lines = [f"- [{'LỖI' if f.severity == 'error' else 'cảnh báo'}] {f.rule} · {f.doc}{' · ' + f.item if f.item else ''}: {f.message}" for f in errors + warnings]
+    tail = "Sửa mọi LỖI rồi gọi lại doc_check." if errors else "Không còn lỗi. Cảnh báo sẽ hiện trên thẻ duyệt: sửa nếu sửa được."
+    return f"{len(errors)} lỗi, {len(warnings)} cảnh báo.\n" + "\n".join(lines) + f"\n{tail}"
+
+
+async def doc_template(args: dict[str, Any], ctx: ToolCtx) -> str:
+    try:
+        return ctx.office.docs.template_text(str(args.get("type") or "").strip())
+    except OfficeError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+STAGE_TOOLS += [
+    ToolDef(
+        "doc_check",
+        "Check the documents of the current stage against the office's document standard: template, coverage (every requirement, AC and rule is "
+        "traced), sources that exist and still say what you read, open questions. Returns every problem with the exact place and how to fix it. "
+        "Call it before stage_complete in the analyze, breakdown and design stages.",
+        schema({"key": {"type": "string", "description": "One document key (e.g. design, spec.T-2). Omit to check the stage's documents."}}, required=[]),
+        doc_check,
+        read_only=True,
+    ),
+    ToolDef(
+        "doc_template",
+        "The standard template of a document type (analysis, breakdown, spec, design): the headings to keep and how items, traces and sources are written.",
+        schema({"type": {"type": "string", "enum": ["analysis", "breakdown", "spec", "design"]}}, required=["type"]),
+        doc_template,
+        read_only=True,
+    ),
+]

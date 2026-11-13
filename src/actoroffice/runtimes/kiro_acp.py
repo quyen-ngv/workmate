@@ -55,6 +55,10 @@ class AcpError(Exception):
         self.code = code
 
 
+MCP_READY_S = 30.0
+MCP_SETTLE_S = 1.0
+
+
 def acp_mcp_entry(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
     """A team connector in ACP's session/new format (env and headers are lists of name/value pairs)."""
     if cfg.get("type") in ("http", "sse"):
@@ -79,10 +83,15 @@ class KiroAcpRuntime:
     name = "kiro"
     caps = RuntimeCaps(resume=True, defer=False, custom_system_prompt=False)
 
-    def __init__(self, *, cli_path: str | None = None, engine: str = "v3", command: list[str] | None = None) -> None:
+    def __init__(
+        self, *, cli_path: str | None = None, engine: str = "v3", command: list[str] | None = None, mcp_ready_s: float | None = None
+    ) -> None:
         self.cli_path = cli_path
         self.engine = engine
         self.command = command  # tests: a fake ACP agent instead of kiro-cli
+        # Kiro CLI starts MCP servers after session/new returns, and a prompt sent before they are loaded runs without
+        # the office tools. So the first prompt waits until Kiro has asked the office server for its tools.
+        self.mcp_ready_s = mcp_ready_s if mcp_ready_s is not None else (0.0 if command else MCP_READY_S)
         self._turns: dict[str, _Turn] = {}
 
     def _argv(self) -> list[str] | None:
@@ -116,6 +125,7 @@ class KiroAcpRuntime:
                 "bằng `kiro-cli login`, hoặc đặt kiro_cli_path trong config.yaml.",
             )
         turn = _Turn(argv, spec, gate, sink)
+        turn.mcp_ready_s = self.mcp_ready_s
         self._turns[spec.run_id] = turn
         try:
             return await turn.run()
@@ -220,6 +230,7 @@ class _Turn:
         self.conn: _Connection | None = None
         self.proc: asyncio.subprocess.Process | None = None
         self.tools = ToolServer(spec.internal_tools, gate) if spec.internal_tools else None
+        self.mcp_ready_s = 0.0
         self.loading = False  # session/load replays history: not this run's events
         self.texts: list[str] = []
         self._text = ""
@@ -307,7 +318,12 @@ class _Turn:
             meta = {"_meta": {"kiro": {"modelId": model}}} if model else {}
             created = await self.conn.request("session/new", {**common, **meta})
             self.session_id = str(created["sessionId"])
-        text = f"<office_instructions>\n{spec.system_prompt}\n</office_instructions>\n\n{spec.prompt}" if fresh else spec.prompt
+        if self.tools is not None and self.mcp_ready_s > 0:
+            if await self.tools.wait_listed(self.mcp_ready_s):
+                await asyncio.sleep(MCP_SETTLE_S)  # Kiro registers the tools just after it received the list
+            else:
+                log.warning("kiro: the office tools were not loaded after %.0fs; the turn runs without them", self.mcp_ready_s)
+        text =f"<office_instructions>\n{spec.system_prompt}\n</office_instructions>\n\n{spec.prompt}" if fresh else spec.prompt
         reply = await self.conn.request("session/prompt", {"sessionId": self.session_id, "prompt": [{"type": "text", "text": text}]})
         await self._flush()
         reason = str((reply or {}).get("stopReason", "end_turn"))

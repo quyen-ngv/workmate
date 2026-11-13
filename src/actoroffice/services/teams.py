@@ -11,6 +11,7 @@ from actoroffice.domain.ids import new_id, utcnow
 from actoroffice.domain.stage import GatePolicy, StageTemplate, default_gates, default_templates
 from actoroffice.domain.team import LOCAL_OWNER_ID, Member, Role, Team, TeamSettings, User
 from actoroffice.domain.work import Ticket
+from actoroffice.services.docflow import pack_gates, pack_templates
 from actoroffice.store import Database
 
 ROLES = {r.value for r in Role}
@@ -276,14 +277,14 @@ class TeamService:
             team = await self.get_team(ticket.team_id)
             if name in team.settings.stage_templates:
                 return team.settings.stage_templates[name]
-        return default_templates().get(name)
+        return default_templates().get(name) or pack_templates().get(name)
 
     async def gate_policy(self, ticket: Ticket, gate: str) -> GatePolicy:
         if ticket.team_id:
             team = await self.get_team(ticket.team_id)
             if gate in team.settings.gates:
                 return team.settings.gates[gate]
-        return default_gates().get(gate) or GatePolicy(roles=["owner"])
+        return default_gates().get(gate) or pack_gates().get(gate) or GatePolicy(roles=["owner"])
 
 
 def _user(row: dict[str, Any]) -> User:

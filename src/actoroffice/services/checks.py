@@ -917,14 +917,28 @@ async def check_kb_noted(ctx: CheckContext) -> CheckResult:
     return CheckResult(id="kb_noted", status="failed", summary="chưa ghi kiến thức nào (kb_note), hoặc ghi 'none' trong kb-draft nếu thật sự không có")
 
 
-SOURCE_STAGES = ("understand", "scope")
+SOURCE_STAGES = ("understand", "scope", "analyze")
+
+
+async def check_doc_rules(ctx: CheckContext) -> CheckResult:
+    """The stage's documents follow the standard pack and match what they are written from (Doc Core): template,
+    coverage, traces, sources that exist and are still what was read, baseline, open questions."""
+    findings = await ctx.office.docs.check(ctx.ticket, ctx.stage)
+    errors = [f for f in findings if f.status == "open" and f.severity == "error"]
+    warnings = [f for f in findings if f.status == "open" and f.severity != "error"]
+    accepted = [f for f in findings if f.status == "accepted"]
+    data = {"findings": ctx.office.docs.dump(findings)}
+    if errors:
+        return CheckResult(id="doc_rules", status="failed", summary=f"{len(errors)} điểm chưa đạt:\n{ctx.office.docs.summary(findings)}", data=data)
+    note = f"{len(warnings)} cảnh báo, {len(accepted)} điểm đã được chấp nhận" if warnings or accepted else "tài liệu đúng mẫu và khớp"
+    return CheckResult(id="doc_rules", status="passed", summary=note, data=data)
 
 
 async def check_sources_read(ctx: CheckContext) -> CheckResult:
     """Every source the ticket names that the AI must read was read (run activity), skipped with a reason, or
     could not be read (SI-39). External URLs and other teams' tickets are not required."""
     if ctx.stage.id not in SOURCE_STAGES:
-        return CheckResult(id="sources_read", status="skipped", summary="chỉ kiểm ở bước Tìm hiểu / Chốt cách sửa")
+        return CheckResult(id="sources_read", status="skipped", summary="chỉ kiểm ở bước Tìm hiểu / Chốt cách sửa / Phân tích")
     sources = await ctx.office.sources.list(ctx.ticket)
     if not sources:
         return CheckResult(id="sources_read", status="skipped", summary="ticket không nhắc nguồn nào")
@@ -943,6 +957,7 @@ async def check_sources_read(ctx: CheckContext) -> CheckResult:
 BUILTIN.update(
     {
         "sources_read": check_sources_read,
+        "doc_rules": check_doc_rules,
         "kb_noted": check_kb_noted,
         "ac_coverage": check_ac_coverage,
         "ui_evidence": check_ui_evidence,

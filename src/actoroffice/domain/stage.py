@@ -19,6 +19,11 @@ class GatePolicy(BaseModel):
     min: int = 1  # approvals needed
     fallback: str | None = "owner"  # who is asked when nobody holds the roles ("owner" = ticket owner)
     external: bool = False  # resolved by an outside event (PR merged, automation approved), not by a card
+    # Doc Core (docs/specs/2026-11-13-doc-core.md): the people who hand the stage over before the approvers see it
+    # ("dev gửi, lead duyệt"), who may accept a finding instead of fixing it (empty = `roles`), what the card shows.
+    submit_by: list[str] = Field(default_factory=list)
+    accept_findings: list[str] = Field(default_factory=list)
+    show: list[str] = Field(default_factory=list)
 
 
 class StageDef(BaseModel):
@@ -109,6 +114,8 @@ class StageRun(BaseModel):
 
 STAGE_TITLES = {
     "understand": "Tìm hiểu",
+    "analyze": "Phân tích",
+    "breakdown": "Chốt nghiệp vụ",
     "scope": "Chốt cách sửa",
     "plan": "Lên kế hoạch",
     "design": "Thiết kế",
@@ -170,6 +177,9 @@ TEMPLATE_TITLES = {
     "automation": "Tự động hoá",
     "research": "Nghiên cứu",
     "doc": "Tài liệu",
+    "epic": "Epic (phân tích → nghiệp vụ → task)",
+    "task": "Task (thiết kế → code)",
+    "task-spec": "Task (chỉ thiết kế)",
 }
 SWITCHABLE = {"code": "quick", "quick": "code"}  # workflows a ticket can move between before its PR
 

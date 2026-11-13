@@ -26,6 +26,15 @@ actoroffice = "actoroffice.__main__:main"
 ui = [
     "playwright>=1.64",
 ]
+# Code intelligence above plain text search: symbols and the code graph (codeintel/parse.py). Without it the index
+# stops at the text level.
+intel = [
+    "tree-sitter>=0.25",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-java>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-typescript>=0.23",
+]
 
 [build-system]
 requires = ["uv_build>=0.8.19,<0.9.0"]
@@ -39,6 +48,11 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
+    "tree-sitter>=0.25",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-java>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-typescript>=0.23",
     "ruff>=0.17.3",
 ]
 

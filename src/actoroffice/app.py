@@ -38,6 +38,9 @@ from actoroffice.services.approvals_recheck import ApprovalRecheck
 from actoroffice.services.atlassian import Atlassian
 from actoroffice.services.automations import AutomationService
 from actoroffice.services.chat import ChatService
+from actoroffice.services.codeintel import CodeIntelService
+from actoroffice.services.connections import ConnectionService
+from actoroffice.services.docs import DocService
 from actoroffice.services.infra import InfraService
 from actoroffice.services.interactions import InteractionService
 from actoroffice.services.jira import JiraMirror
@@ -109,6 +112,9 @@ class Office:
         self.ui = UiPreviewService(self)  # the ticket's temporary app for UI screenshots (SI-23)
         self.proposals = ProposalService(self)  # lists of proposed tickets approved in one go (SI-24)
         self.sources = SourceService(self)  # what a ticket's description points to and what the AI read of it (SI-39)
+        self.connections = ConnectionService(self)  # accounts on outside systems (Jira, Confluence, Bitbucket, GitHub…)
+        self.codeintel = CodeIntelService(self)
+        self.docs = DocService(self)  # Doc Core: documents checked against the standard pack, sources pinned  # the code index, the code graph and the service map
         self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),
@@ -222,6 +228,8 @@ class Office:
             await self.telegram.api.close()
         await self.jira.close()
         await self.atlassian.close()
+        await self.connections.close()
+        self.codeintel.close()
         await self.access.close()
         await self.db.close()
 

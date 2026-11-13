@@ -384,9 +384,11 @@ def build(
 
 
 def _instructions(template: StageTemplate, stage: StageDef, office_runs_tests: bool) -> str:
-    text = STAGE_INSTRUCTIONS.get(f"{template.name}:{stage.id}") or STAGE_INSTRUCTIONS.get(
-        stage.id, "Do what the stage requires, then stage_complete."
-    )
+    text = STAGE_INSTRUCTIONS.get(f"{template.name}:{stage.id}")
+    if text is None and stage.instructions.strip() and "doc_rules" in stage.checks:
+        text = "Do what the stage instructions below require, then stage_complete."  # a pack stage brings its own
+    if text is None:
+        text = STAGE_INSTRUCTIONS.get(stage.id, "Do what the stage requires, then stage_complete.")
     if office_runs_tests and "repo:test" in stage.checks:
         for old, new in OFFICE_RUNS_TESTS.items():
             text = text.replace(old, new)

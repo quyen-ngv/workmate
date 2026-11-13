@@ -21,6 +21,7 @@ from actoroffice.services.checks import command_list
 from actoroffice.services.runs import ticket_session_key
 from actoroffice.tools.atlassian_tools import ATLASSIAN_TOOLS
 from actoroffice.tools.chat_tools import CHAT_TOOLS
+from actoroffice.tools.code_tools import CODE_TOOLS
 from actoroffice.tools.infra_tools import INFRA_TOOLS
 from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
 from actoroffice.tools.office_tools import OFFICE_TOOLS
@@ -36,7 +37,7 @@ from .gate import OfficeGate
 from .watchdog import Watchdog
 from .workspace import ticket_env, ticket_tmp
 
-TICKET_TOOLS = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS + [PROPOSE_TICKETS]  # every ticket run (stage tools added on top)
+TICKET_TOOLS = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS + CODE_TOOLS + [PROPOSE_TICKETS]  # every ticket run (stage tools added on top)
 
 if TYPE_CHECKING:
     from actoroffice.app import Office

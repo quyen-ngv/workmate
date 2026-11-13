@@ -302,6 +302,7 @@ async def doc_put(args: dict[str, Any], ctx: ToolCtx) -> str:
         )
     except OfficeError as exc:
         raise ToolError(str(exc)) from exc
+    await ctx.office.docs.on_saved(await ctx.office.tickets.get(ticket_id), doc.key)  # what this revision is written from
     return f"Saved '{doc.key}' revision {doc.revision}."
 
 

@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from actoroffice import cli_team
@@ -326,6 +327,39 @@ async def cmd_telegram(office: Office, args: argparse.Namespace) -> None:
         out("Lưu ý: bot phải là admin của group để đọc được mọi tin nhắn (hoặc tắt privacy mode bằng /setprivacy ở @BotFather).")
 
 
+async def cmd_pack(office: Office, args: argparse.Namespace) -> None:
+    """Check a standard pack before using it: is it valid, and what would it say about documents that already exist."""
+    from actoroffice.doccore import PackError, load_default, load_pack, parse, run_rules
+
+    try:
+        pack = load_pack(Path(args.path)) if args.path else load_default()
+    except PackError as exc:
+        out(f"Pack không hợp lệ ({len(exc.problems)} lỗi):")
+        for problem in exc.problems:
+            out(f"  - {problem}")
+        raise SystemExit(1) from None
+    out(f"Pack '{pack.name}' v{pack.version} hợp lệ: {len(pack.doc_types)} loại tài liệu, {len(pack.item_kinds)} loại mục, {len(pack.rules)} luật, "
+        f"luồng: {', '.join(pack.flows)}.")
+    if not args.against:
+        return
+    ticket = await office.tickets.get(args.against)
+    ds = await office.docs.docset(ticket)
+    docs = {}
+    for key, (ticket_id, stored_key) in ds.stored.items():
+        doctype = stored_key.split(".", 1)[0]
+        doc = await office.tickets.get_document(ticket_id, stored_key)
+        if doc is not None and doctype in pack.doc_types:
+            docs[key] = parse(doc.body, doctype, pack)
+    findings = run_rules(pack, docs, None, None, None, only_docs={k for k in ds.own if k in docs})
+    errors = [f for f in findings if f.severity == "error"]
+    out(f"Trên tài liệu của {ticket.key} ({len(docs)} tài liệu): {len(errors)} lỗi, {len(findings) - len(errors)} cảnh báo "
+        "(chưa kiểm nguồn và baseline: hai thứ đó không phụ thuộc pack).")
+    for f in findings:
+        out(f"  - [{'LỖI' if f.severity == 'error' else 'cảnh báo'}] {f.rule} · {f.doc}{' · ' + f.item if f.item else ''}: {f.message}")
+    if errors:
+        raise SystemExit(2)
+
+
 # ---- entry -----------------------------------------------------------------------------------
 
 
@@ -337,6 +371,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="create the data dir, config and default positions").set_defaults(fn=cmd_init)
     sub.add_parser("positions").set_defaults(fn=cmd_positions)
     sub.add_parser("actors").set_defaults(fn=cmd_actors)
+
+    p = sub.add_parser("pack", help="check a document standard pack (and what it would say about a ticket's documents)")
+    p.add_argument("path", nargs="?", help="folder with pack.yaml (default: the built-in pack)")
+    p.add_argument("--against", help="a ticket key: run the pack's rules on its documents")
+    p.set_defaults(fn=cmd_pack)
 
     p = sub.add_parser("hire", help="hire an actor into a position")
     p.add_argument("position")

@@ -227,7 +227,7 @@ MAIN_SYNC = (
 )
 SOURCES_RULE = (
     "- Sources of this ticket (listed below, found in its description and people's comments): read every one that is\n"
-    "  required (ticket_get / doc_get for a ticket, Read for a file, jira_issue, wiki_page), or call\n"
+    "  required (ticket_get / doc_get for a ticket, Read for a file, source_get for an issue or a wiki page), or call\n"
     "  source_skip(ref, reason) when it does not bear on the ticket. Reading is recorded from your activity; the check\n"
     "  sources_read fails while a required source is unread. External URLs and other teams' tickets are not required.\n"
     "- Write every source in dossier section links: đã đọc / không liên quan (lý do) / không đọc được (lỗi).\n"

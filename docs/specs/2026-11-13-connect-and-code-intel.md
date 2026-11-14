@@ -784,9 +784,9 @@ Mọi lần gọi ra ngoài ghi vào `AuditLog` hiện có: kết nối, hành �
 | `codeintel/`: nguồn (git, mirror, thư mục), chỉ mục chữ, ký hiệu (Python, Java, JS/TS), đồ thị, truy vấn, bản đồ dịch vụ | Xong, có test, đã chạy thật trên repo này |
 | Extractor | Có `fastapi`, `http_client`, `spring` (gồm `@Table`), `mybatis`, `build_deps`. Chưa có `openapi`, `express`, `deploy` (k8s/Helm), `jpa` repository |
 | Tool `repo_list`, `code_search`, `code_outline`, `code_symbol`, `code_refs`, `code_read`, `code_impact`, `code_pack`, `service_map` | Xong, mọi lượt chạy ticket đều có; đã thử với Kiro CLI thật |
-| Tool `source_get` / `source_search`; chuyển `sources_read` sang registry; `ToolDef` metadata và `needs` | Chưa làm. Đường Jira/Confluence/Bitbucket cũ (`services/jira.py`, `services/atlassian.py`) vẫn là đường đang chạy |
-| Web: Cài đặt › Kết nối, trang Bản đồ dịch vụ, các API `/map` | Chưa làm |
-| Webhook, lập lịch chỉ mục nền, nguồn `api` (7b), adapter tổng quát `http`/`mcp`/`command`, MCP vai trò (c), vector, SCIP | Chưa làm |
+| Tool `source_get` / `source_search` (`services/sourcehub.py`, `tools/source_tools.py`) | Xong, có test với adapter giả: đọc qua kết nối gần nhất, lưu bản sao theo phiên bản, ghi nhận "đã đọc", làm phiên chạy thành "không tin cậy". Đường cũ (`jira_issue`, `wiki_page`, `services/jira.py`, `services/atlassian.py`) vẫn còn và vẫn chạy song song; chưa gỡ. `ToolDef` metadata và `needs`: chưa làm |
+| Web: Kết nối, Bản đồ dịch vụ; API `/api/connections`, `/api/index`, `/api/map`, `/api/map/overlay` | Xong, có test API, đã kiểm trên trình duyệt. Bản đồ vẽ bằng SVG tự viết (bố cục vòng tròn), **không dùng Cytoscape** như thiết kế: thêm thư viện ngoài cần tải file về. Chỉ có mức hệ thống; chưa có mức service / module và so hai commit |
+| Webhook, lập lịch chỉ mục nền, nguồn `api` (7b), adapter tổng quát `http`/`mcp`/`command`, MCP vai trò (c), vector, SCIP | Chưa làm. Chỉ mục được làm mới khi có tool hoặc trang web dùng tới |
 
 Khác thiết kế, có chủ ý:
 - Ngôn ngữ khai bằng một mục trong `LANGS` (`codeintel/parse.py`), không phải file `.scm`: cần đi cây để có tên đầy đủ và

@@ -215,7 +215,7 @@ class SourceService:
                 if jira_teams.get(ref.split("-", 1)[0]) != ticket.team_id:
                     item.update(required=False, status="out_of_scope")
             elif kind == "url":
-                if (urlparse(ref).hostname or "").lower() not in hosts:
+                if (urlparse(ref).hostname or "").lower() not in hosts and not await office.sourcehub.recognize(ticket, ref):
                     item.update(required=False, status="external", link=ref)
                 else:
                     item["link"] = ref

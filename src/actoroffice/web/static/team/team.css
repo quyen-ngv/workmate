@@ -299,3 +299,54 @@ button:focus-visible { outline: 1px solid var(--line-strong); outline-offset: 1p
 .form.perm { margin-top: var(--gap-2); }
 .form label.check { display: flex; align-items: center; gap: var(--gap-1); font-size: var(--fs-sm); color: var(--text); }
 .card .opts code { font-size: var(--fs-xs); }
+
+/* Doc Core: gate card details and the documents panel of a ticket */
+.doc-core { margin: var(--gap-2) 0; }
+.doc-states, .doc-panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gap-2); }
+.doc-part { border-top: 1px solid var(--line); padding: var(--gap-1) 0; }
+.doc-part > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-sm); }
+.doc-part ul { margin: var(--gap-1) 0 0; padding-left: 18px; }
+.doc-part pre { max-height: 160px; overflow: auto; margin: var(--gap-1) 0; }
+.finding { margin-bottom: var(--gap-1); }
+.finding.open input { display: block; width: 100%; margin-top: 4px; }
+table.trace { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+table.trace th, table.trace td { text-align: left; padding: 2px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.spawn-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gap-2); padding: 4px 0; }
+.spawn-row label { flex: 1 1 240px; }
+.doc-panel { border-bottom: 1px solid var(--line); padding: var(--gap-2) var(--gap-4); font-size: var(--fs-sm); }
+.doc-panel .rev { color: var(--muted); font-size: var(--fs-xs); }
+.doc-kids { margin: var(--gap-1) 0 0; padding-left: 18px; }
+.chip.good { color: var(--good, #1a7f37); }
+.chip.bad { color: var(--bad, #cf222e); }
+.chip.warn { color: var(--warn, #9a6700); }
+button.link { background: none; border: 0; padding: 0; color: var(--accent, #0969da); cursor: pointer; font: inherit; text-decoration: underline; }
+
+/* connections */
+.adapter { border-top: 1px solid var(--line); padding: var(--gap-2) 0; }
+.adapter h3 { margin: 0 0 4px; font-size: var(--fs-md, 14px); }
+.conn { margin: var(--gap-1) 0; }
+.conn > summary { cursor: pointer; }
+.conn-form { padding: var(--gap-2) 0 var(--gap-2) var(--gap-4); }
+.conn-form .form label span { display: flex; align-items: center; gap: 6px; }
+
+/* service map */
+.map-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gap-4); margin-bottom: var(--gap-2); font-size: var(--fs-sm); }
+.map-bar label.inline { display: inline-flex; align-items: center; gap: 4px; }
+.map-wrap { display: grid; grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr); gap: var(--gap-4); align-items: start; }
+@media (max-width: 900px) { .map-wrap { grid-template-columns: 1fr; } }
+svg.map { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; }
+svg.map text { font-size: 11px; text-anchor: middle; fill: var(--text, currentColor); pointer-events: none; }
+.map-node rect, .map-node ellipse { fill: var(--panel, transparent); stroke: var(--muted); stroke-width: 1.5; }
+.map-node.service rect { stroke: var(--accent); }
+.map-node.topic rect { stroke: var(--warn); }
+.map-node.table ellipse { stroke: var(--good, #1a7f37); }
+.map-node.external rect { stroke-dasharray: 3 3; }
+.map-node.touched rect, .map-node.touched ellipse { stroke-width: 3.5; fill: var(--accent-bg, rgba(37, 99, 235, 0.15)); }
+.map-edge line { stroke: var(--muted); stroke-width: 1.4; }
+.map-edge line.hit { stroke: transparent; stroke-width: 14; cursor: pointer; marker-end: none; }
+.map-edge.on line:first-child { stroke: var(--accent); stroke-width: 2.6; }
+.map-edge text { fill: var(--muted); font-size: 10px; }
+svg.map marker path { fill: var(--muted); }
+.map-edges { list-style: none; margin: 0; padding: 0; max-height: 520px; overflow: auto; font-size: var(--fs-sm); }
+.map-edges li { padding: 6px 8px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.map-edges li.on { background: var(--accent-bg, rgba(37, 99, 235, 0.12)); }

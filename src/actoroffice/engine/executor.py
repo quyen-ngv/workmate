@@ -27,6 +27,7 @@ from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
 from actoroffice.tools.office_tools import OFFICE_TOOLS
 from actoroffice.tools.proposal_tools import PROPOSE_TICKETS
 from actoroffice.tools.registry import BoundTool, ToolCtx
+from actoroffice.tools.source_tools import SOURCE_TOOLS
 from actoroffice.tools.stage_tools import STAGE_TOOLS
 from actoroffice.tools.work_tools import CHAT_WORK_TOOLS, WORK_TOOLS
 
@@ -37,7 +38,7 @@ from .gate import OfficeGate
 from .watchdog import Watchdog
 from .workspace import ticket_env, ticket_tmp
 
-TICKET_TOOLS = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS + CODE_TOOLS + [PROPOSE_TICKETS]  # every ticket run (stage tools added on top)
+TICKET_TOOLS = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS + CODE_TOOLS + SOURCE_TOOLS + [PROPOSE_TICKETS]  # every ticket run (stage tools added on top)
 
 if TYPE_CHECKING:
     from actoroffice.app import Office

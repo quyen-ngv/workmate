@@ -7,15 +7,29 @@ and checks, so a task that goes on to code is built, reviewed and merged exactly
 from __future__ import annotations
 
 from functools import cache
+from pathlib import Path
 
-from actoroffice.doccore import StandardPack, load_default
+from actoroffice.doccore import StandardPack, load_default, load_pack
 from actoroffice.doccore.model import Spawn
 from actoroffice.domain.stage import GatePolicy, StageDef, StageTemplate, default_templates
+
+_pack_path: Path | None = None  # the office's own pack (config `doc_pack`); None = the built-in one
+
+
+def configure(path: Path | None) -> StandardPack:
+    """Use another standard pack for this office. It is loaded and checked first: a pack that is not valid raises
+    PackError and the pack in use stays as it was."""
+    global _pack_path
+    pack = load_pack(path) if path is not None else load_default()
+    _pack_path = path
+    for cached in (default_pack, pack_templates, pack_gates):
+        cached.cache_clear()
+    return pack
 
 
 @cache
 def default_pack() -> StandardPack:
-    return load_default()
+    return load_pack(_pack_path) if _pack_path is not None else load_default()
 
 
 @cache

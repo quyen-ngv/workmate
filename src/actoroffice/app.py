@@ -33,6 +33,7 @@ from actoroffice.runtimes.router import RuntimeRouter
 from actoroffice.security.audit import AuditLog
 from actoroffice.security.policy import FOLDER_MODE_RULE, PolicyEngine
 from actoroffice.security.redact import Redactor
+from actoroffice.services import docflow
 from actoroffice.services.access import AccessService
 from actoroffice.services.approvals_recheck import ApprovalRecheck
 from actoroffice.services.atlassian import Atlassian
@@ -40,6 +41,7 @@ from actoroffice.services.automations import AutomationService
 from actoroffice.services.chat import ChatService
 from actoroffice.services.codeintel import CodeIntelService
 from actoroffice.services.connections import ConnectionService
+from actoroffice.services.crosscheck import CrossCheckService
 from actoroffice.services.docs import DocService
 from actoroffice.services.infra import InfraService
 from actoroffice.services.interactions import InteractionService
@@ -57,6 +59,7 @@ from actoroffice.services.review import ReviewService
 from actoroffice.services.rules import RuleService
 from actoroffice.services.runs import RunService
 from actoroffice.services.skills import SkillService, split_front_matter
+from actoroffice.services.sourcehub import SourceHub
 from actoroffice.services.sources import SourceService
 from actoroffice.services.stages import StageService
 from actoroffice.services.teams import TeamService
@@ -113,8 +116,11 @@ class Office:
         self.proposals = ProposalService(self)  # lists of proposed tickets approved in one go (SI-24)
         self.sources = SourceService(self)  # what a ticket's description points to and what the AI read of it (SI-39)
         self.connections = ConnectionService(self)  # accounts on outside systems (Jira, Confluence, Bitbucket, GitHub…)
-        self.codeintel = CodeIntelService(self)
-        self.docs = DocService(self)  # Doc Core: documents checked against the standard pack, sources pinned  # the code index, the code graph and the service map
+        self.codeintel = CodeIntelService(self)  # the code index, the code graph and the service map
+        docflow.configure(settings.doc_pack_path)  # a pack that is not valid stops the office here, with every problem listed
+        self.sourcehub = SourceHub(self)  # documents of outside systems, through whatever is connected
+        self.docs = DocService(self)  # Doc Core: documents checked against the standard pack, sources pinned
+        self.crosscheck = CrossCheckService(self)  # the AI comparison of documents that must agree
         self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),
@@ -149,6 +155,8 @@ class Office:
                 self._tasks.append(asyncio.create_task(self.jira.run_forever(), name="jira"))
             self._tasks.append(asyncio.create_task(self.prs.run_forever(), name="pull-requests"))
             self._tasks.append(asyncio.create_task(self.access.run_forever(), name="access-expiry"))
+            if self.settings.doc_sweep_s > 0:
+                self._tasks.append(asyncio.create_task(self.docs.run_forever(self.settings.doc_sweep_s), name="doc-sweep"))
 
     async def start_notifier(self) -> None:
         ready = asyncio.Event()

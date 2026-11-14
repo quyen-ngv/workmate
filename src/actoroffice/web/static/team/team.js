@@ -209,7 +209,7 @@ function renderSidebar() {
     </div>
     <div class="side-foot">
       <button data-page="inbox">Cần tôi ${needs_you ? `(${needs_you})` : ""}</button>
-      <button data-page="rules">Rules</button><button data-page="kb">Kiến thức</button><button data-page="people">Người</button><button data-page="setup">Cài đặt</button>
+      <button data-page="rules">Rules</button><button data-page="kb">Kiến thức</button><button data-page="people">Người</button><button data-page="map">Bản đồ</button><button data-page="connections">Kết nối</button><button data-page="setup">Cài đặt</button>
     </div>`;
 }
 
@@ -331,6 +331,83 @@ function uiEvidenceList(items, key) {
   return `<div class="review"><div class="who">Bằng chứng giao diện</div><ul>${rows}</ul></div>`;
 }
 
+// ---- Doc Core on a gate card: what the approver needs so that nobody traces by hand -------------------------------
+
+const DOC_STATE = { khop: "good", lech: "warn", cu: "warn", loi: "bad", chua_kiem: "" };
+const docChip = (d) => `<span class="chip ${DOC_STATE[d.state] || ""}" title="${esc(d.key)}">${esc(d.key)}: ${esc(d.label)}</span>`;
+const findingWhere = (f) => `${esc(f.rule)} · ${esc(f.item || f.doc)}`;
+
+function docCoreBlock(p) {
+  const v = p.doc_core;
+  if (!v) return "";
+  const states = Object.entries(v.states || {}).map(([key, s]) => docChip({ key, ...s })).join(" ");
+  const open = (v.open || []).map((f) => `<li class="finding open"><b>${findingWhere(f)}</b> ${esc(f.message)}
+      <input type="text" data-accept="${esc(f.id)}" placeholder="Lý do chấp nhận (để trống = chưa chấp nhận)" aria-label="Lý do chấp nhận ${esc(f.rule)}"></li>`).join("");
+  const accepted = (v.accepted || []).map((f) => `<li class="finding"><b>${findingWhere(f)}</b> ${esc(f.message)}<div class="reply">☑ đã chấp nhận: ${esc(f.reason || "")}</div></li>`).join("");
+  const warnings = (v.warnings || []).map((f) => `<li class="finding"><b>${findingWhere(f)}</b> ${esc(f.message)}</li>`).join("");
+  const trace = (v.trace || []).map((t) => `<tr><td><code>${esc(t.doc)}</code></td><td><b>${esc(t.id)}</b> ${esc(t.title || "")}</td><td>${esc((t.traces || []).join(", "))}</td></tr>`).join("");
+  const changes = (v.declared_changes || []).map((c) => `<li><code>${esc(c.doc)}</code> <b>${esc(c.id)}</b> ${esc(c.title || "")} — đổi so với <b>${esc(c.changes)}</b>${c.old ? `<pre>${esc(c.old)}</pre>` : ""}</li>`).join("");
+  const assumptions = (v.assumptions || []).map((a) => `<li><code>${esc(a.doc)}</code> <b>${esc(a.id)}</b> ${esc(a.text)}</li>`).join("");
+  const baseline = Object.entries(v.baseline || {}).map(([doc, from]) => `<li><code>${esc(doc)}</code> viết theo ${esc(Object.entries(from).map(([k, r]) => `${k} bản ${r}`).join(", ") || "—")}</li>`).join("");
+  const part = (title, body, open_) => body ? `<details class="doc-part"${open_ ? " open" : ""}><summary>${title}</summary>${body}</details>` : "";
+  return `<div class="doc-core" data-doccore>
+    ${states ? `<div class="doc-states">${states}</div>` : ""}
+    ${part(`⚠ Điểm lệch chưa xử lý (${(v.open || []).length}): sửa, hoặc chấp nhận kèm lý do`, open ? `<ul>${open}</ul>` : "", true)}
+    ${part(`Cảnh báo (${(v.warnings || []).length})`, warnings ? `<ul>${warnings}</ul>` : "")}
+    ${part(`Đã chấp nhận (${(v.accepted || []).length})`, accepted ? `<ul>${accepted}</ul>` : "")}
+    ${part(`Thay đổi so với hiện trạng (${(v.declared_changes || []).length})`, changes ? `<ul>${changes}</ul>` : "", true)}
+    ${part(`Giả định cần xác nhận (${(v.assumptions || []).length})`, assumptions ? `<ul>${assumptions}</ul>` : "", true)}
+    ${part(`Truy vết (${(v.trace || []).length})`, trace ? `<table class="trace"><tr><th>Tài liệu</th><th>Mục</th><th>Truy vết tới</th></tr>${trace}</table>` : "")}
+    ${part("Viết dựa trên", baseline ? `<ul>${baseline}</ul>` : "")}
+    ${spawnBlock(p)}</div>`;
+}
+
+// A breakdown: one row per task. The approver keeps or drops it, picks the flow and the person it is handed to.
+function spawnBlock(p) {
+  const sp = p.spawn;
+  const tasks = p.doc_core?.tasks || [];
+  if (!sp || !tasks.length || p.phase === "submit") return "";
+  const flowName = (f) => ({ task: "Thiết kế rồi code", "task-spec": "Chỉ thiết kế" })[f] || f;
+  const rows = tasks.map((t) => `<div class="spawn-row" data-task="${esc(t.id)}">
+      <label><input type="checkbox" data-s="keep" checked aria-label="Tạo ${esc(t.id)}"> <b>${esc(t.id)}</b> ${esc(t.title)}</label>${t.has_spec ? "" : ` <span class="chip bad">thiếu spec</span>`}
+      <select data-s="flow" aria-label="Luồng của ${esc(t.id)}">${(sp.flows || []).map((f) => `<option value="${esc(f)}">${esc(flowName(f))}</option>`).join("")}</select>
+      <select data-s="who" aria-label="Giao ${esc(t.id)} cho">${`<option value="">— chưa giao —</option>` + (sp.people || []).map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join("")}</select>
+    </div>`).join("");
+  return `<details class="doc-part" open><summary>Task sẽ tạo khi duyệt (${tasks.length})</summary>${rows}
+    ${(sp.people || []).length ? "" : `<div class="proposal-warn">⚠ Team chưa có ai giữ vai ${esc((sp.assign || []).join(" / "))}: task sẽ không có người gửi duyệt.</div>`}</details>`;
+}
+
+// What the approver chose on a Doc Core card: findings accepted with a reason, tasks dropped, flows and people.
+function docCoreAnswer(c) {
+  const out = {};
+  const accept = {};
+  for (const el of c.querySelectorAll("[data-accept]")) if (el.value.trim()) accept[el.dataset.accept] = el.value.trim();
+  if (Object.keys(accept).length) out.accept = accept;
+  const rows = [...c.querySelectorAll("[data-task]")];
+  if (rows.length) {
+    out.drop = rows.filter((r) => !r.querySelector('[data-s="keep"]').checked).map((r) => r.dataset.task);
+    out.flows = Object.fromEntries(rows.map((r) => [r.dataset.task, r.querySelector('[data-s="flow"]').value]));
+    out.assign = Object.fromEntries(rows.map((r) => [r.dataset.task, r.querySelector('[data-s="who"]').value]).filter(([, who]) => who));
+  }
+  return out;
+}
+
+// The documents of a ticket in a pack flow: state of each, parent epic, child tasks.
+function docPanel(d, t) {
+  const v = d.stage?.docs;
+  if (!v) return "";
+  const docs = (v.docs || []).map((x) => `${docChip(x)}<span class="rev">bản ${esc(x.revision)}${x.approved_revision ? ` · duyệt bản ${esc(x.approved_revision)}` : " · chưa duyệt"}</span>`).join(" ");
+  const kids = (v.children || []).map((c) => `<li><button class="link" data-open-ticket="${esc(c.key)}">${esc(c.key)}</button> ${esc(c.title)}
+      <span class="chip ${esc(c.status)}">${esc(c.stage || c.status)}</span>${(c.assigned || []).length ? ` <span class="rev">giao ${esc(c.assigned.join(", "))}</span>` : ` <span class="rev">chưa giao</span>`} ${(c.docs || []).map(docChip).join(" ")}</li>`).join("");
+  const open = (v.open || []).length;
+  return `<div class="doc-panel">
+    <div class="doc-panel-head"><b>Tài liệu</b> ${docs || `<span class="rev">chưa có</span>`}
+      ${open ? `<span class="chip bad">${open} điểm chưa đạt</span>` : ""}
+      ${v.parent ? `<span class="rev">thuộc epic <button class="link" data-open-ticket="${esc(v.parent.key)}">${esc(v.parent.key)}</button> ${esc(v.parent.title)}</span>` : ""}
+      ${v.is_epic && !["done", "cancelled"].includes(t.status) ? `<button class="btn small" data-grow title="Thêm yêu cầu hoặc tài liệu vào epic: AI phân tích phần mới, task đã có giữ nguyên">➕ Bổ sung epic</button>` : ""}</div>
+    ${kids ? `<ul class="doc-kids">${kids}</ul>` : ""}</div>`;
+}
+
 function card(item) {
   const p = item.payload || {};
   const who = (p.approver_names || []).join(", ") || p.roles_label || "bạn";
@@ -343,11 +420,13 @@ function card(item) {
   if (item.kind === "approve_stage") {
     const checks = (p.checks || []).map((c) => `<li>${c.status === "passed" ? "✅" : c.status === "failed" ? "❌" : "⏭"} ${esc(c.id)}: ${esc(c.summary)}</li>`).join("");
     const kb = (p.kb || []).map((k) => `<li>${esc(k)}</li>`).join("");
-    return `<div class="card" data-card="${esc(item.id)}"><div class="who">✋ ${esc(p.stage_title)} xong — cần ${esc(who)} duyệt</div>
-      <div class="q">${esc(p.summary)}</div>${checks ? `<ul>${checks}</ul>` : ""}${reviewList(p.review)}${reviewAcList(p.review_acs)}${uiEvidenceList(p.ui_evidence, p.ticket)}${kb ? `<div class="who">Kiến thức AI ghi lại:</div><ul>${kb}</ul>` : ""}
+    const submit = p.phase === "submit";
+    const head = submit ? `✍️ ${esc(p.stage_title)} xong — ${esc(who)} xem rồi gửi ${esc(p.final_roles_label || "người duyệt")} duyệt` : `✋ ${esc(p.stage_title)} xong — cần ${esc(who)} duyệt`;
+    return `<div class="card" data-card="${esc(item.id)}"><div class="who">${head}</div>
+      <div class="q">${esc(p.summary)}</div>${checks ? `<ul>${checks}</ul>` : ""}${docCoreBlock(p)}${reviewList(p.review)}${reviewAcList(p.review_acs)}${uiEvidenceList(p.ui_evidence, p.ticket)}${kb ? `<div class="who">Kiến thức AI ghi lại:</div><ul>${kb}</ul>` : ""}
       ${(p.access || []).length ? `<div class="who">Duyệt kèm quyền: ${esc(p.access.join(", "))}</div>` : ""}
       <div class="composer inline"><textarea placeholder="${p.gate === "knowledge" ? "Bỏ mục sai: 'bỏ 2, 5'" : "Ghi chú khi trả lại…"}" data-text></textarea></div>
-      <div class="opts"><button class="btn good" data-approve="1">👍 ${p.gate === "knowledge" ? "Xác nhận" : "Duyệt"}</button><button class="btn bad" data-approve="0">👎 ${p.gate === "knowledge" ? "Bỏ (theo ghi chú)" : "Trả lại"}</button></div></div>`;
+      <div class="opts"><button class="btn good" data-approve="1">${submit ? "📨 Gửi duyệt" : `👍 ${p.gate === "knowledge" ? "Xác nhận" : "Duyệt"}`}</button><button class="btn bad" data-approve="0">${submit ? "✏️ Sửa tiếp" : `👎 ${p.gate === "knowledge" ? "Bỏ (theo ghi chú)" : "Trả lại"}`}</button></div></div>`;
   }
   if (item.kind === "propose_tickets") return proposalCard(item);
   if (item.kind === "env_access") {
@@ -468,6 +547,7 @@ function renderPane(key) {
     </div>
     ${steps.length ? `<div class="steps">${steps.map((s, i) => `<div class="s ${s.done ? "done" : i === cur ? "cur" : ""}">${s.done ? "☑" : i === cur ? "▶" : "☐"} ${esc(s.text)}</div>`).join("")}</div>` : ""}
     ${t.stage === "pr" || closed ? reviewList(d.stage?.review) + reviewAcList(d.stage?.review_acs) + uiEvidenceList(d.stage?.ui_evidence, t.key) : ""}
+    ${docPanel(d, t)}
     ${closed ? "" : runError(d.detail.runs)}
     <div class="timeline">${renderTimeline(timeline(key)) || `<div class="empty">Chưa có hoạt động.</div>`}</div>
     ${pending.length ? `<div class="cards">${pending.map(card).join("")}</div>` : ""}
@@ -630,6 +710,139 @@ async function pageRules() {
       <td>${r.status !== "active" ? `<button class="btn small good" data-rule-approve="${esc(r.id)}">Duyệt</button>` : ""}${r.status !== "disabled" ? `<button class="btn small" data-rule-disable="${esc(r.id)}">Tắt</button>` : ""}</td></tr>`).join("")}</table>`);
 }
 
+// ---- connections: every adapter the office knows, connected or not --------------------------------------------------
+
+const CAP_LABEL = { docs: "đọc tài liệu", tracker: "issue", wiki: "trang wiki", code_read: "đọc code", code_pr: "pull request", webhook: "webhook" };
+const HEALTH = { ok: ["good", "hoạt động"], degraded: ["warn", "chập chờn"], error: ["bad", "lỗi"], unconfigured: ["", "chưa cấu hình"] };
+
+function connectionForm(a, c) {
+  const props = a.config_schema?.properties || {};
+  const required = new Set(a.config_schema?.required || []);
+  const val = (v) => (v === undefined || v === null ? "" : typeof v === "object" ? (Array.isArray(v) && v.every((x) => typeof x !== "object") ? v.join(", ") : JSON.stringify(v)) : String(v));
+  const fields = Object.entries(props).filter(([k]) => k !== "write").map(([k, spec]) => {
+    const current = c ? c.config?.[k] : spec.default;
+    const kind = spec.type === "boolean" ? "bool" : spec.type === "array" ? "list" : spec.type === "integer" || spec.type === "number" ? "num" : spec.type === "object" || spec.$ref || spec.additionalProperties ? "json" : "text";
+    const input = kind === "bool"
+      ? `<input type="checkbox" data-cfg="${esc(k)}" data-kind="bool" ${current ? "checked" : ""}>`
+      : `<input type="text" data-cfg="${esc(k)}" data-kind="${kind}" value="${esc(val(current))}" placeholder="${kind === "list" ? "cách nhau bằng dấu phẩy" : kind === "json" ? "JSON" : ""}">`;
+    return `<label>${esc(k)}${required.has(k) ? " *" : ""}${input}</label>`;
+  }).join("");
+  const secrets = (a.secret_fields || []).map((k) => `<label>${esc(k)} (bí mật)<input type="password" data-sec="${esc(k)}" autocomplete="new-password" placeholder="${c ? "để trống = giữ nguyên" : ""}"></label>`).join("");
+  const scopes = [["office", "Cả văn phòng"], ...(state.board.teams || []).map((t) => [`team:${t.id}`, `Team ${t.name}`])];
+  return `<div class="conn-form" data-conn-form data-use="${esc(a.name)}">
+    <div class="form">
+      <label>Id *<input type="text" data-c="id" value="${esc(c?.id || "")}" ${c ? "readonly" : ""} placeholder="vd. ${esc(a.name.split("_")[0])}-main"></label>
+      <label>Phạm vi<select data-c="scope">${scopes.map(([v, l]) => `<option value="${esc(v)}" ${c?.scope === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+      ${fields}${secrets}
+      <label><span><input type="checkbox" data-c="write" ${c?.write ? "checked" : ""}> Cho phép ghi (bình luận, tạo PR, xuất bản)</span></label>
+      <label><span><input type="checkbox" data-c="enabled" ${!c || c.enabled ? "checked" : ""}> Bật</span></label>
+    </div>
+    <div class="opts"><button class="btn primary" data-conn-save>Lưu</button>${c ? `<button class="btn" data-conn-test="${esc(c.id)}">Kiểm tra</button><button class="btn bad" data-conn-remove="${esc(c.id)}">Gỡ</button>` : ""}</div>
+  </div>`;
+}
+
+async function pageConnections() {
+  const adapters = await api("/api/connections");
+  const rows = adapters.map((a) => {
+    const caps = (a.capabilities || []).map((x) => CAP_LABEL[x] || x).join(", ");
+    const conns = (a.connections || []).map((c) => {
+      const [cls, label] = HEALTH[c.health?.state] || HEALTH.unconfigured;
+      return `<details class="conn"><summary><b>${esc(c.id)}</b> <span class="chip ${cls}">${label}</span> <span class="rev">${esc(c.scope)}${c.enabled ? "" : " · đang tắt"}${c.write ? " · được ghi" : " · chỉ đọc"}${c.health?.identity ? ` · ${esc(c.health.identity)}` : ""}</span>
+        ${c.health?.detail ? `<div class="rev">${esc(c.health.detail)}</div>` : ""}</summary>${connectionForm(a, c)}</details>`;
+    }).join("");
+    return `<section class="adapter"><h3>${esc(a.title || a.name)} <span class="chip ${a.state === "connected" ? "good" : ""}">${a.state === "connected" ? "đã kết nối" : "chưa cấu hình"}</span></h3>
+      <div class="rev">${esc(caps)}${a.error ? ` · ${esc(a.error)}` : ""}</div>${conns}
+      <details class="conn"><summary>＋ Thêm kết nối ${esc(a.title || a.name)}</summary>${connectionForm(a, null)}</details></section>`;
+  }).join("");
+  sheet("Kết nối", `<p class="rev">Mọi hệ thống office biết cách nối, kể cả cái chưa dùng. Bí mật chỉ được gửi đi, không bao giờ hiện lại. Mặc định chỉ đọc.</p>${rows}`);
+}
+
+function connectionBody(form) {
+  const body = { use: form.dataset.use, config: {}, secret: {} };
+  for (const el of form.querySelectorAll("[data-c]")) body[el.dataset.c] = el.type === "checkbox" ? el.checked : el.value.trim();
+  for (const el of form.querySelectorAll("[data-cfg]")) {
+    const kind = el.dataset.kind;
+    const raw = el.type === "checkbox" ? el.checked : el.value.trim();
+    if (raw === "" && kind !== "bool") continue;
+    body.config[el.dataset.cfg] = kind === "list" ? raw.split(",").map((x) => x.trim()).filter(Boolean) : kind === "num" ? Number(raw) : kind === "json" ? JSON.parse(raw) : raw;
+  }
+  for (const el of form.querySelectorAll("[data-sec]")) if (el.value) body.secret[el.dataset.sec] = el.value;
+  if (!Object.keys(body.secret).length) delete body.secret;
+  return body;
+}
+
+// ---- service map: who reaches whom, every edge backed by a line of code ---------------------------------------------
+
+const EDGE_LABEL = { calls_http: "HTTP", publishes: "publish", subscribes: "subscribe", reads: "đọc", writes: "ghi", depends_on: "thư viện" };
+const mapState = { team: "", tables: "shared", kinds: new Set(), focus: "", data: null, overlay: null, picked: null };
+
+function mapSvg(data) {
+  const nodes = data.nodes.filter((n) => !mapState.focus || true);
+  const edges = data.edges.filter((e) => !mapState.kinds.size || mapState.kinds.has(e.kind));
+  const W = 860, H = 520, cx = W / 2, cy = H / 2, R = Math.min(cx, cy) - 70;
+  const order = [...nodes].sort((a, b) => (a.kind === "service" ? 0 : 1) - (b.kind === "service" ? 0 : 1) || a.name.localeCompare(b.name));
+  const pos = new Map(order.map((n, i) => {
+    const a = (2 * Math.PI * i) / Math.max(order.length, 1) - Math.PI / 2;
+    return [n.id, order.length === 1 ? [cx, cy] : [cx + R * Math.cos(a), cy + R * Math.sin(a)]];
+  }));
+  const touched = new Set(mapState.overlay?.services || []);
+  const lines = edges.map((e) => {
+    const [x1, y1] = pos.get(e.src) || [0, 0], [x2, y2] = pos.get(e.dst) || [0, 0];
+    const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1, pad = 34;
+    const ax = x1 + (dx / len) * pad, ay = y1 + (dy / len) * pad, bx = x2 - (dx / len) * pad, by = y2 - (dy / len) * pad;
+    const on = mapState.picked === e.id;
+    return `<g class="map-edge${on ? " on" : ""}" data-map-edge="${e.id}"><line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" ${e.confidence === "heuristic" ? 'stroke-dasharray="6 4"' : ""} marker-end="url(#arrow)"></line>
+      <line class="hit" x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}"></line>
+      <text x="${(ax + bx) / 2}" y="${(ay + by) / 2 - 5}">${esc(EDGE_LABEL[e.kind] || e.kind)}${e.count > 1 ? ` ×${e.count}` : ""}</text></g>`;
+  }).join("");
+  const dots = order.map((n) => {
+    const [x, y] = pos.get(n.id);
+    const shape = n.kind === "service" ? `<rect x="${x - 58}" y="${y - 18}" width="116" height="36" rx="8"></rect>` : n.kind === "table" ? `<ellipse cx="${x}" cy="${y}" rx="56" ry="18"></ellipse>` : `<rect x="${x - 58}" y="${y - 16}" width="116" height="32" rx="16"></rect>`;
+    return `<g class="map-node ${esc(n.kind)}${touched.has(n.name) ? " touched" : ""}" data-map-node="${esc(n.name)}">${shape}<text x="${x}" y="${y + 4}">${esc(n.name.length > 18 ? n.name.slice(0, 17) + "…" : n.name)}</text><title>${esc(n.kind)}: ${esc(n.name)}</title></g>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" class="map" role="img" aria-label="Bản đồ dịch vụ"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"></path></marker></defs>${lines}${dots}</svg>`;
+}
+
+function renderMap() {
+  const body = $(".sheet-body");
+  const d = mapState.data;
+  if (!body || !d) return;
+  const teams = state.board.teams || [];
+  const kinds = [...new Set(d.edges.map((e) => e.kind))];
+  const names = new Map(d.nodes.map((n) => [n.id, n.name]));
+  const shown = d.edges.filter((e) => !mapState.kinds.size || mapState.kinds.has(e.kind));
+  const list = shown.map((e) => `<li class="${mapState.picked === e.id ? "on" : ""}" data-map-edge="${e.id}"><b>${esc(names.get(e.src))}</b> → <b>${esc(names.get(e.dst))}</b>
+      <span class="chip">${esc(EDGE_LABEL[e.kind] || e.kind)}${e.count > 1 ? ` ×${e.count}` : ""}</span>${e.confidence === "heuristic" ? ` <span class="chip warn" title="Khớp theo tên, chưa chắc chắn">đoán</span>` : e.confidence === "declared" ? ` <span class="chip good">khai báo</span>` : ""}
+      <div class="rev">Nguồn: <code>${esc(e.cite || "—")}</code></div></li>`).join("");
+  const index = (d.index || []).map((s) => `<span class="chip ${s.state === "ready" ? "good" : s.state === "error" ? "bad" : "warn"}" title="${esc(s.error || "")}">${esc(s.repo)}: ${esc(s.state)} · ${esc(s.level)} · ${s.files} file · ${esc((s.indexed_commit || "").slice(0, 8))}</span>`).join(" ");
+  const ov = mapState.overlay;
+  body.innerHTML = `<div class="map-bar">
+      <label>Team <select data-map="team"><option value="">(không thuộc team)</option>${teams.map((t) => `<option value="${esc(t.id)}" ${mapState.team === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>
+      <label>Bảng <select data-map="tables">${[["shared", "dùng chung"], ["all", "tất cả"], ["none", "ẩn"]].map(([v, l]) => `<option value="${v}" ${mapState.tables === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+      <span>${kinds.map((k) => `<label class="inline"><input type="checkbox" data-map-kind="${esc(k)}" ${!mapState.kinds.size || mapState.kinds.has(k) ? "checked" : ""}> ${esc(EDGE_LABEL[k] || k)}</label>`).join(" ")}</span>
+      <label>Tô theo ticket <input type="text" data-map="ticket" value="${esc(ov?.ticket || "")}" placeholder="vd. AO-12" size="8"></label>
+      <button class="btn small" data-map-copy>Chép Mermaid</button>
+    </div>
+    <div class="rev">${index || "Chưa có repo nào được lập chỉ mục."}</div>
+    ${ov ? `<div class="rev">Ticket ${esc(ov.ticket)} đụng tới: ${esc(ov.services.join(", ") || "—")}${ov.endpoints.length ? ` · endpoint: ${esc(ov.endpoints.join(", "))}` : ""}${ov.tables.length ? ` · bảng: ${esc(ov.tables.join(", "))}` : ""}</div>` : ""}
+    <div class="map-wrap">${d.nodes.length ? mapSvg(d) : `<div class="empty">Chưa có service nào. Gắn thư mục code cho project của team, hoặc kết nối Bitbucket / GitHub.</div>`}
+      <ul class="map-edges">${list || `<li class="rev">Chưa thấy quan hệ nào giữa các service.</li>`}</ul></div>
+    <div class="rev">Nét đứt: quan hệ đoán theo tên. Mọi cạnh đều kèm dòng code làm bằng chứng.</div>`;
+}
+
+async function loadMap() {
+  const q = new URLSearchParams({ team: mapState.team, tables: mapState.tables });
+  mapState.data = await api(`/api/map?${q}`);
+  mapState.picked = null;
+  renderMap();
+}
+
+async function pageMap() {
+  if (!mapState.team) mapState.team = (state.board.teams || [])[0]?.id || "";
+  sheet("Bản đồ dịch vụ", `<div class="empty">Đang lập chỉ mục và dựng bản đồ…</div>`);
+  await loadMap();
+}
+
 async function pageKb() {
   const items = await api("/api/kb");
   sheet("Kiến thức của team", `<table class="list"><tr><th>#</th><th>Loại</th><th>Tiêu đề · nội dung</th><th>Trạng thái</th><th></th></tr>
@@ -781,7 +994,7 @@ document.addEventListener("click", (e) => {
   if (t.hasAttribute("data-group")) { t.classList.toggle("open"); return; }
   if (ds.closeSheet !== undefined) { closeSheet(); return; }
   if (ds.new !== undefined) return act(pageNewTask);
-  if (ds.page) return act({ inbox: pageInbox, rules: pageRules, kb: pageKb, people: pagePeople, setup: pageSetup }[ds.page]);
+  if (ds.page) return act({ inbox: pageInbox, rules: pageRules, kb: pageKb, people: pagePeople, setup: pageSetup, connections: pageConnections, map: pageMap }[ds.page]);
   if (t.dataset.ruleDel) return act(async () => {
     const s = await api("/api/setup");
     const proj = s.projects.find((x) => x.id === t.dataset.ruleDel);
@@ -812,6 +1025,30 @@ document.addEventListener("click", (e) => {
     return act(async () => { await api(`/api/tickets/${key}/merge/start`, { method: "POST" }); toast("Đang merge, kết quả sẽ hiện ở timeline"); await refresh(key); });
   }
   if (ds.reopen !== undefined && key) { pageReopen(key); return; }
+  if (ds.openTicket) return openTicket(ds.openTicket);
+  if (ds.connSave !== undefined) return act(async () => {
+    const saved = await api("/api/connections", { method: "POST", body: connectionBody(t.closest("[data-conn-form]")) });
+    const health = await api(`/api/connections/${encodeURIComponent(saved.id)}/test`, { method: "POST" });
+    toast(`Đã lưu ${saved.id}: ${(HEALTH[health.state] || HEALTH.unconfigured)[1]}${health.detail ? ` — ${health.detail}` : ""}`, health.state === "error");
+    await pageConnections();
+  });
+  if (ds.connTest) return act(async () => {
+    const health = await api(`/api/connections/${encodeURIComponent(ds.connTest)}/test`, { method: "POST" });
+    toast(`${ds.connTest}: ${(HEALTH[health.state] || HEALTH.unconfigured)[1]}${health.detail ? ` — ${health.detail}` : ""}`, health.state === "error");
+    await pageConnections();
+  });
+  if (ds.connRemove) {
+    if (!confirm(`Gỡ kết nối ${ds.connRemove}? Tài liệu đã lấy qua nó cũng bị xoá.`)) return;
+    return act(async () => { await api(`/api/connections/${encodeURIComponent(ds.connRemove)}`, { method: "DELETE" }); await pageConnections(); });
+  }
+  const mapEdge = t.closest("[data-map-edge]");
+  if (mapEdge) { mapState.picked = Number(mapEdge.dataset.mapEdge); return renderMap(); }
+  if (ds.mapCopy !== undefined) return act(async () => { await navigator.clipboard.writeText(mapState.data?.mermaid || ""); toast("Đã chép Mermaid"); });
+  if (ds.grow !== undefined && key) {
+    const text = prompt("Bổ sung gì vào epic? (yêu cầu mới, link tài liệu…)");
+    if (!text || !text.trim()) return;
+    return act(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: "grow", text: text.trim() } }); toast("Đã bổ sung: AI phân tích phần mới"); await refresh(key); });
+  }
   if (ds.cmd && key) return act(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: ds.cmd } }); await refresh(key); });
   if (ds.send !== undefined && key) {
     const box = $("[data-steer]", pane);
@@ -826,7 +1063,11 @@ document.addEventListener("click", (e) => {
     if (ds.answer !== undefined) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { answer: ds.answer } }); await refresh(key); });
     if (ds.answerText !== undefined && note) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { answer: note } }); await refresh(key); });
     if (ds.remember) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: true, remember: ds.remember } }); toast("Đã ghi nhớ: lần sau không hỏi lại"); await refresh(key); });
-    if (ds.approve !== undefined) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: ds.approve === "1", note: note || undefined } }); await refresh(key); });
+    if (ds.approve !== undefined) return act(async () => {
+      const extra = ds.approve === "1" && c.querySelector("[data-doccore]") ? docCoreAnswer(c) : {};
+      await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: ds.approve === "1", note: note || undefined, ...extra } });
+      await refresh(key);
+    });
     if (ds.proposeCreate !== undefined) return act(async () => {
       const items = (state.drafts[id] || []).map((d) => ({ ...d, title: d.title.trim(), project_id: d.project_id || null }));
       const r = await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: true, items } });
@@ -954,6 +1195,21 @@ function connect() {
   };
   ws.onclose = () => setTimeout(connect, 2000);
 }
+
+// The service map's filters (selects, checkboxes, the ticket to highlight).
+document.addEventListener("change", (e) => {
+  const el = e.target;
+  if (el.dataset?.map === "team" || el.dataset?.map === "tables") { mapState[el.dataset.map] = el.value; return act(loadMap); }
+  if (el.dataset?.mapKind) {
+    const all = [...document.querySelectorAll("[data-map-kind]")];
+    mapState.kinds = all.every((x) => x.checked) ? new Set() : new Set(all.filter((x) => x.checked).map((x) => x.dataset.mapKind));
+    return renderMap();
+  }
+  if (el.dataset?.map === "ticket") return act(async () => {
+    mapState.overlay = el.value.trim() ? await api(`/api/map/overlay?ticket=${encodeURIComponent(el.value.trim())}`) : null;
+    renderMap();
+  });
+});
 
 (async () => {
   await act(loadBoard);

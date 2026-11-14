@@ -35,7 +35,7 @@ from actoroffice.domain.org import ActorStatus, PermissionMode, Position, Positi
 from actoroffice.domain.run import RunStatus
 from actoroffice.domain.work import Priority, ProjectAccess, TicketStatus
 
-from . import team_api
+from . import intel_api, team_api
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "ao_session"
@@ -88,7 +88,10 @@ class Answer(BaseModel):
     access: str | None = None  # approving project access: "worktree" or "direct"
     note: str | None = None  # a stage gate sent back (or knowledge items dropped: "bỏ 2, 5")
     items: list[dict[str, Any]] | None = None  # proposed tickets: the person's choices and edits per item (SI-24)
-    drop: list[int] | None = None  # proposed tickets: item numbers left out
+    drop: list[int | str] | None = None  # proposed tickets: item numbers left out; a breakdown: task ids left out ("T-3")
+    flows: dict[str, str] | None = None  # a breakdown: the flow of each task ("T-1": "task-spec")
+    assign: dict[str, str] | None = None  # a breakdown: who each task is handed to ("T-1": user id)
+    accept: dict[str, str] | None = None  # a document gate: findings accepted as they are (finding id → reason)
 
 
 class NewTicket(BaseModel):
@@ -206,6 +209,7 @@ def create_app(office: Office, token: str) -> FastAPI:
     team_api.register(app, office)
     team_api.register_rules(app, office)
     team_api.register_setup(app, office)
+    intel_api.register(app, office)
 
     def authed(request: Request) -> bool:
         return secrets.compare_digest(request.cookies.get(COOKIE, ""), token)

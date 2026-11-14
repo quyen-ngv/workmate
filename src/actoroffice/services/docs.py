@@ -204,10 +204,27 @@ class DocService:
             try:
                 other = await office.tickets.get(src.ref)
             except (NotFound, OfficeError):
-                return None  # not an office ticket: an issue of an outside tracker
+                return await self._outside(ticket, src)  # not an office ticket: an issue of an outside tracker
             text = f"{other.title}\n\n{other.description}"
             return {"provider": "office_ticket", "category": "docs", "ref": other.key, "version": other.updated_at, "hash": content_hash(text), "excerpt": text[:EXCERPT_LIMIT]}
+        if src.kind == "url":
+            return await self._outside(ticket, src)
         return None
+
+    async def _outside(self, ticket: Ticket, src: SourceRef) -> dict[str, Any] | None:
+        """A source in a connected system (an issue, a wiki page). None when nothing connected knows it: a document
+        the office cannot open is not held against the author."""
+        from actoroffice.ports.connection import ConnectorError
+
+        if not await self.office.sourcehub.recognize(ticket, src.ref):
+            return None  # nothing connected knows this kind of reference
+        try:
+            got = await self.office.sourcehub.get(ticket, src.ref)
+        except ConnectorError as exc:
+            if exc.kind in ("unconfigured", "network", "rate_limited", "auth"):
+                return None  # cannot be checked right now: not the author's fault
+            return {"error": str(exc)}  # the system knows the reference and says it is not there, or not allowed
+        return {"provider": got.use, "category": "docs", "ref": got.ref.ref, "version": got.content.version, "hash": got.content_hash, "excerpt": got.content.text[:EXCERPT_LIMIT]}
 
     async def evidence(self, ticket: Ticket, ds: DocSet) -> list[Evidence]:
         """One record per source line of the ticket's own documents: pinned the first time this revision is seen,
@@ -310,6 +327,14 @@ class DocService:
             for key, doc in ds.own.items()
         }
 
+    async def all_findings(self, ticket: Ticket, stage: StageDef) -> list[Finding]:
+        """The findings of the rules and of the AI cross-check of the ticket's current stage."""
+        return await self.check(ticket, stage) + await self.office.crosscheck.findings(ticket)
+
+    async def blocking(self, ticket: Ticket, stage: StageDef) -> list[Finding]:
+        """What stops an approval: an error that is neither fixed nor accepted."""
+        return [f for f in await self.all_findings(ticket, stage) if f.status == "open" and f.severity == "error"]
+
     # ---- accepting a finding ---------------------------------------------------------------------------------
 
     async def accept(self, ticket: Ticket, finding_id: str, *, by: str, reason: str) -> Finding:
@@ -320,7 +345,7 @@ class DocService:
             raise DocError("Cần lý do khi chấp nhận một điểm lệch")
         office = self.office
         stage = await office.stages.stage_def(ticket)
-        finding = next((f for f in await self.check(ticket, stage) if f.id == finding_id), None)
+        finding = next((f for f in await self.all_findings(ticket, stage) if f.id == finding_id or f.id.startswith(finding_id)), None)
         if finding is None:
             raise NotFound(f"Không có phát hiện {finding_id} ở giai đoạn này của {ticket.key}")
         policy = await office.teams.gate_policy(ticket, stage.gate) if stage.gate else None
@@ -346,6 +371,8 @@ class DocService:
         keys = self.output_keys(ticket, stage, ds)
         findings = await self.check(ticket, stage)
         states = await self.states(ticket, findings)
+        cross = await self.office.crosscheck.findings(ticket)
+        findings = findings + cross
         baselines = await self._baselines(ticket, ds)
         evidence = await self.evidence(ticket, ds)
         trace, assumptions, changes, tasks = [], [], [], []
@@ -367,8 +394,49 @@ class DocService:
             "declared_changes": changes,
             "accepted": [f.model_dump() for f in findings if f.status == "accepted"],
             "warnings": [f.model_dump() for f in findings if f.status == "open" and f.severity != "error"],
+            # differences the AI cross-check still sees: each one is fixed, or accepted here with a reason
+            "open": [f.model_dump() for f in findings if f.status == "open" and f.severity == "error"],
             "baseline": {ds.own[k].key: baselines[k].docs for k in sorted(keys) if k in baselines},
             "tasks": tasks,
+        }
+
+    async def panel(self, ticket: Ticket) -> dict[str, Any] | None:
+        """What the ticket page shows about its documents: the state of each, what is still open, its parent epic and
+        its child tasks with their own states. None for a ticket that is not in a pack flow."""
+        if not self.applies(ticket):
+            return None
+        office = self.office
+        stage = await office.stages.stage_def(ticket) if ticket.stage else None
+        findings = await self.check(ticket)
+        if stage is not None:
+            findings += await office.crosscheck.findings(ticket)
+        states = await self.states(ticket, findings)
+        docs = []
+        for doc in await office.tickets.list_documents(ticket.id):
+            if doc.key not in states:
+                continue
+            state = states[doc.key]
+            docs.append({"key": doc.key, "revision": doc.revision, "approved_revision": doc.approved_revision, "state": state.value, "label": MATCH_STATE_VI.get(state, state.value)})
+        children = []
+        for row in await office.db.fetchall("SELECT id FROM tickets WHERE parent_id = ? ORDER BY id", (ticket.id,)):
+            child = await office.tickets.get(int(row["id"]))
+            people = [m.user.name for m in await office.teams.participants(child.id) if "dev" in m.roles]
+            children.append({
+                "key": child.key, "title": child.title, "status": child.status.value, "stage": child.stage, "template": child.stage_template, "assigned": people,
+                "docs": [{"key": k, "state": v.value, "label": MATCH_STATE_VI.get(v, v.value)} for k, v in (await self.states(child)).items()] if self.applies(child) else [],
+            })  # fmt: skip
+        parent = None
+        if ticket.parent_id is not None:
+            up = await office.tickets.get(ticket.parent_id)
+            parent = {"key": up.key, "title": up.title}
+        return {
+            "docs": docs,
+            "open": [f.model_dump() for f in findings if f.status == "open" and f.severity == "error"],
+            "warnings": [f.model_dump() for f in findings if f.status == "open" and f.severity != "error"],
+            "accepted": [f.model_dump() for f in findings if f.status == "accepted"],
+            "children": children,
+            "parent": parent,
+            "is_epic": spawn_of(ticket.stage_template, "breakdown") is not None,
         }
 
     # ---- a breakdown becomes tickets -------------------------------------------------------------------------
@@ -433,6 +501,116 @@ class DocService:
             "SELECT key FROM tickets WHERE parent_id = ? AND status NOT IN (?, ?) ORDER BY id", (ticket.id, TicketStatus.DONE.value, TicketStatus.CANCELLED.value)
         )
         return [str(r["key"]) for r in rows]
+
+    # ---- after approval: the world moves on ------------------------------------------------------------------
+
+    async def react(self, ticket: Ticket) -> list[dict[str, Any]]:
+        """An approved document that no longer matches: what it was written from has a newer approved revision that
+        changes an item it traces to ("lệch"), or the code it cites changed ("cũ"). The pack's `on_change` says what
+        happens; each cause is acted on once. Returns what was done."""
+        office = self.office
+        if not self.applies(ticket) or ticket.status == TicketStatus.CANCELLED:
+            return []
+        approved_docs = [d for d in await office.tickets.list_documents(ticket.id) if self.doctype_of(d.key) and d.approved_revision == d.revision]
+        if not approved_docs:
+            return []  # nothing approved, or the author is already working on a newer revision
+        ds = await self.docset(ticket)
+        baselines = await self._baselines(ticket, ds)
+        approved = await self._approved(ds, baselines)
+        evidence = await self.evidence(ticket, ds)
+        findings = run_rules(self.pack, ds.docs, evidence, baselines, approved, only_docs=set(ds.own))
+        tpl = await office.teams.template(ticket)
+        done: list[dict[str, Any]] = []
+        for doc in approved_docs:
+            key = self.core_key(ticket, doc.key)
+            state = match_state(self.pack, key, ds.docs[key], [f for f in findings if f.doc == key], baselines.get(key), approved, [e for e in evidence if e.doc == key])
+            if state == MatchState.LECH:
+                kind, action = "lech", self.pack.on_change.upstream_changed.get("when_item_affected", "revise")
+                cause = ",".join(f"{k}@{approved[k].revision}" for k in sorted(baselines[key].docs) if k in approved)
+                detail = "; ".join(f.message for f in findings if f.doc == key and f.rule == "R-BASELINE")[:900]
+                what = f"tài liệu nó dựa trên đã có bản duyệt mới. {detail}"
+            elif state == MatchState.CU:
+                kind, action = "cu", self.pack.on_change.evidence_stale.get("after_approval", "notify_author")
+                stale = [e for e in evidence if e.doc == key and e.current_hash and e.current_hash != e.content_hash]
+                cause = content_hash("|".join(sorted(f"{e.item}:{e.source}:{e.current_hash}" for e in stale)))[:16]
+                what = "code được trích đã đổi ở " + ", ".join(sorted({f"{e.item} ({e.source})" for e in stale}))[:900]
+            else:
+                continue
+            if action == "ignore":
+                continue
+            fresh = await office.db.execute(
+                "INSERT OR IGNORE INTO doc_notices(ticket_id, doc_key, kind, cause, action, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (ticket.id, doc.key, kind, cause, action, utcnow()),
+            )
+            if not fresh.rowcount:
+                continue  # already announced for this very cause
+            label = MATCH_STATE_VI.get(state, state.value)
+            stage = next((s.id for s in (tpl.stages if tpl else []) if doc.key in {o for out in s.outputs for o in out.split("|")}), None)
+            if action in ("revise", "reopen_gate") and stage is not None:
+                await office.stages.reopen(ticket.id, stage, reason=f"Tài liệu `{doc.key}` đã {label}: {what}", by="office")
+            else:
+                await office.tickets.add_comment(
+                    ticket.id, f"⚠️ Tài liệu `{doc.key}` (bản {doc.revision}, đã duyệt) hiện {label}: {what}. Xem lại và cập nhật nếu cần.", author_kind="system", author_id=None
+                )
+                action = "notify_author"
+            office.bus.publish("doc.state", ticket_id=ticket.id, key=doc.key, state=state.value, action=action)
+            done.append({"ticket": ticket.key, "doc": doc.key, "state": state.value, "action": action})
+        return done
+
+    async def sweep(self, *, around: Ticket | None = None) -> list[dict[str, Any]]:
+        """React on every ticket of a pack flow that has an approved document (or only on `around`, its parent and its
+        children: right after an approval). The timer runs the full sweep to notice code that changed."""
+        office = self.office
+        if around is not None:
+            ids = {around.id} | {int(r["id"]) for r in await office.db.fetchall("SELECT id FROM tickets WHERE parent_id = ?", (around.id,))}
+            if around.parent_id is not None:
+                ids.add(around.parent_id)
+        else:
+            rows = await office.db.fetchall(
+                "SELECT DISTINCT t.id FROM tickets t JOIN documents d ON d.ticket_id = t.id WHERE d.approved_revision IS NOT NULL AND t.status <> ?",
+                (TicketStatus.CANCELLED.value,),
+            )
+            ids = {int(r["id"]) for r in rows}
+        done: list[dict[str, Any]] = []
+        for ticket_id in sorted(ids):
+            try:
+                done += await self.react(await office.tickets.get(ticket_id))
+            except OfficeError:
+                continue
+        return done
+
+    async def run_forever(self, every_s: float) -> None:
+        import asyncio
+        import logging
+
+        while True:
+            await asyncio.sleep(every_s)
+            try:
+                await self.sweep()
+            except Exception:  # a sweep that breaks must not stop the next one
+                logging.getLogger(__name__).exception("doc sweep failed")
+
+    async def epic_grew(self, ticket: Ticket, note: str, *, by: str) -> Ticket:
+        """The BA adds to an epic that is already past its analysis: the addition is recorded on the ticket and the
+        epic goes back to `analyze`, where only what is new is analysed (ids already given never change). The tasks
+        that exist stay; the next approved breakdown creates only the new ones."""
+        note = note.strip()
+        if not note:
+            raise DocError("Cần nội dung bổ sung")
+        office = self.office
+        tpl = await office.teams.template(ticket)
+        if not self.applies(ticket) or tpl is None or not tpl.stages or spawn_of(ticket.stage_template, "breakdown") is None:
+            raise DocError(f"{ticket.key} không phải epic")
+        first = tpl.stages[0].id
+        name = (await office.teams.find_user(by)).name if await office.teams.find_user(by) else by
+        description = f"{ticket.description.rstrip()}\n\n## Bổ sung {utcnow()[:10]} ({name})\n{note}"
+        async with office.db.tx() as tx:
+            await tx.execute("UPDATE tickets SET description = ?, updated_at = ? WHERE id = ?", (description, utcnow(), ticket.id))
+        await office.sources.sync(ticket.id)
+        if ticket.stage == first:
+            await office.tickets.add_comment(ticket.id, f"➕ {name} bổ sung epic: {note[:500]}", author_kind="change", author_id=by)
+            return await office.tickets.get(ticket.id)
+        return await office.stages.reopen(ticket.id, first, reason=f"{name} bổ sung epic: {note[:500]}", by=by)
 
     # ---- hooks -----------------------------------------------------------------------------------------------
 

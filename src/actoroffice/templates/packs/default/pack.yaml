@@ -83,6 +83,9 @@ flows:
         system works today is one `F-n` with a `Nguồn:` line pointing at the code or document that shows it; what is
         unclear is a `Q-n` (ask the BA with ask_human, then record `Trả lời:`); what you assume is an `A-n`.
         Do not design and do not propose tasks yet.
+        If the document `analysis` already exists the epic has grown: extend it. Keep every id already given, add the
+        new requirements and facts with the next numbers, strike what no longer holds (~~REQ-2~~ with the reason),
+        raise `Phiên bản` and add a Change log row. Never renumber.
         Every document follows its template: read it first with doc_template(<type>). Keep every heading.
         Machine-read lines, written directly under an item: `Truy vết: <ids>` (ids of other documents are written
         `<TICKET>/<id>`, e.g. `AO-12/REQ-2`), `Nguồn: <repo:path:start-end | ticket key | URL>`, `Thay đổi: F-n`,
@@ -102,6 +105,9 @@ flows:
         works today names that fact with `Thay đổi: <this ticket key>/F-n`. Every REQ of the analysis must be covered
         by at least one AC, BR or T, or be listed under "Ngoài phạm vi" with the reason.
         Do not design. When the BA approves, each T becomes a ticket with its spec and is handed to a developer.
+        If `breakdown` already exists the epic has grown: keep every T and its spec as they are unless a requirement
+        they trace to changed, and add the new tasks with the next numbers. Tasks that are already tickets are not
+        created again.
         Every document follows its template: read it first with doc_template(<type>). Keep every heading.
         Machine-read lines, written directly under an item: `Truy vết: <ids>` (ids of other documents are written
         `<TICKET>/<id>`, e.g. `AO-12/REQ-2`), `Nguồn: <repo:path:start-end | ticket key | URL>`, `Thay đổi: F-n`,

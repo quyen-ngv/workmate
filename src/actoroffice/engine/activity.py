@@ -19,10 +19,10 @@ from pydantic import BaseModel, Field
 
 from .failures import retry_title
 
-READ_TOOLS = {"Read", "NotebookRead", "list_dir", "doc_get", "ticket_get", "skill_read", "stage_info", "jira_issue", "wiki_page", "code_read", "code_outline", "code_symbol"}
+READ_TOOLS = {"Read", "NotebookRead", "list_dir", "doc_get", "ticket_get", "skill_read", "stage_info", "jira_issue", "wiki_page", "code_read", "code_outline", "code_symbol", "source_get"}
 SEARCH_TOOLS = {
     "Grep", "Glob", "history_search", "memory_search", "kb_search", "rule_search", "WebSearch", "tickets_list",
-    "code_search", "code_refs", "code_impact", "code_pack", "service_map", "repo_list",
+    "code_search", "code_refs", "code_impact", "code_pack", "service_map", "repo_list", "source_search",
 }  # fmt: skip
 SOURCE_TOOLS = {"WebFetch", "db_query", "db_schema", "logs_search", "logs_errors", "logs_cluster", "logs_trace", "kafka_peek", "mq_peek", "redis_scan"}
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}

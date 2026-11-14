@@ -76,6 +76,7 @@ SHELL_TOOLS = {"Bash", "PowerShell"}
 WEB_TOOLS = {"WebFetch", "WebSearch"}
 HARMLESS_TOOLS = {"TodoWrite", "Skill", "Agent", "Task", "ToolSearch"}
 INTERNAL_MCP_PREFIX = "mcp__office__"
+UNTRUSTED_OFFICE_TOOLS = {"source_get", "source_search"}
 OFFICE_PREFIXES = (INTERNAL_MCP_PREFIX, "@office/")  # Claude names our tools mcp__office__x, Kiro @office/x
 
 
@@ -174,8 +175,9 @@ class PolicyEngine:
         if tool in HARMLESS_TOOLS:
             return Verdict(Decision.ALLOW, Risk.READ)
         if office_tool(tool) is not None:
-            # Our own tools enforce their own rules (ticket ownership, ask_user, …).
-            return Verdict(Decision.ALLOW, Risk.READ)
+            # Our own tools enforce their own rules (ticket ownership, ask_user, …). The ones that bring in a document
+            # of an outside system taint the session: what it says is data, and acting outside afterwards asks first.
+            return Verdict(Decision.ALLOW, Risk.READ, taints=office_tool(tool) in UNTRUSTED_OFFICE_TOOLS)
         if tool in READ_TOOLS:
             return self._file_access(tool, args, ctx, write=False)
         if tool in WRITE_TOOLS:

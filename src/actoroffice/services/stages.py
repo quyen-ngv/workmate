@@ -401,7 +401,10 @@ class StageService:
                 author_kind="system", author_id=None,
             )  # fmt: skip
         docs = []
-        for key in [o for out in stage.outputs for o in out.split("|")]:
+        keys = [o for out in stage.outputs for o in out.split("|")]
+        if "breakdown" in keys and "doc_rules" in stage.checks:  # the spec of every task is approved with the breakdown
+            keys += sorted(d.key for d in await office.tickets.list_documents(ticket.id) if d.key.startswith("spec."))
+        for key in keys:
             doc = await office.tickets.get_document(ticket.id, key)
             if doc is not None:
                 docs.append({"key": doc.key, "revision": doc.revision})
@@ -478,6 +481,14 @@ class StageService:
 
             asyncio.get_running_loop().create_task(safe_publish(office, ticket.id))
             return resolved
+        if approved and "doc_core" in item.payload:
+            # A difference between documents is fixed or owned by an approver: accept (with a reason) or send back.
+            for finding_id, reason in (response.get("accept") or {}).items():
+                await office.docs.accept(ticket, str(finding_id), by=by, reason=str(reason))
+            left = await office.docs.blocking(ticket, await self.stage_def(ticket))
+            if left:
+                listed = "; ".join(f"[{f.id[:8]}] {f.rule} {f.item or f.doc}" for f in left[:6])
+                raise StageError(f"Còn {len(left)} điểm lệch chưa xử lý ({listed}). Chấp nhận từng điểm kèm lý do, hoặc từ chối để làm lại.")
         if approved:
             approvals = [a for a in item.payload.get("approvals", []) if a.get("by") != by] + [{"by": by, "name": name, "at": utcnow()}]
             if len(approvals) < int(item.payload.get("min") or 1):
@@ -510,6 +521,8 @@ class StageService:
                 if granted:
                     await office.tickets.add_comment(ticket.id, f"🔑 Cấp quyền cùng plan: {', '.join(granted)}", author_kind="system", author_id=None)
             await self.advance(ticket.id, by=by)
+            if "doc_core" in item.payload:  # documents written from the ones just approved may no longer match
+                await office.docs.sweep(around=await office.tickets.get(ticket.id))
             if created:  # the epic waits for its tasks; closing the last one wakes it
                 await self._set_status(ticket.id, S.BLOCKED, run_id=None, comment=f"Chờ {len(created)} task con: {', '.join(c.key for c in created)}.")
                 await self._publish(ticket.id)

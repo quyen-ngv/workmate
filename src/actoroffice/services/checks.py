@@ -934,6 +934,10 @@ async def check_doc_rules(ctx: CheckContext) -> CheckResult:
     return CheckResult(id="doc_rules", status="passed", summary=note, data=data)
 
 
+async def check_crosscheck_clean(ctx: CheckContext) -> CheckResult:
+    return await ctx.office.crosscheck.check(ctx)
+
+
 async def check_sources_read(ctx: CheckContext) -> CheckResult:
     """Every source the ticket names that the AI must read was read (run activity), skipped with a reason, or
     could not be read (SI-39). External URLs and other teams' tickets are not required."""
@@ -958,6 +962,7 @@ BUILTIN.update(
     {
         "sources_read": check_sources_read,
         "doc_rules": check_doc_rules,
+        "crosscheck_clean": check_crosscheck_clean,
         "kb_noted": check_kb_noted,
         "ac_coverage": check_ac_coverage,
         "ui_evidence": check_ui_evidence,

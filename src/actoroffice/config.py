@@ -34,6 +34,10 @@ class Settings(BaseModel):
     stall_after_s: float = 900  # watchdog: a run with no event for this long is stalled (stages not listed below)
     stall_after_s_by_stage: dict[str, float] = {"understand": 600, "build": 900}
     slow_command_s: float = 300  # watchdog: one command running longer than this is reported as slow
+    # The standard pack of documents (Doc Core): a folder with pack.yaml, or a name under <data_dir>/packs/. None =
+    # the built-in pack. A unit's pack usually says `extends: default` and changes only what differs.
+    doc_pack: str | None = None
+    doc_sweep_s: float = 600  # how often approved documents are compared with the code they cite (0 = off)
     ai_review: bool = True  # an independent reviewer session reads the diff before a build stage finishes
     environment: dict = {}  # what this machine can run (written by `actoroffice doctor` / init)
 
@@ -49,6 +53,13 @@ class Settings(BaseModel):
     def runs_dir(self) -> Path:
         """Large run outputs (diffs, command output, check logs) referenced from run events."""
         return self.data_dir / "runs"
+
+    @property
+    def doc_pack_path(self) -> Path | None:
+        if not self.doc_pack:
+            return None
+        direct = Path(self.doc_pack).expanduser()
+        return direct if direct.is_absolute() or direct.exists() else self.data_dir / "packs" / self.doc_pack
 
     @property
     def config_path(self) -> Path:

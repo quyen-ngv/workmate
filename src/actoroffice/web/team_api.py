@@ -15,6 +15,7 @@ from actoroffice.domain.errors import NotFound
 from actoroffice.domain.stage import TEMPLATE_TITLES, default_templates
 from actoroffice.domain.team import LOCAL_OWNER_ID, TeamSettings
 from actoroffice.domain.work import TicketStatus
+from actoroffice.services.docflow import pack_templates
 from actoroffice.services.stages import stage_title
 
 
@@ -82,7 +83,7 @@ def register(app: FastAPI, office: Office) -> None:
         result = []
         for team in await teams.list_teams():
             result.append({**team.model_dump(), "members": [m.model_dump() for m in await teams.members(team.id)]})
-        return {"teams": result, "users": [u.model_dump() for u in await teams.list_users()], "templates": list(default_templates()), "template_titles": TEMPLATE_TITLES}
+        return {"teams": result, "users": [u.model_dump() for u in await teams.list_users()], "templates": [*default_templates(), *pack_templates()], "template_titles": TEMPLATE_TITLES}
 
     @app.post("/api/people")
     async def add_person(body: PersonBody) -> dict[str, Any]:
@@ -236,6 +237,7 @@ def register(app: FastAPI, office: Office) -> None:
             "review_acs": await office.stages.review_acs(ticket.id),
             "ui_evidence": await office.stages.ui_evidence(ticket.id),
             "merge": await office.merges.panel(ticket.key) if ticket.stage == "pr" else {"available": False},
+            "docs": await office.docs.panel(ticket),
         }
 
     @app.post("/api/tickets/{key}/merge/start")
@@ -318,6 +320,11 @@ def register(app: FastAPI, office: Office) -> None:
             ticket = await stages.switch_template(key, target, reason=body.text or f"người chọn quy trình {label}", by=by)
         elif cmd == "approved_script":
             ticket = await stages.external_passed(key, "script", by=by, note=body.text or "đã duyệt")
+        elif cmd == "grow":
+            ticket = await office.docs.epic_grew(await office.tickets.get(key), body.text, by=by)
+        elif cmd == "accept":  # text = the reason, stage = the finding id
+            ticket = await office.tickets.get(key)
+            await office.docs.accept(ticket, body.stage.strip(), by=by, reason=body.text)
         elif cmd == "reopen":
             current = await office.tickets.get(key)
             if current.status not in CLOSED:

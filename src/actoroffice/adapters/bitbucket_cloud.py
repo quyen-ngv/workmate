@@ -24,18 +24,23 @@ MAX_PAGES = 50
 _NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 _PR_PATH_RE = re.compile(r"^/([^/]+)/([^/]+)/pull-requests/(\d+)(?:/|$)")
 
-# ---- NEEDS CHECKING against Atlassian's current documentation (spec V-1, V-4): one place for each guess.
+# ---- Checked on 2026-11-14 against the Bitbucket Cloud REST API 2.0 reference (developer.atlassian.com/cloud/bitbucket/rest),
+# its OpenAPI document, and support.atlassian.com/bitbucket-cloud/docs: using-api-tokens, api-token-permissions,
+# manage-webhooks, event-payloads (spec V-1, V-4).
 API_BASE = "https://api.bitbucket.org/2.0"
-REQUIRED_SCOPES: dict[Capability, list[str]] = {
+REQUIRED_SCOPES: dict[Capability, list[str]] = {  # scopes of an API token; cloning over HTTPS needs read:repository too
     Capability.CODE_READ: ["read:repository:bitbucket"],
-    Capability.CODE_PR: ["read:pullrequest:bitbucket", "write:pullrequest:bitbucket"],  # write only when creating or replying
+    # write only when creating a pull request; commenting on one needs read alone
+    Capability.CODE_PR: ["read:pullrequest:bitbucket", "write:pullrequest:bitbucket"],
     Capability.WEBHOOK: [],
 }
 GIT_USERNAME = "x-bitbucket-api-token-auth"  # user name git sends with an Atlassian API token over HTTPS
-SIGNATURE_HEADER = "x-hub-signature"  # "sha256=<hex HMAC-SHA256 of the body with the webhook secret>"
+# "sha256=<hex HMAC-SHA256 of the body, verbatim, with the webhook secret>"; sent only by a webhook that has a secret
+SIGNATURE_HEADER = "x-hub-signature"
 EVENT_HEADER = "x-event-key"
-SCOPES_HEADER = "x-oauth-scopes"  # sent by Bitbucket for some token types; absent means "unknown"
+SCOPES_HEADER = "x-oauth-scopes"  # not in the reference for API tokens; when Bitbucket does not send it the scopes are "unknown"
 TREE_MAX_DEPTH = 30  # `max_depth` of the source listing; the listing has no blob hash, so TreeEntry.blob_sha is ""
+HEALTH_PAGELEN = 10  # the smallest page the reference allows
 PR_EVENTS = {
     "pullrequest:created": "pr_opened",
     "pullrequest:updated": "pr_updated",
@@ -100,7 +105,7 @@ class BitbucketCloud:
         if self.http.blocked is not None:
             return Health(state="unconfigured", checked_at=now_iso(), detail=str(self.http.blocked))
         try:
-            response = await self.http.request("GET", f"/repositories/{self.config.workspace}", params={"pagelen": 1})
+            response = await self.http.request("GET", f"/repositories/{self.config.workspace}", params={"pagelen": HEALTH_PAGELEN})
         except ConnectorError as exc:
             return Health(state="error", checked_at=now_iso(), detail=str(exc))
         scopes = [s.strip() for s in response.headers.get(SCOPES_HEADER, "").split(",") if s.strip()]
@@ -164,6 +169,7 @@ class BitbucketCloud:
         return [TreeEntry(path=str(e.get("path") or ""), blob_sha="", size=int(e.get("size") or 0)) for e in entries if e.get("type") == "commit_file"]
 
     async def file(self, repo: RepoRef, path: str, at: str) -> bytes:
+        """The raw bytes of a file. A file kept in LFS is answered with a redirect to another host, which is refused."""
         response = await self.http.request("GET", self._path(repo, f"/src/{quote(at, safe='')}/{_safe_path(path)}"))
         return response.content
 
@@ -267,8 +273,10 @@ class BitbucketCloud:
         event = lowered.get(EVENT_HEADER, "")
         repo = str((payload.get("repository") or {}).get("full_name") or "")
         if event == "repo:push":
-            new = next((c["new"] for c in (payload.get("push") or {}).get("changes") or [] if c.get("new")), None)
-            if new is None or new.get("type") not in (None, "branch"):
+            # One push can move several references; `new` is null for a deleted one. The first branch is the one reported.
+            after = [c.get("new") or {} for c in (payload.get("push") or {}).get("changes") or []]
+            new = next((n for n in after if n and n.get("type") in (None, "branch")), None)
+            if new is None:
                 return WebhookEvent(kind="other", repo=repo, raw=payload)
             return WebhookEvent(kind="push", repo=repo, ref=str(new.get("name") or ""), commit=str((new.get("target") or {}).get("hash") or ""), raw=payload)
         if event in PR_EVENTS:

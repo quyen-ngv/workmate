@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -70,6 +71,17 @@ def _retry_after(response: httpx.Response) -> float | None:
         return None
 
 
+def _quota_used_up(response: httpx.Response) -> bool:
+    return response.headers.get("x-ratelimit-remaining", "").strip() == "0"
+
+
+def _reset_after(response: httpx.Response, now: float) -> float | None:
+    """Seconds until `x-ratelimit-reset` when the quota is used up. GitHub sends UTC epoch seconds there and often no
+    Retry-After. Atlassian sends an ISO time, always beside a Retry-After: anything that is not a whole number is ignored."""
+    value = response.headers.get("x-ratelimit-reset", "").strip()
+    return max(0.0, float(value) - now) if _quota_used_up(response) and value.isdigit() else None
+
+
 class Http:
     """Wraps an authenticated `httpx.AsyncClient` bound to one base URL. Adapters call `request` / `json` with paths."""
 
@@ -81,12 +93,14 @@ class Http:
         max_concurrent: int = DEFAULT_CONCURRENCY,
         sleep: Sleep = asyncio.sleep,
         jitter: Callable[[], float] = random.random,
+        clock: Callable[[], float] = time.time,
         blocked: ConnectorError | None = None,
     ) -> None:
         self.client = client
         self.label = label
         self.sleep = sleep
         self.jitter = jitter
+        self.clock = clock
         self.blocked = blocked  # set when the connection cannot work at all (no secret, unsupported auth)
         self._semaphore = asyncio.Semaphore(max(1, max_concurrent))
 
@@ -127,10 +141,15 @@ class Http:
                 return response
             kind = kind_for_status(status) if status >= 400 else "invalid"
             wait = _retry_after(response)
-            if status == 403 and (wait is not None or response.headers.get("x-ratelimit-remaining") == "0"):
-                kind = "rate_limited"  # GitHub answers 403 when the quota is used up
+            if status == 403 and (wait is not None or _quota_used_up(response)):
+                kind = "rate_limited"  # GitHub answers 403 (or 429) when a quota is used up
+            if kind == "rate_limited" and wait is None:
+                wait = _reset_after(response, self.clock())
             retry = kind == "rate_limited" or (kind == "network" and method in IDEMPOTENT)
-            if retry and not last:
+            # Both vendors say not to call again before the time they name. A wait longer than one sleep is the caller's to
+            # schedule: the error carries `retry_after`, and no further request is spent on a quota that is known to be empty.
+            too_long = kind == "rate_limited" and wait is not None and wait > MAX_SLEEP_S
+            if retry and not last and not too_long:
                 await self.sleep(min(MAX_SLEEP_S, wait) if wait is not None else self._backoff(attempt))
                 continue
             reason = "bị chuyển hướng, không đi theo" if status < 400 else _REASONS[kind]

@@ -8,8 +8,11 @@ runs in a worker thread, one repository at a time, so it never blocks a ticket r
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import re
+import sqlite3
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,7 +21,7 @@ from actoroffice.codeintel import services as service_map
 from actoroffice.codeintel.index import IndexOptions, index_repo, state_of
 from actoroffice.codeintel.query import CodeQuery
 from actoroffice.codeintel.store import IndexStore
-from actoroffice.codeintel.sync import Source, SyncError, local_source, mirror
+from actoroffice.codeintel.sync import GitSource, Source, SyncError, is_git, local_source, mirror
 from actoroffice.domain.errors import NotFound, OfficeError
 from actoroffice.domain.work import Project, Ticket
 from actoroffice.ports.code import RepoRef
@@ -206,7 +209,10 @@ class CodeIntelService:
 
     # ---- service map -----------------------------------------------------------------------------------------
 
-    async def map(self, repos: list[Repo], *, focus: str | None = None, depth: int = 1, tables: str = "shared") -> Subgraph:
+    async def map(
+        self, repos: list[Repo], *, focus: str | None = None, depth: int = 1, tables: str = "shared", service: str | None = None, module: str | None = None
+    ) -> Subgraph:
+        """The system map; with `service` the inside of one service; with `service` and `module` one module."""
         declared = {}
         for repo in repos:
             try:
@@ -215,5 +221,71 @@ class CodeIntelService:
             except (SyncError, OfficeError, ConnectorError):
                 text = ""
             declared[repo.slug] = service_map.load_declared(text)
-        graph = await asyncio.to_thread(service_map.build_map, self.query, [r.slug for r in repos], declared, tables=tables)
+        try:
+            graph = await asyncio.to_thread(service_map.build_map, self.query, [r.slug for r in repos], declared, tables=tables, service=service, module=module)
+        except KeyError as exc:
+            raise NotFound(str(exc.args[0])) from exc
         return service_map.focus(graph, focus, depth) if focus else graph
+
+    def _git_dir(self, repo: Repo) -> Path | None:
+        """Where the history of a repository is: its folder, or the mirror of a repository on a code host."""
+        if repo.path is not None:
+            return repo.path if is_git(repo.path) else None
+        if repo.remote is not None:
+            dest = self.office.settings.data_dir / "repos" / repo.remote.connection / f"{repo.remote.slug}.git"
+            return dest if (dest / "HEAD").is_file() else None
+        return None
+
+    def _map_at(self, repos: list[Repo], ref: str, tables: str) -> tuple[Subgraph, list[str]]:
+        """The system map as it is at a branch or commit: a copy of the index is brought to that ref (only the files
+        that differ are read again) and thrown away afterwards. Repositories that do not have the ref stay as indexed."""
+        tmp = self.office.settings.data_dir / "tmp" / f"map-{uuid.uuid4().hex[:12]}.db"
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        copy = sqlite3.connect(str(tmp))
+        try:
+            self.store.conn.backup(copy)
+        finally:
+            copy.close()
+        store = IndexStore(tmp)
+        try:
+            found, declared = [], {}
+            for repo in repos:
+                folder = self._git_dir(repo)
+                source: Source | None = None
+                if folder is not None:
+                    at = GitSource(folder, ref)
+                    try:
+                        at.commit()
+                    except SyncError:
+                        at = None  # type: ignore[assignment]
+                    if at is not None:
+                        found.append(repo.slug)
+                        source = at
+                        index_repo(store, repo.slug, at, self.options, project_id=repo.project_id, team_id=repo.team_id, root=str(repo.path or ""), default_branch=repo.branch)
+                try:
+                    if source is None:
+                        source = local_source(repo.path, repo.branch) if repo.path is not None else (GitSource(folder, repo.branch) if folder else None)
+                    text = source.read(service_map.DECLARED_FILE).decode("utf-8", "replace") if source is not None else ""
+                except SyncError:
+                    text = ""
+                declared[repo.slug] = service_map.load_declared(text)
+            return service_map.build_map(CodeQuery(store), [r.slug for r in repos], declared, tables=tables), found
+        finally:
+            store.close()
+            for suffix in ("", "-wal", "-shm"):
+                with contextlib.suppress(OSError):
+                    Path(str(tmp) + suffix).unlink()
+
+    async def map_diff(self, repos: list[Repo], *, head: str, base: str | None = None, tables: str = "shared") -> dict[str, Any]:
+        """What a branch or commit (`head`) changes on the system map against `base` (the indexed main branch when
+        not given): services, topics, tables and edges that appear or go away."""
+        await self.ensure(repos)
+        async with self._lock:
+            if base:
+                old, _ = await asyncio.to_thread(self._map_at, repos, base, tables)
+            else:
+                old = await self.map(repos, tables=tables)
+            new, found = await asyncio.to_thread(self._map_at, repos, head, tables)
+        if not found:
+            raise NotFound(f"không repo nào trong phạm vi có nhánh hoặc commit '{head}'")
+        return {**service_map.diff_maps(old, new), "head_ref": head, "base_ref": base or "", "repos": found}

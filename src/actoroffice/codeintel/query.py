@@ -336,7 +336,7 @@ class CodeQuery:
         """Every edge from code to an endpoint, topic, table or outside host, with the file it sits in."""
         scope = self._repo_ids(repos)
         rows = self.store.all(
-            "SELECT e.id, e.repo_id, e.kind, e.confidence, e.line, e.source, e.meta_json, n.kind AS node_kind, n.name AS node_name, n.id AS node_id, f.path "
+            "SELECT e.id, e.repo_id, e.src, e.kind, e.confidence, e.line, e.source, e.meta_json, n.kind AS node_kind, n.name AS node_name, n.id AS node_id, f.path "
             f"FROM edges e JOIN nodes n ON n.id = e.dst LEFT JOIN files f ON f.id = e.file_id WHERE e.repo_id IN ({self._in(set(scope))}) "
             "AND n.kind IN ('endpoint', 'topic', 'table', 'external')"
         )
@@ -347,3 +347,38 @@ class CodeQuery:
     def files(self, repo: str) -> list[str]:
         scope = self._repo_ids([repo])
         return [r["path"] for r in self.store.all(f"SELECT path FROM files WHERE repo_id IN ({self._in(set(scope))}) ORDER BY path")]
+
+    # ---- the inside of a service (the map's service and module levels) -----------------------------------------
+
+    def file_rows(self, repo: str) -> list[dict[str, Any]]:
+        scope = self._repo_ids([repo])
+        return [dict(r) for r in self.store.all(f"SELECT path, kind, lang, lines FROM files WHERE repo_id IN ({self._in(set(scope))}) ORDER BY path")]
+
+    def code_edges(self, repos: list[str]) -> list[dict[str, Any]]:
+        """Every edge between two pieces of code (calls, imports, extends, implements) with the file of each end."""
+        scope = self._repo_ids(repos)
+        rows = self.store.all(
+            "SELECT e.kind, e.confidence, e.line, e.source, e.repo_id, e.src, e.dst, sf.path AS src_path, df.path AS dst_path, dn.repo_id AS dst_repo_id "
+            "FROM edges e JOIN nodes sn ON sn.id = e.src JOIN nodes dn ON dn.id = e.dst JOIN files sf ON sf.id = sn.file_id JOIN files df ON df.id = dn.file_id "
+            f"WHERE e.repo_id IN ({self._in(set(scope))}) AND e.kind IN ('calls', 'imports', 'extends', 'implements')"
+        )
+        return [{**dict(r), "repo": scope[int(r["repo_id"])]["slug"], "dst_repo": scope[int(r["dst_repo_id"])]["slug"] if int(r["dst_repo_id"]) in scope else ""} for r in rows]
+
+    def code_nodes(self, repo: str, paths: list[str]) -> list[dict[str, Any]]:
+        """The file nodes and symbol nodes of some files of one repository."""
+        scope = self._repo_ids([repo])
+        if not scope or not paths:
+            return []
+        out: list[dict[str, Any]] = []
+        for start in range(0, len(paths), 400):
+            batch = paths[start : start + 400]
+            marks = ",".join("?" * len(batch))
+            out += [
+                dict(r)
+                for r in self.store.all(
+                    "SELECT n.id, n.kind, n.sub_kind, n.name, n.qualified, n.parent, n.start_line, n.end_line, f.path FROM nodes n JOIN files f ON f.id = n.file_id "
+                    f"WHERE n.repo_id IN ({self._in(set(scope))}) AND n.kind IN ('file', 'symbol') AND f.path IN ({marks}) ORDER BY n.id",
+                    batch,
+                )
+            ]
+        return out

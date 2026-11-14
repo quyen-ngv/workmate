@@ -35,7 +35,7 @@ from actoroffice.domain.team import LOCAL_OWNER_ID, ROLE_VI
 from actoroffice.domain.work import Interaction, InteractionKind, Ticket, TicketStatus
 
 from .checks import CheckResult, CheckRunner, review_acs, ui_evidence
-from .docflow import spawn_of
+from .docflow import same_road
 from .review import gate_items
 
 if TYPE_CHECKING:
@@ -439,7 +439,7 @@ class StageService:
             payload["final_roles_label"] = " / ".join(ROLE_VI.get(r, r) for r in final_roles)  # type: ignore[call-overload]
         if "doc_rules" in stage.checks:
             payload["doc_core"] = await office.docs.approval_view(ticket, stage)
-            spawn = spawn_of(ticket.stage_template, stage.id)
+            spawn = office.docs.spawn_of(ticket, stage.id)
             if spawn is not None:
                 people = await office.teams.members(ticket.team_id) if ticket.team_id else []
                 payload["spawn"] = {
@@ -657,6 +657,8 @@ class StageService:
 
         office = self.office
         ticket = await office.tickets.get(ref)
+        if same_road(office.docs.pack_of(ticket), ticket.stage_template or "", template):
+            return await self._switch_road(ticket, template, reason=reason, by=by)
         if SWITCHABLE.get(ticket.stage_template or "") != template:
             raise StageError(f"Chỉ chuyển được giữa quy trình code và quick (đang là {ticket.stage_template})")
         if ticket.stage in ("pr", "close"):
@@ -690,6 +692,32 @@ class StageService:
             )
         office.scheduler.kick()
         await office.audit.record("stage:switch", "switched", ticket_id=ticket.id, target=tpl.name, detail={"by": by, "reason": reason})
+        return await self._publish(ticket.id)
+
+    async def _switch_road(self, ticket: Ticket, template: str, *, reason: str, by: str) -> Ticket:
+        """Between two flows of the pack where one is the beginning of the other (a task that stopped at its design
+        goes on to code, or a task that was going to be coded stops at its design). The ticket keeps its place and
+        nothing is redone; a ticket that was already done under the shorter flow continues at the next stage."""
+        from actoroffice.domain.stage import TEMPLATE_TITLES
+
+        office = self.office
+        tpl = await office.teams.template(ticket.model_copy(update={"stage_template": template}))
+        if tpl is None or not tpl.stages:
+            raise StageError(f"Không có mẫu giai đoạn '{template}'")
+        if ticket.status == S.CANCELLED:
+            raise StageError(f"{ticket.key} đã huỷ: không đổi quy trình")
+        if ticket.stage not in [s.id for s in tpl.stages]:
+            raise StageError(f"{ticket.key} đang ở {stage_title(ticket.stage)}, quy trình '{template}' không có giai đoạn đó: không đổi được nữa")
+        await office.db.execute("UPDATE tickets SET stage_template = ?, updated_at = ? WHERE id = ?", (tpl.name, utcnow(), ticket.id))
+        await office.tickets.add_comment(
+            ticket.id,
+            f"🔀 Chuyển sang quy trình {TEMPLATE_TITLES.get(tpl.name, tpl.name)} ({await self._name(by)}): {reason}. {self._route(tpl)}",
+            author_kind="system",
+            author_id=None,
+        )
+        await office.audit.record("stage:switch", "switched", ticket_id=ticket.id, target=tpl.name, detail={"by": by, "reason": reason, "from": ticket.stage_template})
+        if ticket.status == S.DONE and tpl.next_after(ticket.stage or "") is not None:
+            return await self.advance(ticket.id, by=by)  # done under the shorter flow: go on from where it stopped
         return await self._publish(ticket.id)
 
     async def reopen(self, ref: int | str, target: str, *, reason: str, by: str, run_id: str | None = None) -> Ticket:

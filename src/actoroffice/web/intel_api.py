@@ -27,9 +27,36 @@ class ConnectionBody(BaseModel):
     secret: dict[str, str] | None = None
 
 
+class DocProfileBody(BaseModel):
+    scope: str = "office"  # office | team:<id> | project:<id> | ticket:<key>
+    pack: str | None = None
+    rules: dict[str, str] = Field(default_factory=dict)  # rule id → error | warn | off
+
+
 def register(app: FastAPI, office: Office) -> None:
     def fail(exc: ConnectorError) -> HTTPException:
         return HTTPException(ERROR_STATUS.get(exc.kind, 400), str(exc))
+
+    # ---- the document standard, layer by layer ---------------------------------------------------------------
+
+    @app.get("/api/doc-profile")
+    async def doc_profile(scope: str = "office") -> dict[str, Any]:
+        """What one layer (office, a team, a project, an epic) changes of the document standard, what it inherits,
+        and the rules of the pack the layers give together."""
+        try:
+            return await office.docs.profile_view(scope)
+        except OfficeError as exc:
+            raise HTTPException(exc.code if exc.code in (400, 404) else 400, str(exc)) from exc
+
+    @app.put("/api/doc-profile")
+    async def save_doc_profile(body: DocProfileBody) -> dict[str, Any]:
+        """Set (or, with nothing in it, remove) a layer. Refused with every problem named when the pack does not load
+        or a rule does not exist; what was in use stays."""
+        try:
+            await office.docs.save_profile(body.scope, {"pack": body.pack or None, "rules": body.rules})
+            return await office.docs.profile_view(body.scope)
+        except OfficeError as exc:
+            raise HTTPException(exc.code if exc.code in (400, 404) else 400, str(exc)) from exc
 
     # ---- connections -------------------------------------------------------------------------------------------
 
@@ -80,24 +107,51 @@ def register(app: FastAPI, office: Office) -> None:
     # ---- service map -------------------------------------------------------------------------------------------
 
     @app.get("/api/map")
-    async def service_graph(team: str = "", focus: str = "", depth: int = 1, tables: str = "shared", refresh: bool = True) -> dict[str, Any]:
+    async def service_graph(
+        team: str = "", focus: str = "", depth: int = 1, tables: str = "shared", refresh: bool = True, service: str = "", module: str = ""
+    ) -> dict[str, Any]:
         """The services of a team's repositories and how they reach each other. Every edge carries the line of code
-        that shows it (`cite`) and how it was found (`confidence`)."""
+        that shows it (`cite`) and how it was found (`confidence`). With `service`: the inside of that service (modules,
+        endpoints, topics, tables, who it talks to); with `service` and `module`: the files and main symbols of it."""
         if tables not in ("shared", "all", "none"):
             raise HTTPException(422, "tables: shared | all | none")
+        if module and not service:
+            raise HTTPException(422, "module cần đi kèm service")
         repos = await repos_of(team)
         states = await (office.codeintel.ensure(repos) if refresh else office.codeintel.status(repos))
         try:
-            graph = await office.codeintel.map(repos, focus=focus or None, depth=max(1, min(depth, 3)), tables=tables)
+            graph = await office.codeintel.map(repos, focus=focus or None, depth=max(1, min(depth, 3)), tables=tables, service=service or None, module=module or None)
         except OfficeError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            raise HTTPException(exc.code if exc.code == 404 else 400, str(exc)) from exc
         return {
+            "level": "module" if module else "service" if service else "system",
+            "service": service,
+            "module": module,
+            "truncated": graph.truncated,
             "nodes": [n.model_dump() for n in graph.nodes],
             "edges": [e.model_dump() for e in graph.edges],
             "commit": graph.commit,
             "index": [s.model_dump() for s in states],
             "mermaid": service_map.to_mermaid(graph),
         }
+
+    @app.get("/api/map/diff")
+    async def map_diff(team: str = "", head: str = "", base: str = "", ticket: str = "", tables: str = "shared") -> dict[str, Any]:
+        """What a branch or commit changes on the map against the main branch (or against `base`). With `ticket`: the
+        branch that ticket works on."""
+        repos = await repos_of(team)
+        if ticket:
+            from actoroffice.engine.workspace import branch_name
+
+            t = await office.tickets.get(ticket)
+            repos = await office.codeintel.for_ticket(t)
+            head = head or branch_name(await office.tickets.root_of(t.id))
+        if not head:
+            raise HTTPException(422, "cần head (nhánh hoặc commit) hoặc ticket")
+        try:
+            return await office.codeintel.map_diff(repos, head=head, base=base or None, tables=tables if tables in ("shared", "all", "none") else "shared")
+        except OfficeError as exc:
+            raise HTTPException(exc.code if exc.code == 404 else 400, str(exc)) from exc
 
     @app.get("/api/map/overlay")
     async def overlay(ticket: str) -> dict[str, Any]:

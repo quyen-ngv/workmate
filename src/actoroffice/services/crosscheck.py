@@ -132,7 +132,7 @@ class CrossCheckService:
         docs = self.office.docs
         own = docs.output_keys(ticket, stage, ds)
         out = []
-        for check_id, cfg in docs.pack.crosschecks.items():
+        for check_id, cfg in docs.pack_of(ticket).crosschecks.items():
             if stage.gate not in cfg.at:
                 continue
             left = sorted(k for k in own if ds.docs[k].doctype == cfg.left)

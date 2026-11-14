@@ -26,13 +26,17 @@ MAX_PAGES = 50
 _NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 _PR_PATH_RE = re.compile(r"^/([^/]+)/([^/]+)/pull/(\d+)(?:/|$)")
 
-# ---- NEEDS CHECKING against GitHub's current documentation (spec V-1, V-4): one place for each guess.
-REQUIRED_SCOPES: dict[Capability, list[str]] = {  # fine-grained token permissions
+# ---- Checked on 2026-11-14 against docs.github.com/en/rest and the OpenAPI description GitHub publishes, the page
+# "Permissions required for fine-grained personal access tokens", "Rate limits for the REST API", "Validating webhook
+# deliveries" and "Webhook events and payloads" (spec V-1, V-4).
+REQUIRED_SCOPES: dict[Capability, list[str]] = {  # repository permissions of a fine-grained token: Contents, Metadata, Pull requests
     Capability.CODE_READ: ["contents:read", "metadata:read"],
     Capability.CODE_PR: ["pull_requests:read", "pull_requests:write"],  # write only when creating or replying
     Capability.WEBHOOK: [],
 }
-API_VERSION = "2022-11-28"  # X-GitHub-Api-Version
+# X-GitHub-Api-Version. 2022-11-28 is supported until 2028-03-10; 2026-03-10 is the newer one, and none of its breaking
+# changes touches a field read here.
+API_VERSION = "2022-11-28"
 JSON_ACCEPT = "application/vnd.github+json"
 RAW_ACCEPT = "application/vnd.github.raw+json"  # the contents API then answers with the file's bytes
 GIT_USERNAME = "x-access-token"  # user name git sends with a token over HTTPS
@@ -41,6 +45,7 @@ EVENT_HEADER = "x-github-event"
 SCOPES_HEADER = "x-oauth-scopes"  # classic tokens only; fine-grained tokens do not report their permissions
 PR_ACTIONS = {"opened": "pr_opened", "reopened": "pr_opened", "synchronize": "pr_updated", "edited": "pr_updated", "ready_for_review": "pr_updated"}
 COMMENT_EVENTS = frozenset({"pull_request_review", "pull_request_review_comment"})
+CONVERSATION_EVENT = "issue_comment"  # a comment in the conversation of a pull request arrives as a comment on an issue
 
 FILE_STATUS = {"added": "added", "removed": "removed", "modified": "modified", "renamed": "renamed", "copied": "added", "changed": "modified"}
 
@@ -153,7 +158,16 @@ class GitHub:
     async def repos(self, query: str | None = None) -> list[RepoRef]:
         needle = (query or "").strip().lower()
         out: list[RepoRef] = []
-        for item in await self._paged(f"/orgs/{self.config.org}/repos"):
+        try:
+            found = await self._paged(f"/orgs/{self.config.org}/repos")
+        except ConnectorError as exc:
+            if exc.kind != "not_found":
+                raise
+            # `org` is a user account, and that listing is for organisations only. The repositories owned by the user of the
+            # token, private ones included, come from /user/repos (/users/<name>/repos would list public ones only).
+            owned = await self._paged("/user/repos", {"affiliation": "owner"})
+            found = [r for r in owned if str((r.get("owner") or {}).get("login") or "").lower() == self.config.org.lower()]
+        for item in found:
             name = str(item.get("name") or "")
             if self._allowed(name) and needle in name.lower():
                 out.append(RepoRef(slug=f"{self.config.org}/{name}", default_branch=str(item.get("default_branch") or "main"), url=self._web(name)))
@@ -173,6 +187,7 @@ class GitHub:
         return response.content
 
     async def compare(self, repo: RepoRef, base: str, head: str) -> list[ChangedFile]:
+        """Files changed from `base` to `head`. GitHub lists at most 300 files for a comparison, on its first page only."""
         data = await self.http.json("GET", self._path(repo, f"/compare/{quote(base, safe='')}...{quote(head, safe='')}"), params={"per_page": PER_PAGE}) or {}
         out: list[ChangedFile] = []
         for item in data.get("files") or []:
@@ -236,7 +251,18 @@ class GitHub:
     async def pr_reply(self, repo: RepoRef, pr_id: int, text: str, *, parent_id: int | None = None) -> None:
         """With `parent_id`: a reply in that review thread. Without: a comment in the pull request's conversation."""
         self._require_write("trả lời bình luận")
-        tail = f"/pulls/{int(pr_id)}/comments/{int(parent_id)}/replies" if parent_id else f"/issues/{int(pr_id)}/comments"
+        tail = f"/issues/{int(pr_id)}/comments"
+        if parent_id:
+            # GitHub takes a reply on the first comment of a thread only ("replies to replies are not supported"), and a
+            # conversation comment has no thread at all: answering one of those is a new conversation comment.
+            try:
+                parent = await self.http.json("GET", self._path(repo, f"/pulls/comments/{int(parent_id)}")) or {}
+            except ConnectorError as exc:
+                if exc.kind != "not_found":
+                    raise
+            else:
+                root = int(parent.get("in_reply_to_id") or parent_id)
+                tail = f"/pulls/{int(pr_id)}/comments/{root}/replies"
         await self.http.json("POST", self._path(repo, tail), json={"body": text})
 
     def parse_pr_url(self, url: str) -> tuple[RepoRef, int] | None:
@@ -255,7 +281,8 @@ class GitHub:
     # ---- events
 
     def verify_webhook(self, headers: dict[str, str], body: bytes) -> WebhookEvent | None:
-        """None when the signature is missing or wrong, or when the connection has no webhook secret to check it with."""
+        """None when the signature is missing or wrong, or when the connection has no webhook secret to check it with.
+        The webhook must be set to content type `application/json`: a form-encoded delivery is not JSON and gives None."""
         lowered = {k.lower(): v for k, v in headers.items()}
         if not self._webhook_secret:
             return None
@@ -270,6 +297,9 @@ class GitHub:
             return None
         event = lowered.get(EVENT_HEADER, "")
         repo = str((payload.get("repository") or {}).get("full_name") or "")
+        issue = payload.get("issue") or {}
+        if event == CONVERSATION_EVENT and issue.get("pull_request"):  # `issue.pull_request` is there only when the issue is a pull request
+            return WebhookEvent(kind="pr_comment", repo=repo, pr_id=int(issue["number"]) if issue.get("number") is not None else None, raw=payload)
         pull = payload.get("pull_request") or {}
         pr_id = int(pull["number"]) if pull.get("number") is not None else None
         head = pull.get("head") or {}

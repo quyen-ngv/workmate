@@ -35,7 +35,7 @@ from actoroffice.domain.org import ActorStatus, PermissionMode, Position, Positi
 from actoroffice.domain.run import RunStatus
 from actoroffice.domain.work import Priority, ProjectAccess, TicketStatus
 
-from . import intel_api, team_api
+from . import intel_api, mcp_api, team_api
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "ao_session"
@@ -210,6 +210,7 @@ def create_app(office: Office, token: str) -> FastAPI:
     team_api.register_rules(app, office)
     team_api.register_setup(app, office)
     intel_api.register(app, office)
+    mcp_api.register(app, office)
 
     def authed(request: Request) -> bool:
         return secrets.compare_digest(request.cookies.get(COOKIE, ""), token)
@@ -222,7 +223,8 @@ def create_app(office: Office, token: str) -> FastAPI:
         path = request.url.path
         if path.startswith("/api/") and not authed(request):
             return JSONResponse({"error": "not signed in"}, status_code=401)
-        if request.method not in ("GET", "HEAD") and request.headers.get("x-requested-with") != "actoroffice":
+        # /mcp does its own auth (a personal bearer token, web/mcp_api.py): an IDE sends neither the cookie nor this header.
+        if request.method not in ("GET", "HEAD") and path != mcp_api.PATH and request.headers.get("x-requested-with") != "actoroffice":
             return JSONResponse({"error": "missing request header"}, status_code=403)
         response = await call_next(request)
         if path.startswith("/static/"):

@@ -116,7 +116,11 @@ def bitbucket_fake() -> Fake:
 def test_bitbucket_declares_what_the_registry_needs() -> None:
     assert (BitbucketCloud.name, BitbucketCloud.config_schema, BitbucketCloud.secret_fields) == ("bitbucket_cloud", BitbucketCloudConfig, ("email", "token", "webhook_secret"))
     assert BitbucketCloud.capabilities == frozenset({Capability.CODE_READ, Capability.CODE_PR, Capability.WEBHOOK}) and BitbucketCloud.title
-    assert set(BitbucketCloud.required_scopes) == set(BitbucketCloud.capabilities)
+    assert BitbucketCloud.required_scopes == {
+        Capability.CODE_READ: ["read:repository:bitbucket"],
+        Capability.CODE_PR: ["read:pullrequest:bitbucket", "write:pullrequest:bitbucket"],
+        Capability.WEBHOOK: [],
+    }
     config = BitbucketCloudConfig(workspace="acme")
     assert (config.repos, config.write) == (["*"], False)
     with pytest.raises(ValueError):
@@ -246,6 +250,28 @@ def test_bitbucket_webhook() -> None:
     assert unsigned.verify_webhook({"X-Event-Key": "repo:push", "X-Hub-Signature": signed("", push)}, push) is None
 
 
+VENDOR_SECRET = "It\u0027s a Secret to Everybody"  # the secret both vendors use in their worked example
+
+
+def test_bitbucket_webhook_signature_matches_the_vendor_example_and_push_shapes() -> None:
+    # support.atlassian.com/bitbucket-cloud/docs/manage-webhooks: this secret and this payload give this header value.
+    assert signed(VENDOR_SECRET, b"Hello World!") == "sha256=a4771c39fbe90f317c7824e83ddef3caae9cb3d976c214ace1f2937e133263c9"
+
+    adapter = bitbucket(Fake())
+
+    def deliver(changes: list[dict[str, Any]]) -> Any:
+        body = json.dumps({"repository": {"full_name": "acme/payments"}, "push": {"changes": changes}}).encode()
+        headers = {"X-Event-Key": "repo:push", "X-Hook-UUID": "h", "X-Request-UUID": "r", "X-Attempt-Number": "1", "X-Hub-Signature": signed("hook-secret", body)}
+        return adapter.verify_webhook(headers, body)
+
+    tag = {"new": {"type": "tag", "name": "v1", "target": {"hash": "aaa"}}, "old": None}
+    branch = {"new": {"type": "branch", "name": "main", "target": {"type": "commit", "hash": "bbb"}}, "old": {"type": "branch", "name": "main", "target": {"hash": "000"}}}
+    deleted = {"new": None, "old": {"type": "branch", "name": "gone", "target": {"hash": "ccc"}}}
+    event = deliver([tag, deleted, branch])  # one push can move several references: the branch is the one reported
+    assert (event.kind, event.ref, event.commit) == ("push", "main", "bbb")
+    assert deliver([tag]).kind == "other" and deliver([deleted]).kind == "other"
+
+
 @pytest.mark.parametrize(("status", "kind"), [(401, "auth"), (403, "forbidden"), (404, "not_found"), (400, "invalid"), (500, "network")])
 async def test_bitbucket_error_kinds(status: int, kind: str) -> None:
     fake = Fake({("GET", f"{BB}/payments/pullrequests/7"): httpx.Response(status, text="bb-tok leaked body")})
@@ -267,6 +293,7 @@ async def test_bitbucket_retries_after_429_and_reports_health() -> None:
 
     health = await adapter.test()
     assert (health.state, health.identity) == ("ok", "bot@acme.test")
+    assert int(fake.requests[-1].url.params["pagelen"]) >= 10  # the reference gives 10 as the smallest page
 
     fake = bitbucket_fake()
     bare = bitbucket(fake, secret={})
@@ -321,6 +348,8 @@ def github_fake(prefix: str = "") -> Fake:
                 {"id": 1, "user": {"login": "lan"}, "body": "Đổi tên biến", "path": "a.py", "line": 12, "created_at": "2026-11-10T01:00:00Z"},
             ],
             ("GET", f"{prefix}{GH}/issues/12/comments"): [{"id": 5, "user": {"login": "minh"}, "body": "LGTM", "created_at": "2026-11-10T02:00:00Z"}],
+            ("GET", f"{prefix}{GH}/pulls/comments/1"): {"id": 1, "user": {"login": "lan"}, "body": "Đổi tên biến", "path": "a.py", "line": 12},
+            ("GET", f"{prefix}{GH}/pulls/comments/2"): {"id": 2, "user": {"login": "bot"}, "body": "Đã đổi", "path": "a.py", "line": 12, "in_reply_to_id": 1},
             ("POST", f"{prefix}{GH}/pulls/12/comments/1/replies"): {"id": 6},
             ("POST", f"{prefix}{GH}/issues/12/comments"): {"id": 7},
             ("GET", f"{prefix}/user"): httpx.Response(200, json={"login": "bot"}, headers={"X-OAuth-Scopes": "repo, read:org", "X-RateLimit-Remaining": "4990", "X-RateLimit-Limit": "5000"}),
@@ -331,7 +360,7 @@ def github_fake(prefix: str = "") -> Fake:
 def test_github_declares_what_the_registry_needs() -> None:
     assert (GitHub.name, GitHub.config_schema, GitHub.secret_fields) == ("github", GitHubConfig, ("token", "webhook_secret"))
     assert GitHub.capabilities == frozenset({Capability.CODE_READ, Capability.CODE_PR, Capability.WEBHOOK}) and GitHub.title
-    assert set(GitHub.required_scopes) == set(GitHub.capabilities)
+    assert GitHub.required_scopes == {Capability.CODE_READ: ["contents:read", "metadata:read"], Capability.CODE_PR: ["pull_requests:read", "pull_requests:write"], Capability.WEBHOOK: []}
     config = GitHubConfig(org="acme")
     assert (config.base_url, config.repos, config.auth, config.write) == ("https://api.github.com", ["*"], "token", False)
     for bad in ({"org": "acme", "base_url": "http://api.github.com"}, {"org": "acme/x"}, {"org": "acme", "auth": "magic"}):
@@ -393,6 +422,28 @@ async def test_github_pull_requests() -> None:
     await adapter.pr_reply(repo, 12, "Xong")
     assert fake.body("POST", f"{GH}/pulls/12/comments/1/replies") == {"body": "Cảm ơn"}
     assert fake.body("POST", f"{GH}/issues/12/comments") == {"body": "Xong"}
+
+
+async def test_github_reply_goes_to_the_first_comment_of_the_thread() -> None:
+    # "This must be the ID of a top-level review comment, not a reply to that comment. Replies to replies are not supported."
+    fake = github_fake()
+    adapter = github(fake, write=True)
+    repo = RepoRef(slug="acme/payments")
+    await adapter.pr_reply(repo, 12, "Trả lời một câu trả lời", parent_id=2)
+    assert [r.url.path for r in fake.requests] == [f"{GH}/pulls/comments/2", f"{GH}/pulls/12/comments/1/replies"]
+
+    await adapter.pr_reply(repo, 12, "Trả lời bình luận chung", parent_id=5)  # 5 is a conversation comment: it has no thread
+    assert [r.url.path for r in fake.requests][2:] == [f"{GH}/pulls/comments/5", f"{GH}/issues/12/comments"]
+    assert json.loads(fake.requests[-1].content) == {"body": "Trả lời bình luận chung"}
+
+
+async def test_github_lists_the_repositories_of_a_user_account() -> None:
+    # /orgs/{org}/repos is for organisations: for a user account GitHub answers 404; what the user owns is under /user/repos.
+    mine = [{"name": "payments", "default_branch": "main", "private": True, "owner": {"login": "Acme"}}, {"name": "pay-fork", "default_branch": "main", "owner": {"login": "someone"}}]
+    fake = Fake({("GET", "/orgs/acme/repos"): httpx.Response(404, json={"message": "Not Found"}), ("GET", "/user/repos"): mine})
+    repos = await github(fake).repos()
+    assert [r.slug for r in repos] == ["acme/payments"]
+    assert fake.requests[-1].url.params["affiliation"] == "owner"
 
 
 async def test_github_writes_are_refused_when_read_only_and_repositories_are_checked() -> None:
@@ -459,6 +510,16 @@ def test_github_webhook() -> None:
     assert deliver("pull_request", {"action": "closed", "pull_request": {**pull, "merged": True}, "repository": repository}).kind == "pr_merged"
     review = deliver("pull_request_review", {"action": "submitted", "pull_request": pull, "repository": repository})
     assert (review.kind, review.pr_id) == ("pr_comment", 12)
+    on_line = deliver("pull_request_review_comment", {"action": "created", "comment": {"id": 2}, "pull_request": pull, "repository": repository})
+    assert (on_line.kind, on_line.pr_id, on_line.ref) == ("pr_comment", 12, "t/pay-120")
+    # A comment in the conversation of a pull request is an `issue_comment` whose issue carries `pull_request`.
+    said = deliver("issue_comment", {"action": "created", "issue": {"number": 12, "pull_request": {"url": "https://api.github.com/repos/acme/payments/pulls/12"}}, "repository": repository})
+    assert (said.kind, said.pr_id, said.repo) == ("pr_comment", 12, "acme/payments")
+    assert deliver("issue_comment", {"action": "created", "issue": {"number": 4}, "repository": repository}).kind == "other"  # a plain issue
+    deleted = deliver("push", {"ref": "refs/heads/gone", "after": "0000000000000000000000000000000000000000", "deleted": True, "repository": repository})
+    assert deleted.kind == "other"
+    # docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries: this secret and this payload give this header value.
+    assert signed(VENDOR_SECRET, b"Hello, World!") == "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
     assert deliver("star", {"repository": repository}).kind == "other"
 
     assert deliver("push", {"ref": "refs/heads/main", "repository": repository}, secret="wrong") is None
@@ -485,6 +546,18 @@ async def test_github_rate_limit_retries_then_succeeds() -> None:
     sleeps = no_wait(adapter)
     assert await adapter.head(RepoRef(slug="acme/payments")) == "abc"
     assert len(sleeps) == 2 and sleeps[1] == 5.0
+
+
+async def test_github_used_up_quota_is_reported_with_the_time_to_wait_and_not_retried() -> None:
+    # "You should not retry your request until after the time specified by the x-ratelimit-reset header" (UTC epoch seconds).
+    limited = httpx.Response(403, headers={"x-ratelimit-limit": "5000", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1800003600", "x-ratelimit-resource": "core"})
+    fake = Fake({("GET", f"{GH}/branches/main"): limited})
+    adapter = github(fake)
+    sleeps = no_wait(adapter)
+    adapter.http.clock = lambda: 1_800_000_000.0
+    with pytest.raises(ConnectorError) as err:
+        await adapter.head(RepoRef(slug="acme/payments"))
+    assert (err.value.kind, err.value.retry_after, len(fake.requests), sleeps) == ("rate_limited", 3600.0, 1, [])
 
 
 async def test_github_health_missing_token_and_app_auth() -> None:

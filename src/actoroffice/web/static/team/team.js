@@ -209,7 +209,7 @@ function renderSidebar() {
     </div>
     <div class="side-foot">
       <button data-page="inbox">Cần tôi ${needs_you ? `(${needs_you})` : ""}</button>
-      <button data-page="rules">Rules</button><button data-page="kb">Kiến thức</button><button data-page="people">Người</button><button data-page="map">Bản đồ</button><button data-page="connections">Kết nối</button><button data-page="setup">Cài đặt</button>
+      <button data-page="rules">Rules</button><button data-page="kb">Kiến thức</button><button data-page="people">Người</button><button data-page="map">Bản đồ</button><button data-page="connections">Kết nối</button><button data-page="standard">Chuẩn tài liệu</button><button data-page="setup">Cài đặt</button>
     </div>`;
 }
 
@@ -404,7 +404,9 @@ function docPanel(d, t) {
     <div class="doc-panel-head"><b>Tài liệu</b> ${docs || `<span class="rev">chưa có</span>`}
       ${open ? `<span class="chip bad">${open} điểm chưa đạt</span>` : ""}
       ${v.parent ? `<span class="rev">thuộc epic <button class="link" data-open-ticket="${esc(v.parent.key)}">${esc(v.parent.key)}</button> ${esc(v.parent.title)}</span>` : ""}
-      ${v.is_epic && !["done", "cancelled"].includes(t.status) ? `<button class="btn small" data-grow title="Thêm yêu cầu hoặc tài liệu vào epic: AI phân tích phần mới, task đã có giữ nguyên">➕ Bổ sung epic</button>` : ""}</div>
+      ${v.is_epic && !["done", "cancelled"].includes(t.status) ? `<button class="btn small" data-grow title="Thêm yêu cầu hoặc tài liệu vào epic: AI phân tích phần mới, task đã có giữ nguyên">➕ Bổ sung epic</button>` : ""}
+      ${(v.switch_to || []).map((s) => `<button class="btn small" data-flow="${esc(s.template)}" title="Đổi quy trình, giữ nguyên chỗ đang làm">⇄ ${esc(s.title)}</button>`).join("")}
+      ${v.is_epic ? `<button class="btn small" data-std="ticket:${esc(t.key)}" title="Chuẩn tài liệu riêng cho epic này và các task của nó">⚙ Chuẩn</button>` : ""}</div>
     ${kids ? `<ul class="doc-kids">${kids}</ul>` : ""}</div>`;
 }
 
@@ -757,6 +759,33 @@ async function pageConnections() {
   sheet("Kết nối", `<p class="rev">Mọi hệ thống office biết cách nối, kể cả cái chưa dùng. Bí mật chỉ được gửi đi, không bao giờ hiện lại. Mặc định chỉ đọc.</p>${rows}`);
 }
 
+// ---- the document standard, layer by layer: office → team → project → epic ---------------------------------------
+
+const RULE_LEVEL = { "": "theo lớp trên", error: "lỗi (chặn duyệt)", warn: "cảnh báo", off: "tắt" };
+
+async function pageStandard(scope = "office") {
+  const v = await api(`/api/doc-profile?scope=${encodeURIComponent(scope)}`);
+  const own = v.profile || { pack: null, rules: {} };
+  const scopes = [["office", "Cả văn phòng"], ...(state.board.teams || []).map((t) => [`team:${t.id}`, `Team ${t.name}`])];
+  if (!scopes.some(([s]) => s === v.scope)) scopes.push([v.scope, v.scope.startsWith("ticket:") ? `Epic / ticket ${scope.split(":")[1]}` : v.scope]);
+  const inherited = (v.inherited || []).map((p) => [p.pack ? `pack ${p.pack}` : "", ...Object.entries(p.rules || {}).map(([k, l]) => `${k}: ${l}`)].filter(Boolean).join(", ")).filter(Boolean);
+  const names = new Set([...v.rules.map((r) => r.id), ...Object.keys(own.rules || {})]);
+  const rows = [...names].sort().map((id) => {
+    const rule = v.rules.find((r) => r.id === id);
+    const mine = (own.rules || {})[id] || "";
+    return `<tr><td><code>${esc(id)}</code></td><td class="rev">${esc(rule?.type || "")}</td><td>${esc(rule ? RULE_LEVEL[rule.severity] || rule.severity : "tắt")}</td>
+      <td><select data-std-rule="${esc(id)}">${Object.entries(RULE_LEVEL).map(([val, label]) => `<option value="${val}" ${mine === val ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></td></tr>`;
+  }).join("");
+  sheet("Chuẩn tài liệu", `<p class="rev">Mỗi lớp chỉ ghi phần khác với lớp trên: văn phòng → team → project → epic. Lưu xong có hiệu lực ở lần kiểm kế tiếp.</p>
+    <div class="form" data-std-form data-scope="${esc(v.scope)}">
+      <label>Lớp<select data-std-scope>${scopes.map(([s, l]) => `<option value="${esc(s)}" ${s === v.scope ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+      <label>Bộ chuẩn (pack)<select data-std-pack><option value="">theo lớp trên</option>${(v.packs || []).map((p) => `<option value="${esc(p)}" ${own.pack === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></label>
+      <div class="rev">Đang dùng: <b>${esc(v.pack.name)}</b> v${esc(v.pack.version)} · luồng: ${esc((v.pack.flows || []).join(", "))}${inherited.length ? ` · lớp trên đã đổi: ${esc(inherited.join(" | "))}` : ""}</div>
+      <table class="list"><thead><tr><th>Luật</th><th>Kiểu</th><th>Hiện là</th><th>Lớp này đặt</th></tr></thead><tbody>${rows}</tbody></table>
+    </div>
+    <div class="opts"><button class="btn primary" data-std-save>Lưu</button>${v.profile ? `<button class="btn" data-std-clear>Bỏ lớp này</button>` : ""}</div>`);
+}
+
 function connectionBody(form) {
   const body = { use: form.dataset.use, config: {}, secret: {} };
   for (const el of form.querySelectorAll("[data-c]")) body[el.dataset.c] = el.type === "checkbox" ? el.checked : el.value.trim();
@@ -773,7 +802,7 @@ function connectionBody(form) {
 
 // ---- service map: who reaches whom, every edge backed by a line of code ---------------------------------------------
 
-const EDGE_LABEL = { calls_http: "HTTP", publishes: "publish", subscribes: "subscribe", reads: "đọc", writes: "ghi", depends_on: "thư viện" };
+const EDGE_LABEL = { calls_http: "HTTP", publishes: "publish", subscribes: "subscribe", reads: "đọc", writes: "ghi", depends_on: "cần", exposes: "mở", calls: "gọi", imports: "import", extends: "kế thừa", implements: "hiện thực", contains: "chứa" };
 const mapState = { team: "", tables: "shared", kinds: new Set(), focus: "", data: null, overlay: null, picked: null };
 
 function mapSvg(data) {
@@ -994,7 +1023,7 @@ document.addEventListener("click", (e) => {
   if (t.hasAttribute("data-group")) { t.classList.toggle("open"); return; }
   if (ds.closeSheet !== undefined) { closeSheet(); return; }
   if (ds.new !== undefined) return act(pageNewTask);
-  if (ds.page) return act({ inbox: pageInbox, rules: pageRules, kb: pageKb, people: pagePeople, setup: pageSetup, connections: pageConnections, map: pageMap }[ds.page]);
+  if (ds.page) return act({ inbox: pageInbox, rules: pageRules, kb: pageKb, people: pagePeople, setup: pageSetup, connections: pageConnections, map: pageMap, standard: () => pageStandard() }[ds.page]);
   if (t.dataset.ruleDel) return act(async () => {
     const s = await api("/api/setup");
     const proj = s.projects.find((x) => x.id === t.dataset.ruleDel);
@@ -1026,6 +1055,18 @@ document.addEventListener("click", (e) => {
   }
   if (ds.reopen !== undefined && key) { pageReopen(key); return; }
   if (ds.openTicket) return openTicket(ds.openTicket);
+  if (ds.stdSave !== undefined || ds.stdClear !== undefined) return act(async () => {
+    const form = document.querySelector("[data-std-form]");
+    const body = { scope: form.dataset.scope, pack: null, rules: {} };
+    if (ds.stdSave !== undefined) {
+      body.pack = form.querySelector("[data-std-pack]").value || null;
+      for (const el of form.querySelectorAll("[data-std-rule]")) if (el.value) body.rules[el.dataset.stdRule] = el.value;
+    }
+    await api("/api/doc-profile", { method: "PUT", body });
+    toast(ds.stdSave !== undefined ? "Đã lưu chuẩn tài liệu" : "Đã bỏ lớp này");
+    await pageStandard(form.dataset.scope);
+  });
+  if (ds.std) return act(() => pageStandard(ds.std));
   if (ds.connSave !== undefined) return act(async () => {
     const saved = await api("/api/connections", { method: "POST", body: connectionBody(t.closest("[data-conn-form]")) });
     const health = await api(`/api/connections/${encodeURIComponent(saved.id)}/test`, { method: "POST" });
@@ -1049,6 +1090,7 @@ document.addEventListener("click", (e) => {
     if (!text || !text.trim()) return;
     return act(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: "grow", text: text.trim() } }); toast("Đã bổ sung: AI phân tích phần mới"); await refresh(key); });
   }
+  if (ds.flow && key) return act(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: "flow", stage: ds.flow } }); toast("Đã đổi quy trình"); await refresh(key); });
   if (ds.cmd && key) return act(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: ds.cmd } }); await refresh(key); });
   if (ds.send !== undefined && key) {
     const box = $("[data-steer]", pane);
@@ -1199,6 +1241,7 @@ function connect() {
 // The service map's filters (selects, checkboxes, the ticket to highlight).
 document.addEventListener("change", (e) => {
   const el = e.target;
+  if (el.dataset?.stdScope !== undefined) return act(() => pageStandard(el.value));
   if (el.dataset?.map === "team" || el.dataset?.map === "tables") { mapState[el.dataset.map] = el.value; return act(loadMap); }
   if (el.dataset?.mapKind) {
     const all = [...document.querySelectorAll("[data-map-kind]")];

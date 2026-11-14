@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -26,10 +27,12 @@ from actoroffice.domain.stage import StageDef
 from actoroffice.domain.team import LOCAL_OWNER_ID
 from actoroffice.domain.work import Document, Interaction, Ticket, TicketStatus
 
-from .docflow import default_pack, is_pack_flow, spawn_of
+from .docflow import DocProfile, PackError, check_profile, default_pack, is_pack_flow, resolve, same_road, spawn_of
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
+
+log = logging.getLogger(__name__)
 
 EXCERPT_LIMIT = 4000
 SPEC_PER_TASK = "R-SPEC-PER-TASK"
@@ -55,28 +58,150 @@ def content_hash(text: str) -> str:
 class DocService:
     def __init__(self, office: Office) -> None:
         self.office = office
+        self._profiles: dict[str, DocProfile] = {}  # scope → what that layer changes of the standard
+        self._parents: dict[int, int] = {}  # ticket id → parent id, to find the epic a ticket is under without a query
 
     @property
     def pack(self) -> StandardPack:
-        return default_pack()
+        """The office's standard: what a ticket follows when no nearer layer says otherwise."""
+        return self.pack_of(None)
+
+    # ---- which standard a ticket follows: office → team → project → ticket (an epic and what is under it) --------
+
+    async def load_profiles(self) -> None:
+        office = self.office
+        self._profiles = {}
+        for row in await office.db.fetchall("SELECT scope, profile_json FROM doc_profiles"):
+            try:
+                self._profiles[str(row["scope"])] = DocProfile.model_validate_json(row["profile_json"])
+            except ValueError:
+                log.warning("doc profile of %s is not readable, ignored", row["scope"])
+        self._parents = {int(r["id"]): int(r["parent_id"]) for r in await office.db.fetchall("SELECT id, parent_id FROM tickets WHERE parent_id IS NOT NULL")}
+
+    def _scopes(self, ticket: Ticket | None) -> list[str]:
+        scopes = ["office"]
+        if ticket is None:
+            return scopes
+        if ticket.team_id:
+            scopes.append(f"team:{ticket.team_id}")
+        if ticket.project_id:
+            scopes.append(f"project:{ticket.project_id}")
+        if ticket.parent_id is not None:
+            self._parents[ticket.id] = ticket.parent_id
+        chain, parent = [ticket.id], ticket.parent_id
+        while parent is not None and parent not in chain:
+            chain.append(parent)
+            parent = self._parents.get(parent)
+        return scopes + [f"ticket:{ticket_id}" for ticket_id in reversed(chain)]  # the epic first, the ticket itself last
+
+    def layers(self, ticket: Ticket | None) -> list[tuple[str, DocProfile]]:
+        return [(scope, self._profiles[scope]) for scope in self._scopes(ticket) if scope in self._profiles]
+
+    def pack_of(self, ticket: Ticket | None) -> StandardPack:
+        layers = [profile for _, profile in self.layers(ticket)] if self._profiles else []
+        if not layers:
+            return default_pack()
+        try:
+            return resolve(layers, self.office.settings.data_dir)
+        except PackError as exc:  # a pack that was removed after the profile was saved: work goes on with the office's
+            log.warning("pack of %s cannot be loaded, using the office's: %s", ticket.key if ticket else "office", exc)
+            return default_pack()
+
+    async def _before(self, scope: str) -> list[DocProfile]:
+        """The layers under a scope, in order."""
+        office = self.office
+        kind, _, ref = scope.partition(":")
+        if kind == "office":
+            return []
+        if kind == "team":
+            if await office.db.fetchone("SELECT 1 FROM teams WHERE id = ?", (ref,)) is None:
+                raise NotFound(f"Không có team '{ref}'")
+            scopes = ["office"]
+        elif kind == "project":
+            project = await office.projects.get(ref)
+            scopes = ["office"] + ([f"team:{project.team_id}"] if project.team_id else [])
+        elif kind == "ticket":
+            ticket = await office.tickets.get(int(ref))
+            scopes = [s for s in self._scopes(ticket) if s != f"ticket:{ticket.id}"]
+        else:
+            raise DocError("scope phải là 'office', 'team:<id>', 'project:<id>' hoặc 'ticket:<mã>'")
+        return [self._profiles[s] for s in scopes if s in self._profiles]
+
+    async def _scope_key(self, scope: str) -> str:
+        kind, _, ref = scope.partition(":")
+        if kind == "ticket" and not ref.isdigit():
+            return f"ticket:{(await self.office.tickets.get(ref)).id}"
+        return scope
+
+    async def save_profile(self, scope: str, profile: DocProfile | dict[str, Any] | None, *, by: str = "user") -> DocProfile | None:
+        """Set what one layer changes of the standard (None or an empty profile removes the layer). It is checked on
+        top of the layers under it first: a pack that does not load or a rule that does not exist is refused and what
+        was in use stays. Takes effect on the next check, no restart."""
+        office = self.office
+        scope = await self._scope_key(scope.strip())
+        before = await self._before(scope)
+        try:
+            new = profile if isinstance(profile, DocProfile) else DocProfile.model_validate(profile or {})
+            if not new.empty():
+                check_profile(new, before, office.settings.data_dir)
+        except PackError as exc:
+            raise DocError(str(exc)) from None
+        except ValueError as exc:
+            raise DocError(f"Hồ sơ tài liệu không hợp lệ: {exc}") from None
+        if new.empty():
+            await office.db.execute("DELETE FROM doc_profiles WHERE scope = ?", (scope,))
+            self._profiles.pop(scope, None)
+        else:
+            await office.db.execute(
+                "INSERT INTO doc_profiles(scope, profile_json, updated_by, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(scope) DO UPDATE SET profile_json = excluded.profile_json, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+                (scope, new.model_dump_json(), by, utcnow()),
+            )
+            self._profiles[scope] = new
+        await office.audit.record("doc:profile", "removed" if new.empty() else "saved", target=scope, detail={"by": by, **new.model_dump()})
+        office.bus.publish("doc.profile", scope=scope)
+        return None if new.empty() else new
+
+    async def profile_view(self, scope: str) -> dict[str, Any]:
+        """For the settings page: this layer, the layers under it, and the pack they give together."""
+        scope = await self._scope_key(scope.strip())
+        before = await self._before(scope)
+        own = self._profiles.get(scope)
+        try:
+            pack = resolve([*before, *([own] if own else [])], self.office.settings.data_dir) if before or own else default_pack()
+        except PackError:
+            pack = default_pack()
+        packs_dir = self.office.settings.data_dir / "packs"
+        return {
+            "scope": scope,
+            "profile": own.model_dump() if own else None,
+            "inherited": [p.model_dump() for p in before],
+            "pack": {"name": pack.name, "version": pack.version, "flows": list(pack.flows)},
+            "rules": [{"id": rule_id, "type": rule.type, "severity": rule.severity} for rule_id, rule in pack.rules.items()],
+            "packs": ["default", *sorted(p.name for p in packs_dir.iterdir() if (p / "pack.yaml").is_file())] if packs_dir.is_dir() else ["default"],
+        }
 
     # ---- keys ------------------------------------------------------------------------------------------------
 
-    def doctype_of(self, stored_key: str) -> str | None:
+    def doctype_of(self, stored_key: str, pack: StandardPack | None = None) -> str | None:
         base = stored_key.split(".", 1)[0]
-        return base if base in self.pack.doc_types else None
+        return base if base in (pack or self.pack).doc_types else None
 
     def core_key(self, ticket: Ticket, stored_key: str) -> str:
         base, _, item = stored_key.partition(".")
         return f"{ticket.key}.{item}/{base}" if item else f"{ticket.key}/{base}"
 
     def applies(self, ticket: Ticket) -> bool:
-        return is_pack_flow(ticket.stage_template)
+        return is_pack_flow(ticket.stage_template, self.pack_of(ticket))
 
-    def template_text(self, doctype: str) -> str:
-        if doctype not in self.pack.doc_types:
-            raise NotFound(f"Không có loại tài liệu '{doctype}'. Có: {', '.join(self.pack.doc_types)}")
-        return self.pack.template_text(doctype)
+    def spawn_of(self, ticket: Ticket, stage_id: str | None) -> Any:
+        return spawn_of(ticket.stage_template, stage_id, self.pack_of(ticket))
+
+    def template_text(self, doctype: str, ticket: Ticket | None = None) -> str:
+        pack = self.pack_of(ticket)
+        if doctype not in pack.doc_types:
+            raise NotFound(f"Không có loại tài liệu '{doctype}'. Có: {', '.join(pack.doc_types)}")
+        return pack.template_text(doctype)
 
     # ---- what a check looks at -------------------------------------------------------------------------------
 
@@ -87,23 +212,24 @@ class DocService:
         docs: dict[str, ParsedDoc] = {}
         own: dict[str, Document] = {}
         stored: dict[str, tuple[int, str]] = {}
+        pack = self.pack_of(ticket)
         for doc in await office.tickets.list_documents(ticket.id):
-            doctype = self.doctype_of(doc.key)
+            doctype = self.doctype_of(doc.key, pack)
             if doctype is None:
                 continue
             key = self.core_key(ticket, doc.key)
-            docs[key] = parse(doc.body, doctype, self.pack)
+            docs[key] = parse(doc.body, doctype, pack)
             own[key] = doc
             stored[key] = (ticket.id, doc.key)
         if ticket.parent_id is not None:
             parent = await office.tickets.get(ticket.parent_id)
             for doc in await office.tickets.list_documents(parent.id):
-                doctype = self.doctype_of(doc.key)
+                doctype = self.doctype_of(doc.key, pack)
                 if doctype is None or "." in doc.key:  # the specs of the other tasks are not this task's business
                     continue
                 key = self.core_key(parent, doc.key)
                 body = await self._body(parent.id, doc.key, doc.approved_revision) if doc.approved_revision else doc.body
-                docs[key] = parse(body, doctype, self.pack)
+                docs[key] = parse(body, doctype, pack)
                 stored[key] = (parent.id, doc.key)
         return DocSet(docs, own, stored)
 
@@ -118,11 +244,12 @@ class DocService:
     async def capture_baseline(self, ticket: Ticket, stored_key: str) -> Baseline | None:
         """Record what the current revision of a document is written from: the revisions of the documents its type
         is based on, as they are now. Called when the document is saved."""
-        doctype = self.doctype_of(stored_key)
+        pack = self.pack_of(ticket)
+        doctype = self.doctype_of(stored_key, pack)
         if doctype is None:
             return None
         office = self.office
-        wanted = set(self.pack.doc_types[doctype].based_on)
+        wanted = set(pack.doc_types[doctype].based_on)
         found: dict[str, int] = {}
         chain = [ticket] + ([await office.tickets.get(ticket.parent_id)] if ticket.parent_id is not None else [])
         for owner in chain:
@@ -146,10 +273,11 @@ class DocService:
                     out[key] = captured
         return out
 
-    async def _approved(self, ds: DocSet, baselines: dict[str, Baseline]) -> dict[str, Approved]:
+    async def _approved(self, ticket: Ticket, ds: DocSet, baselines: dict[str, Baseline]) -> dict[str, Approved]:
         """For every document something was written from: its latest approved revision, and which items changed
         between each revision a document pinned and that one."""
         office = self.office
+        pack = self.pack_of(ticket)
         out: dict[str, Approved] = {}
         pinned: dict[str, set[int]] = {}
         for baseline in baselines.values():
@@ -162,15 +290,15 @@ class DocService:
             doc = await office.tickets.get_document(ticket_id, stored_key)
             if doc is None or not doc.approved_revision:
                 continue
-            doctype = self.doctype_of(stored_key) or ""
-            latest = parse(await self._body(ticket_id, stored_key, doc.approved_revision), doctype, self.pack)
+            doctype = self.doctype_of(stored_key, pack) or ""
+            latest = parse(await self._body(ticket_id, stored_key, doc.approved_revision), doctype, pack)
             changed: dict[int, list[str]] = {}
             for revision in revisions:
                 if revision == doc.approved_revision:
                     changed[revision] = []
                     continue
                 old_body = await self._body(ticket_id, stored_key, revision)
-                changed[revision] = sorted(impact(parse(old_body, doctype, self.pack) if old_body else None, latest))
+                changed[revision] = sorted(impact(parse(old_body, doctype, pack) if old_body else None, latest))
             out[key] = Approved(revision=doc.approved_revision, changed_since=changed)
         return out
 
@@ -291,7 +419,7 @@ class DocService:
         ds = await self.docset(ticket)
         only = keys if keys is not None else (self.output_keys(ticket, stage, ds) if stage is not None else set(ds.own))
         baselines = await self._baselines(ticket, ds)
-        findings = run_rules(self.pack, ds.docs, await self.evidence(ticket, ds), baselines, await self._approved(ds, baselines), only_docs=only)
+        findings = run_rules(self.pack_of(ticket), ds.docs, await self.evidence(ticket, ds), baselines, await self._approved(ticket, ds, baselines), only_docs=only)
         findings += self._specs_per_task(ticket, ds, only)
         accepted = {
             r["finding_id"]: r for r in await self.office.db.fetchall("SELECT * FROM doc_findings WHERE ticket_id = ?", (ticket.id,))
@@ -320,10 +448,11 @@ class DocService:
         ds = await self.docset(ticket)
         findings = findings if findings is not None else await self.check(ticket)
         baselines = await self._baselines(ticket, ds)
-        approved = await self._approved(ds, baselines)
+        approved = await self._approved(ticket, ds, baselines)
         evidence = await self.evidence(ticket, ds)
+        pack = self.pack_of(ticket)
         return {
-            doc.key: match_state(self.pack, key, ds.docs[key], [f for f in findings if f.doc == key], baselines.get(key), approved, [e for e in evidence if e.doc == key])
+            doc.key: match_state(pack, key, ds.docs[key], [f for f in findings if f.doc == key], baselines.get(key), approved, [e for e in evidence if e.doc == key])
             for key, doc in ds.own.items()
         }
 
@@ -436,8 +565,22 @@ class DocService:
             "accepted": [f.model_dump() for f in findings if f.status == "accepted"],
             "children": children,
             "parent": parent,
-            "is_epic": spawn_of(ticket.stage_template, "breakdown") is not None,
+            "is_epic": self.spawn_of(ticket, "breakdown") is not None,
+            "switch_to": self.switchable(ticket),
         }
+
+    def switchable(self, ticket: Ticket) -> list[dict[str, str]]:
+        """Flows of the pack this ticket can move to from where it is, keeping its place (`task-spec` ↔ `task`)."""
+        from actoroffice.domain.stage import TEMPLATE_TITLES
+
+        pack = self.pack_of(ticket)
+        if ticket.status == TicketStatus.CANCELLED:
+            return []
+        return [
+            {"template": name, "title": TEMPLATE_TITLES.get(name, name)}
+            for name, stages in pack.flows.items()
+            if same_road(pack, ticket.stage_template or "", name) and ticket.stage in [s.id for s in stages]
+        ]
 
     # ---- a breakdown becomes tickets -------------------------------------------------------------------------
 
@@ -446,13 +589,13 @@ class DocService:
         it is handed to and the flow it follows. `response`: {"drop": ["T-3"], "flows": {"T-1": "task-spec"},
         "assign": {"T-1": "<user id or name>"}}. The epic then waits for its children."""
         office = self.office
-        spawn = spawn_of(ticket.stage_template, ticket.stage)
+        spawn = self.spawn_of(ticket, ticket.stage)
         if spawn is None:
             return []
         breakdown = await office.tickets.get_document(ticket.id, "breakdown")
         if breakdown is None:
             raise DocError(f"{ticket.key} chưa có tài liệu breakdown")
-        parsed = parse(breakdown.body, "breakdown", self.pack)
+        parsed = parse(breakdown.body, "breakdown", self.pack_of(ticket))
         drop = {str(d).upper() for d in response.get("drop") or []}
         flows = {str(k).upper(): str(v) for k, v in (response.get("flows") or {}).items()}
         assign = {str(k).upper(): str(v) for k, v in (response.get("assign") or {}).items()}
@@ -511,26 +654,27 @@ class DocService:
         office = self.office
         if not self.applies(ticket) or ticket.status == TicketStatus.CANCELLED:
             return []
-        approved_docs = [d for d in await office.tickets.list_documents(ticket.id) if self.doctype_of(d.key) and d.approved_revision == d.revision]
+        pack = self.pack_of(ticket)
+        approved_docs = [d for d in await office.tickets.list_documents(ticket.id) if self.doctype_of(d.key, pack) and d.approved_revision == d.revision]
         if not approved_docs:
             return []  # nothing approved, or the author is already working on a newer revision
         ds = await self.docset(ticket)
         baselines = await self._baselines(ticket, ds)
-        approved = await self._approved(ds, baselines)
+        approved = await self._approved(ticket, ds, baselines)
         evidence = await self.evidence(ticket, ds)
-        findings = run_rules(self.pack, ds.docs, evidence, baselines, approved, only_docs=set(ds.own))
+        findings = run_rules(pack, ds.docs, evidence, baselines, approved, only_docs=set(ds.own))
         tpl = await office.teams.template(ticket)
         done: list[dict[str, Any]] = []
         for doc in approved_docs:
             key = self.core_key(ticket, doc.key)
-            state = match_state(self.pack, key, ds.docs[key], [f for f in findings if f.doc == key], baselines.get(key), approved, [e for e in evidence if e.doc == key])
+            state = match_state(pack, key, ds.docs[key], [f for f in findings if f.doc == key], baselines.get(key), approved, [e for e in evidence if e.doc == key])
             if state == MatchState.LECH:
-                kind, action = "lech", self.pack.on_change.upstream_changed.get("when_item_affected", "revise")
+                kind, action = "lech", pack.on_change.upstream_changed.get("when_item_affected", "revise")
                 cause = ",".join(f"{k}@{approved[k].revision}" for k in sorted(baselines[key].docs) if k in approved)
                 detail = "; ".join(f.message for f in findings if f.doc == key and f.rule == "R-BASELINE")[:900]
                 what = f"tài liệu nó dựa trên đã có bản duyệt mới. {detail}"
             elif state == MatchState.CU:
-                kind, action = "cu", self.pack.on_change.evidence_stale.get("after_approval", "notify_author")
+                kind, action = "cu", pack.on_change.evidence_stale.get("after_approval", "notify_author")
                 stale = [e for e in evidence if e.doc == key and e.current_hash and e.current_hash != e.content_hash]
                 cause = content_hash("|".join(sorted(f"{e.item}:{e.source}:{e.current_hash}" for e in stale)))[:16]
                 what = "code được trích đã đổi ở " + ", ".join(sorted({f"{e.item} ({e.source})" for e in stale}))[:900]
@@ -599,7 +743,7 @@ class DocService:
             raise DocError("Cần nội dung bổ sung")
         office = self.office
         tpl = await office.teams.template(ticket)
-        if not self.applies(ticket) or tpl is None or not tpl.stages or spawn_of(ticket.stage_template, "breakdown") is None:
+        if not self.applies(ticket) or tpl is None or not tpl.stages or self.spawn_of(ticket, "breakdown") is None:
             raise DocError(f"{ticket.key} không phải epic")
         first = tpl.stages[0].id
         name = (await office.teams.find_user(by)).name if await office.teams.find_user(by) else by
@@ -615,7 +759,7 @@ class DocService:
     # ---- hooks -----------------------------------------------------------------------------------------------
 
     async def on_saved(self, ticket: Ticket, stored_key: str) -> None:
-        if self.doctype_of(stored_key) is not None:
+        if self.doctype_of(stored_key, self.pack_of(ticket)) is not None:
             await self.capture_baseline(ticket, stored_key)
 
     async def on_approved(self, ticket: Ticket, item: Interaction) -> None:

@@ -14,6 +14,8 @@ from importlib import metadata
 
 from actoroffice.ports.intel import Extractor, Fact, ParsedFile, ParsedSymbol, RepoFacts
 
+from .extractors_deploy import Deploy, documents, key_line
+
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
 
 
@@ -256,7 +258,245 @@ class BuildDeps:
         return [Fact(node_kind="module", name=n, edge="depends_on", line=line, meta={"library": True}) for n, line in names if n]
 
 
-BUILTIN: dict[str, type] = {c.name: c for c in (FastApi, HttpClient, Spring, MyBatis, BuildDeps)}
+class OpenApi:
+    """An OpenAPI 3 / Swagger 2 document (YAML or JSON) → the service exposes every `METHOD path` of `paths`, under
+    the base path of the first `servers[].url` (OpenAPI 3) or of `basePath` (Swagger 2)."""
+
+    name = "openapi"
+    MARK = re.compile(r"""["']?\b(?:openapi|swagger)["']?\s*:""")
+    METHODS = ("get", "put", "post", "delete", "options", "head", "patch", "trace")
+
+    def applies(self, repo: RepoFacts) -> bool:
+        return bool({"yaml", "json"} & set(repo.languages))
+
+    def extract(self, file: ParsedFile, repo: RepoFacts) -> list[Fact]:
+        if file.lang not in ("yaml", "json") or "paths" not in file.text or not self.MARK.search(file.text):
+            return []
+        facts: list[Fact] = []
+        for doc in documents(file):
+            paths = doc.get("paths") if isinstance(doc, dict) and ("openapi" in doc or "swagger" in doc) else None
+            if not isinstance(paths, dict):
+                continue
+            base, known = self._base(doc)
+            for path, item in paths.items():
+                if not isinstance(path, str) or not path.startswith("/") or not isinstance(item, dict):
+                    continue
+                for method, operation in item.items():
+                    if not isinstance(method, str) or method.lower() not in self.METHODS:
+                        continue
+                    told = {k: str(operation[k])[:120] for k in ("operationId", "summary") if isinstance(operation, dict) and isinstance(operation.get(k), str)}
+                    facts.append(Fact(node_kind="endpoint", name=endpoint(method, f"{base}/{path}"), edge="exposes", line=key_line(item, method),
+                                      confidence="exact" if known else "heuristic", meta={"spec": True, **told}))  # fmt: skip
+        return facts
+
+    @staticmethod
+    def _base(doc: dict) -> tuple[str, bool]:
+        """(base path, False when a server variable without a default leaves it unknown)."""
+        if isinstance(doc.get("basePath"), str):
+            return doc["basePath"], True
+        servers = doc.get("servers")
+        server = servers[0] if isinstance(servers, list) and servers and isinstance(servers[0], dict) else {}
+        url = server.get("url")
+        if not isinstance(url, str):
+            return "", True
+        variables = server.get("variables") if isinstance(server.get("variables"), dict) else {}
+
+        def default(m: re.Match[str]) -> str:
+            variable = variables.get(m.group(1))
+            value = variable.get("default") if isinstance(variable, dict) else None
+            return value if isinstance(value, str) else "\0"
+
+        path = re.sub(r"^(?:[A-Za-z][\w+.-]*:)?//[^/]*", "", re.sub(r"\{(\w+)\}", default, url))
+        if "\0" in path:
+            return "", False
+        return (path if path.startswith("/") else ""), True
+
+
+def _after_call(text: str, start: int) -> int:
+    """The index just after the `)` that closes the `(` at `start`, strings and comments skipped; -1 when it is not
+    closed within reach."""
+    depth, i, end = 0, start, min(len(text), start + 20000)
+    while i < end:
+        ch = text[i]
+        if ch in "\"'`":
+            i += 1
+            while i < end and text[i] != ch:
+                i += 2 if text[i] == "\\" else 1
+        elif text.startswith("//", i):
+            i = text.find("\n", i)
+            if i < 0:
+                return -1
+        elif text.startswith("/*", i):
+            i = text.find("*/", i) + 1
+            if i <= 0:
+                return -1
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+class Express:
+    """Express-style routing in JS / TS: `app.get('/x', …)`, `router.post('/x', …)`, `router.route('/x').get(…)`,
+    under the prefix of `app.use('/api', router)` when the mount is in the same file. And NestJS controllers:
+    `@Controller('x')` on the class, `@Get(':id')` on the method.
+
+    A route of a router that is not mounted in its own file is `heuristic`: the prefix it is mounted under (in
+    another file) is missing from the path."""
+
+    name = "express"
+    VERBS = ("get", "post", "put", "patch", "delete", "head", "options", "all")
+    RECEIVER = r"(?<![\w$.])(?:this\.)?(\w+)\s*\.\s*"
+    DECLARED = re.compile(r"""\b(\w+)\s*(?::\s*[\w.<>]+\s*)?=\s*(?:new\s+)?(express\s*\(|require\(\s*["']express["']\s*\)\s*\(|(?:\w+\.)?Router\s*\()""")
+    ROUTE = re.compile(RECEIVER + r"""(get|post|put|patch|delete|head|options|all)\s*(?:<[^<>()]*>)?\(\s*(["'`])([^"'`\n]*)\3\s*(,)?""")
+    CHAIN = re.compile(RECEIVER + r"""route\s*\(\s*(["'`])([^"'`\n]*)\2\s*\)""")
+    CHAINED = re.compile(r"\s*\.\s*(\w+)\s*\(")
+    USE = re.compile(RECEIVER + r"""use\s*\(\s*(?:(["'`])([^"'`\n]*)\2\s*,)?""")
+    NAMED_LIKE = re.compile(r"^(app|router|routes)$|(App|Router|Routes)$")  # a receiver that was not declared in the file
+    NEST = re.compile(r"@(Controller|Get|Post|Put|Patch|Delete|Head|Options|All)\s*\(")
+
+    def applies(self, repo: RepoFacts) -> bool:
+        return bool({"javascript", "typescript", "tsx"} & set(repo.languages))
+
+    def extract(self, file: ParsedFile, repo: RepoFacts) -> list[Fact]:
+        if file.lang not in ("javascript", "typescript", "tsx"):
+            return []
+        return self._routes(file) + (self._nest(file) if "@Controller" in file.text else [])
+
+    def _routes(self, file: ParsedFile) -> list[Fact]:
+        text = file.text
+        declared = {m.group(1): "Router" not in m.group(2) for m in self.DECLARED.finditer(text)}  # name → is it the app (not a router)
+        routes: list[tuple[int, str, str, str]] = []  # position, receiver, verb, path
+        for m in self.ROUTE.finditer(text):
+            receiver, path = m.group(1), m.group(4)
+            if path.startswith(("/", "*", "${")) and (receiver in declared or (m.group(5) and self.NAMED_LIKE.search(receiver))):
+                routes.append((m.start(), receiver, m.group(2), path))
+        for m in self.CHAIN.finditer(text):
+            pos = m.end()
+            while (step := self.CHAINED.match(text, pos)) is not None:
+                if step.group(1) in self.VERBS:
+                    routes.append((step.start(1), m.group(1), step.group(1), m.group(3)))
+                pos = _after_call(text, step.end() - 1)
+                if pos < 0:
+                    break
+        routes.sort()
+        if not routes:
+            return []
+        uses = list(self.USE.finditer(text))
+        routers = set(declared) | {r[1] for r in routes} | {m.group(1) for m in uses}
+        mounted: dict[str, list[tuple[str, str]]] = {}  # router → (what it is mounted on, at which path)
+        for m in uses:
+            end = _after_call(text, text.index("(", m.start()))
+            rest = re.sub(r"""(["'`]).*?\1""", "", text[m.end() : end - 1]) if end > 0 else ""
+            for child in (set(re.findall(r"[A-Za-z_$][\w$]*", rest)) & routers) - {m.group(1)}:
+                mounted.setdefault(child, []).append((m.group(1), m.group(3) or ""))
+
+        def prefixes(name: str, depth: int = 0) -> list[tuple[str, bool]]:
+            """(prefix, is it the whole prefix) for each place a router is reachable from."""
+            if declared.get(name) or (name not in declared and re.search(r"^app$|App$", name)):
+                return [("", True)]
+            if name not in mounted or depth > 5:
+                return [("", False)]
+            return [(f"{prefix}/{path}", whole) for parent, path in mounted[name] for prefix, whole in prefixes(parent, depth + 1)]
+
+        facts: list[Fact] = []
+        for pos, receiver, verb, path in routes:
+            line = _line_of(text, pos)
+            for prefix, whole in prefixes(receiver):
+                facts.append(Fact(node_kind="endpoint", name=endpoint("ANY" if verb == "all" else verb, f"{prefix}/{path}"), edge="exposes", line=line,
+                                  symbol=_symbol_at(file, line), confidence="exact" if whole and "${" not in path else "heuristic"))  # fmt: skip
+        return facts
+
+    def _nest(self, file: ParsedFile) -> list[Fact]:
+        facts: list[Fact] = []
+        owner: ParsedSymbol | None = None
+        prefix = ""
+        for m in self.NEST.finditer(file.text):
+            end = _after_call(file.text, m.end() - 1)
+            if end < 0:
+                continue
+            args, line = file.text[m.end() : end - 1], _line_of(file.text, m.start())
+            named = re.search(r"""\bpath\s*:\s*["'`]([^"'`]*)""", args)
+            path = (named.group(1) if named else "") if args.lstrip().startswith("{") else _string_arg(args) or ""
+            if m.group(1) == "Controller":
+                owner = min((s for s in file.symbols if s.kind == "class" and s.start >= line), key=lambda s: s.start, default=None)
+                prefix = path
+            elif owner is not None and line <= owner.end:
+                method = min((s for s in file.symbols if s.parent == owner.qualified and s.start >= line), key=lambda s: s.start, default=owner)
+                verb = "ANY" if m.group(1) == "All" else m.group(1)
+                facts.append(Fact(node_kind="endpoint", name=endpoint(verb, f"{prefix}/{path}"), edge="exposes", line=line, symbol=method.qualified))
+        return facts
+
+
+def snake_case(name: str) -> str:
+    """`OrderItem` → `order_item`: the table Spring Boot's naming gives an entity that has no `@Table(name=…)`."""
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", name).lower()
+
+
+class Jpa:
+    """Spring Data repositories. `interface OrderRepository extends JpaRepository<Order, Long>` reads and writes the
+    table of `Order`; `@Query` names tables (native SQL) or entities (JPQL).
+
+    An extractor sees one file, so the `@Table(name=…)` of an entity in another file is not known here: the table of
+    an entity is the snake_case of its name, `heuristic`, with the entity in `meta`."""
+
+    name = "jpa"
+    BASE = re.compile(r"\b(?:Jpa|Crud|ListCrud|PagingAndSorting|ListPagingAndSorting)Repository\s*<\s*([\w.]+)")
+    QUERY = re.compile(r"@Query\s*\(")
+    STRING = re.compile(r'"""(.*?)"""|"((?:[^"\\]|\\.)*)"', re.S)
+
+    def applies(self, repo: RepoFacts) -> bool:
+        return "java" in repo.languages
+
+    def extract(self, file: ParsedFile, repo: RepoFacts) -> list[Fact]:
+        if file.lang != "java" or ("Repository" not in file.text and "@Query" not in file.text):
+            return []
+        facts: list[Fact] = []
+        for s in file.symbols:
+            m = self.BASE.search(s.signature) if s.kind == "interface" and not any(d.startswith("NoRepositoryBean") for d in s.decorators) else None
+            entity = m.group(1).rsplit(".", 1)[-1] if m else ""
+            if entity and not re.fullmatch(r"[A-Z][A-Z0-9]?", entity):  # `T`, `ID`: a type variable of a base repository
+                facts += self._tables({entity}, {entity}, s.start, s.qualified)
+        for m in self.QUERY.finditer(file.text):
+            end = _after_call(file.text, m.end() - 1)
+            if end < 0:
+                continue
+            args, line = file.text[m.end() : end - 1], _line_of(file.text, m.start())
+            sql = " ".join(a or b for a, b in self.STRING.findall(args))
+            symbol = _symbol_at(file, line)
+            if re.search(r"\bnativeQuery\s*=\s*true\b", self.STRING.sub("", args)):
+                reads, writes = sql_tables(sql)
+                facts += [Fact(node_kind="table", name=t, edge=edge, line=line, symbol=symbol) for edge, found in (("reads", reads), ("writes", writes)) for t in sorted(found)]
+            else:
+                facts += self._tables(*self._entities(sql), line, symbol)
+        return facts
+
+    @staticmethod
+    def _entities(jpql: str) -> tuple[set[str], set[str]]:
+        """(entities read, entities written) of a JPQL statement. `join o.items` follows an association: it names
+        no entity."""
+        jpql = re.sub(r"(?i)#\{[^}]*\}|\bfetch\b", " ", jpql)
+
+        def named(found: list[str]) -> set[str]:
+            return {n.rsplit(".", 1)[-1] for n in found if n.lower() not in SQL_WORDS and ("." not in n or n.rsplit(".", 1)[-1][:1].isupper())}
+
+        writes = named(SQL_WRITE.findall(jpql))
+        return named(SQL_READ.findall(jpql)) - writes, writes
+
+    @staticmethod
+    def _tables(reads: set[str], writes: set[str], line: int, symbol: str) -> list[Fact]:
+        return [
+            Fact(node_kind="table", name=snake_case(e), edge=edge, line=line, symbol=symbol, confidence="heuristic", meta={"entity": e} if e[:1].isupper() else {})
+            for edge, found in (("reads", reads), ("writes", writes))
+            for e in sorted(found)
+        ]
+
+
+BUILTIN: dict[str, type] = {c.name: c for c in (FastApi, HttpClient, Spring, MyBatis, BuildDeps, OpenApi, Express, Jpa, Deploy)}
 
 
 def load(names: list[str] | None = None) -> list[Extractor]:

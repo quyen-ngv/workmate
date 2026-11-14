@@ -20,6 +20,10 @@ BUILTIN = {
     "confluence_cloud": "actoroffice.adapters.atlassian.confluence_cloud:ConfluenceCloud",
     "bitbucket_cloud": "actoroffice.adapters.bitbucket_cloud:BitbucketCloud",
     "github": "actoroffice.adapters.github:GitHub",
+    # generic: an outside system connected by configuration only
+    "http": "actoroffice.adapters.generic.http:GenericHttp",
+    "mcp": "actoroffice.adapters.generic.mcp:GenericMcp",
+    "command": "actoroffice.adapters.generic.command:GenericCommand",
 }
 ENTRY_POINT_GROUP = "actoroffice.adapters"
 

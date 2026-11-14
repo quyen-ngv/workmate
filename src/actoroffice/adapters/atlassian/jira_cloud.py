@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 from actoroffice.adapters._http import Http, host_of, now_iso
 from actoroffice.adapters.atlassian import CONFLUENCE_KIND, JIRA_KIND
 from actoroffice.adapters.atlassian.adf import adf_to_markdown, text_to_adf
-from actoroffice.adapters.atlassian.auth import SECRET_FIELDS, build_client, has_credentials, missing_secret_error, normalize_site
+from actoroffice.adapters.atlassian.auth import CLOUD_ID_HELP, SCOPED_TOKEN_HINT, SECRET_FIELDS, build_client, check_cloud_id, has_credentials, missing_secret_error, normalize_site
 from actoroffice.ports.connection import Capability, ConnectorError, Health, Scope
 from actoroffice.ports.docs import Attachment, DocContent, DocHit, DocRef, Issue
 
@@ -27,13 +27,17 @@ ISSUE_KEY_RE = re.compile(r"[A-Z][A-Z0-9_]*-\d+")
 _KEY_IN_TEXT_RE = re.compile(r"(?<![A-Za-z0-9_/-])([A-Z][A-Z0-9_]*)-\d+(?![A-Za-z0-9_])")
 _URL_RE = re.compile(r"https?://[^\s<>\"'\]\)]+")
 
-# ---- NEEDS CHECKING against Atlassian's current documentation (spec V-1): one place for each guess.
+# ---- Checked on 2026-11-14 against the Jira Cloud platform REST API v3 reference (developer.atlassian.com/cloud/jira/platform/rest/v3)
+# and its OpenAPI document (spec V-1). Classic scopes, which Atlassian recommends where they exist; they matter for a token
+# with scopes (see auth.py) and for OAuth. A token without scopes can do whatever its user can.
 REQUIRED_SCOPES: dict[Capability, list[str]] = {
-    Capability.DOCS: ["read:jira-work"],
-    Capability.TRACKER: ["read:jira-work", "write:jira-work"],  # write:jira-work only when the connection may comment
+    Capability.DOCS: ["read:jira-work", "read:jira-user"],  # read:jira-user is for /myself, which `test()` calls
+    Capability.TRACKER: ["read:jira-work", "read:jira-user", "write:jira-work"],  # write:jira-work only when the connection may comment
 }
 API = "/rest/api/3"
-SEARCH_PATH = f"{API}/search/jql"  # the token-paged search; the older /search is being retired
+# "Search for issues using JQL enhanced search": paged by `nextPageToken`, returns only ids unless `fields` is given, and
+# refuses an unbounded JQL (one with no restriction, such as a bare ORDER BY). GET/POST /search are deprecated.
+SEARCH_PATH = f"{API}/search/jql"
 COMMENT_ORDER = "-created"  # `orderBy` value that returns the newest comment first
 CHILDREN_JQL = "parent = {key}"  # issues under an epic, and sub-tasks
 IDENTITY_PATH = f"{API}/myself"
@@ -46,6 +50,7 @@ SEARCH_PAGE = 50
 
 class JiraCloudConfig(BaseModel):
     site: str = Field(description="Địa chỉ site, ví dụ https://acme.atlassian.net")
+    cloud_id: str = Field(default="", description=CLOUD_ID_HELP)
     projects: list[str] = Field(default_factory=list, description="Khoá dự án được phép đọc (PAY, CORE). Để trống: mọi dự án token đọc được")
     fields: dict[str, str] = Field(default_factory=dict, description="Trường tuỳ biến cần lấy, ví dụ acceptance → customfield_10042")
     poll_s: int = Field(default=120, ge=0, description="Chu kỳ hỏi thay đổi (giây); 0 là tắt")
@@ -59,6 +64,11 @@ class JiraCloudConfig(BaseModel):
         if not host_of(site):
             raise ValueError("site phải là địa chỉ như https://acme.atlassian.net")
         return site
+
+    @field_validator("cloud_id")
+    @classmethod
+    def _cloud_id(cls, value: str) -> str:
+        return check_cloud_id(value)
 
     @field_validator("projects")
     @classmethod
@@ -109,7 +119,8 @@ class JiraCloud:
         self.config = config
         self.site = config.site
         self.host = host_of(config.site)
-        self.http = Http(build_client(config.site, secret, product="jira", transport=transport), label=LABEL, blocked=None if has_credentials(secret) else missing_secret_error(LABEL))
+        client = build_client(config.site, secret, product="jira", cloud_id=config.cloud_id, transport=transport)
+        self.http = Http(client, label=LABEL, blocked=None if has_credentials(secret) else missing_secret_error(LABEL))
 
     async def close(self) -> None:
         await self.http.close()
@@ -120,7 +131,8 @@ class JiraCloud:
         try:
             me = await self.http.json("GET", IDENTITY_PATH)
         except ConnectorError as exc:
-            return Health(state="error", checked_at=now_iso(), detail=str(exc))
+            hint = SCOPED_TOKEN_HINT if exc.kind == "auth" and not self.config.cloud_id else ""
+            return Health(state="error", checked_at=now_iso(), detail=str(exc) + hint)
         identity = str((me or {}).get("emailAddress") or (me or {}).get("displayName") or "") or None
         return Health(state="ok", checked_at=now_iso(), detail="Đã kết nối Jira. API token (Basic) không cho biết quyền, nên chưa đối chiếu được quyền thiếu.", identity=identity)
 
@@ -238,7 +250,7 @@ class JiraCloud:
                 {"author": str((c.get("author") or {}).get("displayName") or ""), "created": str(c.get("created") or ""), "body": adf_to_markdown(c.get("body"))}
                 for c in comments[: self.config.max_comments]
             ]
-        for item in await self.http.json("GET", f"{API}/issue/{key}/remotelink") or []:
+        for item in await self._remote_links(key):
             target = item.get("object") or {}
             url = str(target.get("url") or "")
             if not url:
@@ -248,6 +260,15 @@ class JiraCloud:
             if link is not None and link not in issue.links:
                 issue.links.append(link)
         return issue, extra
+
+    async def _remote_links(self, key: str) -> list[dict[str, Any]]:
+        """Remote links of an issue. Jira answers 403 when issue linking is switched off for the site: that is "none"."""
+        try:
+            return await self.http.json("GET", f"{API}/issue/{key}/remotelink") or []
+        except ConnectorError as exc:
+            if exc.kind != "forbidden":
+                raise
+            return []
 
     async def issue(self, key: str) -> Issue:
         return (await self._load(key))[0]
@@ -276,8 +297,8 @@ class JiraCloud:
                 body["nextPageToken"] = token
             data = await self.http.json("POST", SEARCH_PATH, json=body) or {}
             issues += [self._issue(item)[0] for item in data.get("issues") or []]
-            token = data.get("nextPageToken")
-            if not token or data.get("isLast", True):
+            token = data.get("nextPageToken")  # null on the last page
+            if not token or data.get("isLast"):
                 break
         return issues[:limit]
 

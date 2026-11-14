@@ -23,6 +23,7 @@ from actoroffice.ports.connection import Capability, ConnectorError, Scope
 from actoroffice.ports.docs import DocRef
 
 SITE = "https://acme.atlassian.net"
+CLOUD_ID = "11223344-a1b2-3b33-c444-def123456789"
 SECRET = {"email": "bot@acme.test", "token": "tok-123"}
 SCOPE = Scope(team_id="pay")
 J = "jira_cloud"
@@ -113,6 +114,31 @@ async def test_http_gives_up_after_four_attempts_with_retry_after_on_the_error()
     with pytest.raises(ConnectorError) as err:
         await http.json("GET", "/x")
     assert (err.value.kind, err.value.retry_after, len(calls), sleeps) == ("rate_limited", 2.0, 4, [2.0, 2.0, 2.0])
+
+
+async def test_http_does_not_call_again_when_the_named_wait_is_longer_than_one_sleep() -> None:
+    # Atlassian: "Retry-After: 1847" on a used-up quota. No request is spent before that time; the error says how long.
+    calls = []
+    http, sleeps = make_http(lambda request: calls.append(1) or httpx.Response(429, headers={"Retry-After": "1847", "X-RateLimit-Reset": "2026-11-14T15:00:00Z"}))
+    with pytest.raises(ConnectorError) as err:
+        await http.json("GET", "/x")
+    assert (err.value.kind, err.value.retry_after, len(calls), sleeps) == ("rate_limited", 1847.0, 1, [])
+
+
+async def test_http_waits_until_the_reset_time_github_names() -> None:
+    # GitHub: 403 or 429 with x-ratelimit-remaining 0 and x-ratelimit-reset in UTC epoch seconds, often without Retry-After.
+    now = 1_800_000_000.0
+    answers = [httpx.Response(403, headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(int(now) + 20)}), httpx.Response(200, json={"ok": True})]
+    http, sleeps = make_http(lambda request: answers.pop(0), clock=lambda: now)
+    assert await http.json("GET", "/x") == {"ok": True}
+    assert sleeps == [20.0]
+
+    calls = []
+    far = httpx.Response(429, headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(int(now) + 1800)})
+    http, sleeps = make_http(lambda request: calls.append(1) or far, clock=lambda: now)
+    with pytest.raises(ConnectorError) as err:
+        await http.json("GET", "/x")
+    assert (err.value.kind, err.value.retry_after, len(calls), sleeps) == ("rate_limited", 1800.0, 1, [])
 
 
 async def test_http_does_not_repeat_a_post_on_5xx_and_maps_transport_errors() -> None:
@@ -375,11 +401,46 @@ def jira_fake() -> Fake:
 def test_jira_declares_what_the_registry_needs() -> None:
     assert (JiraCloud.name, JiraCloud.config_schema, JiraCloud.secret_fields) == ("jira_cloud", JiraCloudConfig, ("email", "token"))
     assert JiraCloud.capabilities == frozenset({Capability.DOCS, Capability.TRACKER}) and JiraCloud.title
-    assert set(JiraCloud.required_scopes) == set(JiraCloud.capabilities)
+    assert JiraCloud.required_scopes == {Capability.DOCS: ["read:jira-work", "read:jira-user"], Capability.TRACKER: ["read:jira-work", "read:jira-user", "write:jira-work"]}
     assert JiraCloudConfig(site="acme.atlassian.net/").site == SITE
     assert JiraCloudConfig(site=SITE).write is False
     with pytest.raises(ValueError):
         JiraCloudConfig(site=SITE, projects=["pay; drop"])
+    assert JiraCloudConfig(site=SITE).cloud_id == "" and JiraCloudConfig(site=SITE, cloud_id=f" {CLOUD_ID} ").cloud_id == CLOUD_ID
+    with pytest.raises(ValueError):
+        JiraCloudConfig(site=SITE, cloud_id="../../evil")
+
+
+async def test_jira_token_with_scopes_goes_through_the_gateway() -> None:
+    gateway = f"/ex/jira/{CLOUD_ID}"
+    fake = Fake({("GET", f"{gateway}/rest/api/3/issue/PAY-120"): ISSUE, ("GET", f"{gateway}/rest/api/3/issue/PAY-120/remotelink"): [], ("GET", f"{gateway}/rest/api/3/myself"): {"displayName": "Bot"}})
+    adapter = jira(fake, cloud_id=CLOUD_ID, max_comments=0)
+    issue = await adapter.issue("PAY-120")
+    assert (issue.key, issue.url) == ("PAY-120", f"{SITE}/browse/PAY-120")  # links for people stay on the site
+    assert (await adapter.test()).state == "ok"
+    assert {r.url.host for r in fake.requests} == {"api.atlassian.com"}
+    assert all(r.headers["authorization"].startswith("Basic ") for r in fake.requests)
+
+
+async def test_jira_search_follows_next_page_tokens() -> None:
+    def page(request: httpx.Request) -> dict[str, Any]:
+        sent = json.loads(request.content)
+        if sent.get("nextPageToken") == "tok-2":
+            return {"issues": [{"key": "PAY-3", "fields": {"summary": "ba"}}], "isLast": True}
+        return {"issues": [{"key": "PAY-1", "fields": {"summary": "một"}}, {"key": "PAY-2", "fields": {"summary": "hai"}}], "nextPageToken": "tok-2", "isLast": False}
+
+    fake = Fake({("POST", "/rest/api/3/search/jql"): page})
+    assert [i.key for i in await jira(fake).search("status = Open", 10)] == ["PAY-1", "PAY-2", "PAY-3"]
+    first, second = (json.loads(r.content) for r in fake.requests)
+    assert ("nextPageToken" in first, second["nextPageToken"], first["fields"]) == (False, "tok-2", second["fields"])
+    assert "summary" in first["fields"]  # the search returns ids only unless fields are named
+
+
+async def test_jira_issue_is_still_read_when_issue_linking_is_off() -> None:
+    fake = jira_fake()
+    fake.routes[("GET", "/rest/api/3/issue/PAY-120/remotelink")] = httpx.Response(403)  # what Jira answers when issue linking is disabled
+    issue = await jira(fake).issue("PAY-120")
+    assert issue.key == "PAY-120" and DocRef(ref=f"{SITE}/wiki/x/AbC1", kind=C) not in issue.links
 
 
 async def test_jira_fetch_returns_markdown_links_and_version() -> None:
@@ -481,6 +542,9 @@ async def test_jira_health_and_missing_secret() -> None:
     denied = Fake({("GET", "/rest/api/3/myself"): httpx.Response(401, text="tok-123 is wrong")})
     health = await jira(denied).test()
     assert health.state == "error" and "tok-123" not in health.detail and "401" in health.detail
+    assert "cloud_id" in health.detail  # a token with scopes is refused on the site URL: the message says what to set
+    fake = Fake({("GET", f"/ex/jira/{CLOUD_ID}/rest/api/3/myself"): httpx.Response(401)})
+    assert "cloud_id" not in (await jira(fake, cloud_id=CLOUD_ID).test()).detail
 
 
 async def test_jira_error_kinds_and_retry() -> None:
@@ -522,9 +586,13 @@ def wiki(fake: Fake, secret: dict[str, str] | None = None, **config: Any) -> Con
 
 def wiki_fake() -> Fake:
     def children(request: httpx.Request) -> dict[str, Any]:
+        # REST v2 "Get direct children of a page": every kind of child with its `type`, paged by `_links.next` (a relative URL).
         if "cursor" in request.url.params:
-            return {"results": [{"id": "113", "title": "Con 2", "spaceId": "900"}, {"id": "114", "title": "Của HR", "spaceId": "901"}]}
-        return {"results": [{"id": "112", "title": "Con 1", "spaceId": "900"}], "_links": {"next": "/wiki/api/v2/pages/111/children?cursor=abc"}}
+            more = [{"id": "113", "status": "current", "title": "Con 2", "type": "page", "spaceId": "900", "childPosition": 2}]
+            return {"results": [*more, {"id": "114", "status": "current", "title": "Của HR", "type": "page", "spaceId": "901", "childPosition": 3}]}
+        first = [{"id": "112", "status": "current", "title": "Con 1", "type": "page", "spaceId": "900", "childPosition": 0}]
+        folder = {"id": "115", "status": "current", "title": "Thư mục", "type": "folder", "spaceId": "900", "childPosition": 1}
+        return {"results": [*first, folder], "_links": {"next": "/wiki/api/v2/pages/111/direct-children?cursor=abc", "base": f"{SITE}/wiki"}}
 
     def pages(request: httpx.Request) -> dict[str, Any]:
         return {"results": [INCLUDED] if request.url.params.get("title") == "Quy ước chung" else []}
@@ -538,7 +606,7 @@ def wiki_fake() -> Fake:
             ("GET", "/wiki/api/v2/spaces"): {"results": [{"id": "900", "key": "PAY"}]},
             ("GET", "/wiki/api/v2/pages"): pages,
             ("GET", "/wiki/api/v2/pages/111/attachments"): ATTACHMENTS,
-            ("GET", "/wiki/api/v2/pages/111/children"): children,
+            ("GET", "/wiki/api/v2/pages/111/direct-children"): children,
             ("GET", "/wiki/x/AbC1"): httpx.Response(302, headers={"Location": "/wiki/spaces/PAY/pages/111/Thiet+ke"}),
             ("GET", "/wiki/x/Evil"): httpx.Response(302, headers={"Location": "https://evil.example/wiki/spaces/PAY/pages/111"}),
             ("GET", "/wiki/rest/api/content/search"): {"results": [{"id": "111", "title": "Thiết kế hoàn tiền", "space": {"key": "PAY"}, "_links": {"webui": "/spaces/PAY/pages/111"}}]},
@@ -552,6 +620,18 @@ def test_confluence_declares_what_the_registry_needs() -> None:
     assert ConfluenceCloud.capabilities == frozenset({Capability.DOCS, Capability.WIKI}) and ConfluenceCloud.title
     config = ConfluenceCloudConfig(site=SITE + "/wiki")
     assert (config.site, config.spaces, config.follow_links.depth, config.follow_links.max, config.mirror, config.write) == (SITE, [], 1, 20, False, False)
+    read = ["read:page:confluence", "read:space:confluence", "read:attachment:confluence", "search:confluence", "read:confluence-user"]
+    assert ConfluenceCloud.required_scopes == {Capability.DOCS: read, Capability.WIKI: [*read, "read:hierarchical-content:confluence", "write:page:confluence"]}
+
+
+async def test_confluence_token_with_scopes_goes_through_the_gateway() -> None:
+    gateway = f"/ex/confluence/{CLOUD_ID}/wiki"
+    fake = Fake({("GET", f"{gateway}/api/v2/pages/111"): {**PAGE, "body": {"storage": {"value": "<p>chào</p>"}}}, ("GET", f"{gateway}/api/v2/spaces/900"): {"id": "900", "key": "PAY"}})
+    fake.routes[("GET", f"{gateway}/api/v2/pages/111/attachments")] = {"results": []}
+    page = await wiki(fake, cloud_id=CLOUD_ID).page("111")
+    assert (page.body, page.url) == ("chào", f"{SITE}/wiki/spaces/PAY/pages/111/Thiet+ke")  # links for people stay on the site
+    assert {r.url.host for r in fake.requests} == {"api.atlassian.com"}
+    assert all(r.headers["authorization"].startswith("Basic ") for r in fake.requests)
 
 
 async def test_confluence_page_and_fetch_embed_includes_and_keep_notes() -> None:
@@ -663,9 +743,9 @@ async def test_confluence_fetch_by_space_and_title() -> None:
 async def test_confluence_children_follow_pages_and_drop_other_spaces() -> None:
     fake = wiki_fake()
     kids = await wiki(fake).children("111")
-    assert [(k.id, k.title, k.space) for k in kids] == [("112", "Con 1", "PAY"), ("113", "Con 2", "PAY")]
+    assert [(k.id, k.title, k.space) for k in kids] == [("112", "Con 1", "PAY"), ("113", "Con 2", "PAY")]  # no folder, no page of HR
     assert kids[0].url == f"{SITE}/wiki/pages/viewpage.action?pageId=112"
-    assert fake.paths().count("/wiki/api/v2/pages/111/children") == 2
+    assert fake.paths().count("/wiki/api/v2/pages/111/direct-children") == 2
 
 
 async def test_confluence_search_is_limited_to_the_allowed_spaces() -> None:

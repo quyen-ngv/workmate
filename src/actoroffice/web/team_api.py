@@ -318,6 +318,8 @@ def register(app: FastAPI, office: Office) -> None:
             target = "quick" if cmd == "quick" else "code"
             label = "Sửa nhỏ" if cmd == "quick" else "đầy đủ"
             ticket = await stages.switch_template(key, target, reason=body.text or f"người chọn quy trình {label}", by=by)
+        elif cmd == "flow":  # stage = the flow to move to (two flows of the pack that share their beginning)
+            ticket = await stages.switch_template(key, body.stage.strip(), reason=body.text or "người đổi quy trình", by=by)
         elif cmd == "approved_script":
             ticket = await stages.external_passed(key, "script", by=by, note=body.text or "đã duyệt")
         elif cmd == "grow":

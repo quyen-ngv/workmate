@@ -60,7 +60,7 @@ def test_epic_is_a_kind_of_work_people_can_start(web) -> None:
     assert task["stage"] == "analyze" and task["stage_template"] == "epic"
     stage = c.get(f"/api/tickets/{task['key']}/stage").json()
     assert [s["id"] for s in stage["template"]["stages"]] == ["analyze", "breakdown", "close"]
-    assert stage["docs"] == {"docs": [], "open": [], "warnings": [], "accepted": [], "children": [], "parent": None, "is_epic": True}
+    assert stage["docs"] == {"docs": [], "open": [], "warnings": [], "accepted": [], "children": [], "parent": None, "is_epic": True, "switch_to": []}
     plain = c.post("/api/tasks", json={"title": "Việc thường", "template": "code"}, headers=HEADERS).json()
     assert c.get(f"/api/tickets/{plain['key']}/stage").json()["docs"] is None
 

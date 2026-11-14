@@ -36,6 +36,7 @@ class TeamService:
     def __init__(self, db: Database, bus: EventBus) -> None:
         self.db = db
         self.bus = bus
+        self.pack_of: Any = None  # ticket → the standard pack it follows (set by the office: DocService.pack_of)
 
     # ---- users ------------------------------------------------------------------------------------
 
@@ -277,14 +278,14 @@ class TeamService:
             team = await self.get_team(ticket.team_id)
             if name in team.settings.stage_templates:
                 return team.settings.stage_templates[name]
-        return default_templates().get(name) or pack_templates().get(name)
+        return default_templates().get(name) or pack_templates(self.pack_of(ticket) if self.pack_of else None).get(name)
 
     async def gate_policy(self, ticket: Ticket, gate: str) -> GatePolicy:
         if ticket.team_id:
             team = await self.get_team(ticket.team_id)
             if gate in team.settings.gates:
                 return team.settings.gates[gate]
-        return default_gates().get(gate) or pack_gates().get(gate) or GatePolicy(roles=["owner"])
+        return default_gates().get(gate) or pack_gates(self.pack_of(ticket) if self.pack_of else None).get(gate) or GatePolicy(roles=["owner"])
 
 
 def _user(row: dict[str, Any]) -> User:

@@ -39,6 +39,9 @@ class Settings(BaseModel):
     doc_pack: str | None = None
     doc_sweep_s: float = 600  # how often approved documents are compared with the code they cite (0 = off)
     ai_review: bool = True  # an independent reviewer session reads the diff before a build stage finishes
+    # The office as a read-only MCP server at /mcp for developers' IDEs, each with a personal token (web/mcp_api.py).
+    # Off unless asked for: it lets code and documents be read from outside the office's own runs.
+    mcp_server: bool = False
     environment: dict = {}  # what this machine can run (written by `actoroffice doctor` / init)
 
     @property

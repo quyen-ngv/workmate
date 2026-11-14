@@ -48,6 +48,7 @@ from actoroffice.services.interactions import InteractionService
 from actoroffice.services.jira import JiraMirror
 from actoroffice.services.knowledge import KnowledgeService
 from actoroffice.services.logs import LogService
+from actoroffice.services.mcp_tokens import McpTokenService
 from actoroffice.services.memory import MemoryService
 from actoroffice.services.merges import MergeService
 from actoroffice.services.notices import ChatNotifier
@@ -120,7 +121,9 @@ class Office:
         docflow.configure(settings.doc_pack_path)  # a pack that is not valid stops the office here, with every problem listed
         self.sourcehub = SourceHub(self)  # documents of outside systems, through whatever is connected
         self.docs = DocService(self)  # Doc Core: documents checked against the standard pack, sources pinned
+        self.teams.pack_of = self.docs.pack_of  # a ticket's flows and gates come from the pack its layers give
         self.crosscheck = CrossCheckService(self)  # the AI comparison of documents that must agree
+        self.mcp_tokens = McpTokenService(self)  # personal tokens of the read-only MCP server for IDEs (web/mcp_api.py)
         self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),
@@ -137,6 +140,7 @@ class Office:
         default = await self.projects.ensure_default()
         self.chat.default_project_id = default.id
         await self.teams.ensure_local_owner()
+        await self.docs.load_profiles()
 
     async def start(self, *, schedule: bool = True) -> None:
         """Open the store, recover orphaned runs, mirror events into chat and start scheduling."""

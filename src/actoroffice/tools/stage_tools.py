@@ -756,7 +756,7 @@ async def doc_check(args: dict[str, Any], ctx: ToolCtx) -> str:
 
 async def doc_template(args: dict[str, Any], ctx: ToolCtx) -> str:
     try:
-        return ctx.office.docs.template_text(str(args.get("type") or "").strip())
+        return ctx.office.docs.template_text(str(args.get("type") or "").strip(), await ctx.office.tickets.get(ctx.ticket_id) if ctx.ticket_id else None)
     except OfficeError as exc:
         raise ToolError(str(exc)) from exc
 

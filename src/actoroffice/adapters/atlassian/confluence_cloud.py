@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from actoroffice.adapters._http import Http, host_of, now_iso
 from actoroffice.adapters.atlassian import CONFLUENCE_KIND, JIRA_KIND
-from actoroffice.adapters.atlassian.auth import SECRET_FIELDS, build_client, has_credentials, missing_secret_error, normalize_site
+from actoroffice.adapters.atlassian.auth import CLOUD_ID_HELP, SCOPED_TOKEN_HINT, SECRET_FIELDS, build_client, check_cloud_id, has_credentials, missing_secret_error, normalize_site
 from actoroffice.adapters.atlassian.storage_html import INCLUDE_RE, include_note, markdown_to_storage, storage_to_markdown
 from actoroffice.ports.connection import Capability, ConnectorError, Health, Scope
 from actoroffice.ports.docs import Attachment, DocContent, DocHit, DocRef, Page, PageRef
@@ -30,22 +30,30 @@ _SPACE_PAGE_RE = re.compile(r"^/wiki/spaces/([^/]+)/pages/(\d+)(?:/|$)")
 _TINY_RE = re.compile(r"^/wiki/x/([A-Za-z0-9_-]+)/?$")
 _ISSUE_URL_RE = re.compile(r"^/browse/([A-Z][A-Z0-9_]*-\d+)/?$")
 
-# ---- NEEDS CHECKING against Atlassian's current documentation (spec V-1, V-3): one place for each guess.
+# ---- Checked on 2026-11-14 against the Confluence Cloud REST API v2 and v1 references (developer.atlassian.com/cloud/confluence/rest/v2
+# and /rest/v1) and their OpenAPI documents (spec V-1, V-3). The scopes matter for a token with scopes (see auth.py) and for
+# OAuth. REST v2 only takes granular scopes; the two v1 calls kept here take a classic one each (their granular form,
+# still marked beta, is read:content-details:confluence for both).
+_READ_SCOPES = ["read:page:confluence", "read:space:confluence", "read:attachment:confluence", "search:confluence", "read:confluence-user"]
 REQUIRED_SCOPES: dict[Capability, list[str]] = {
-    Capability.DOCS: ["read:confluence-content.all", "search:confluence"],
-    Capability.WIKI: ["read:confluence-content.all", "search:confluence", "write:confluence-content"],  # write only when publishing
+    Capability.DOCS: _READ_SCOPES,
+    # read:hierarchical-content is for the children of a page; write:page only when publishing
+    Capability.WIKI: [*_READ_SCOPES, "read:hierarchical-content:confluence", "write:page:confluence"],
 }
-# Paths are relative to <site>/wiki. Pages come from REST v2 with the storage body; CQL search is still v1.
+# Paths are relative to <site>/wiki. Pages come from REST v2 with the storage body (v1 `content/{id}` is gone); searching by
+# CQL and the current user exist in v1 only.
 PAGE_PATH = "/api/v2/pages/{id}"
 PAGE_BODY_PARAMS = {"body-format": "storage"}
 PAGES_PATH = "/api/v2/pages"  # ?space-id=&title= finds a page by title
-CHILDREN_PATH = "/api/v2/pages/{id}/children"
+CHILDREN_PATH = "/api/v2/pages/{id}/direct-children"  # every kind of child, with a `type`; `/children` (pages only) is deprecated
 ATTACHMENTS_PATH = "/api/v2/pages/{id}/attachments"
 SPACE_PATH = "/api/v2/spaces/{id}"
 SPACES_PATH = "/api/v2/spaces"  # ?keys=
 SEARCH_PATH = "/rest/api/content/search"
 IDENTITY_PATH = "/rest/api/user/current"
-TINY_PATH = "/x/{code}"  # answers with a redirect to the page URL; the Location header is read, never followed blindly
+# Not an API, so not in Atlassian's reference: the short link is expected to answer with a redirect to the page URL. The
+# Location header is read, never followed blindly. Through the gateway (a token with scopes) it cannot be resolved.
+TINY_PATH = "/x/{code}"
 MAX_TINY_HOPS = 3
 
 
@@ -56,6 +64,7 @@ class FollowLinks(BaseModel):
 
 class ConfluenceCloudConfig(BaseModel):
     site: str = Field(description="Địa chỉ site, ví dụ https://acme.atlassian.net")
+    cloud_id: str = Field(default="", description=CLOUD_ID_HELP)
     spaces: list[str] = Field(default_factory=list, description="Khoá space được phép đọc (PAY, ARCH). Để trống: mọi space token đọc được")
     follow_links: FollowLinks = Field(default_factory=FollowLinks)
     mirror: bool = Field(default=False, description="Tải trang về để tìm kiếm cục bộ")
@@ -68,6 +77,11 @@ class ConfluenceCloudConfig(BaseModel):
         if not host_of(site):
             raise ValueError("site phải là địa chỉ như https://acme.atlassian.net")
         return site
+
+    @field_validator("cloud_id")
+    @classmethod
+    def _cloud_id(cls, value: str) -> str:
+        return check_cloud_id(value)
 
     @field_validator("spaces")
     @classmethod
@@ -93,7 +107,7 @@ class ConfluenceCloud:
         self.host = host_of(config.site)
         self.base = config.site + "/wiki"
         self.http = Http(
-            build_client(config.site, secret, product="confluence", transport=transport),
+            build_client(config.site, secret, product="confluence", cloud_id=config.cloud_id, transport=transport),
             label=LABEL,
             blocked=None if has_credentials(secret) else missing_secret_error(LABEL),
         )
@@ -110,7 +124,8 @@ class ConfluenceCloud:
         try:
             me = await self.http.json("GET", IDENTITY_PATH)
         except ConnectorError as exc:
-            return Health(state="error", checked_at=now_iso(), detail=str(exc))
+            hint = SCOPED_TOKEN_HINT if exc.kind == "auth" and not self.config.cloud_id else ""
+            return Health(state="error", checked_at=now_iso(), detail=str(exc) + hint)
         identity = str((me or {}).get("email") or (me or {}).get("displayName") or (me or {}).get("publicName") or "") or None
         return Health(state="ok", checked_at=now_iso(), detail="Đã kết nối Confluence. API token (Basic) không cho biết quyền, nên chưa đối chiếu được quyền thiếu.", identity=identity)
 
@@ -349,6 +364,8 @@ class ConfluenceCloud:
                 break
             data = await self.http.json("GET", path) or {}
             for item in data.get("results") or []:
+                if (item.get("type") or "page") != "page":
+                    continue  # a folder, whiteboard, database or embed: not a document this adapter reads
                 space = await self._space_key(str(item.get("spaceId") or ""))
                 if self._space_allowed(space):
                     child_id = str(item.get("id") or "")

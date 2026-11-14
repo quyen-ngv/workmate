@@ -21,7 +21,7 @@ from actoroffice.codeintel import services as service_map
 from actoroffice.codeintel.index import IndexOptions, index_repo, state_of
 from actoroffice.codeintel.query import CodeQuery
 from actoroffice.codeintel.store import IndexStore
-from actoroffice.codeintel.sync import GitSource, Source, SyncError, is_git, local_source, mirror
+from actoroffice.codeintel.sync import ApiSource, GitSource, Source, SyncError, is_git, local_source, mirror
 from actoroffice.domain.errors import NotFound, OfficeError
 from actoroffice.domain.work import Project, Ticket
 from actoroffice.ports.code import RepoRef
@@ -109,6 +109,40 @@ class CodeIntelService:
             own = await self.repos(project_id=ticket.project_id)
         return own + [r for r in team if r not in own]
 
+    async def all_repos(self) -> list[Repo]:
+        """Every repository the office keeps an index of: the code projects of every team, and the repositories on
+        code hosts that were indexed before."""
+        found = [repo for project in await self.office.projects.list() if (repo := self._repo_of(project)) is not None]
+        known = {r.slug for r in found}
+        for row in self.store.all("SELECT * FROM repos WHERE connection_id IS NOT NULL AND connection_id <> ''"):
+            slug, connection = str(row["slug"]), str(row["connection_id"])
+            if slug in known:
+                continue
+            name = slug[len(connection) + 1 :] if slug.startswith(connection + "/") else slug
+            found.append(Repo(slug, row["project_id"], row["team_id"], None, row["default_branch"] or "main", RepoRef(connection=connection, slug=name)))
+        return found
+
+    async def sweep(self) -> list[IndexState]:
+        """Bring every index up to its main branch. What did not change costs one `git rev-parse` per repository."""
+        return await self.ensure(await self.all_repos())
+
+    async def run_forever(self, every_s: float) -> None:
+        """Indexing in the background, behind ticket runs: a pass is put off while a run is active, three times at
+        most, so a busy office still gets a fresh index."""
+        import logging
+
+        waited = 0
+        while True:
+            await asyncio.sleep(every_s)
+            if self.office.scheduler.running() and waited < 3:
+                waited += 1
+                continue
+            waited = 0
+            try:
+                await self.sweep()
+            except Exception:  # a pass that breaks must not stop the next one
+                logging.getLogger(__name__).exception("index sweep failed")
+
     async def remote_repo(self, slug: str, scope: Scope) -> Repo | None:
         """A repository on a connected code host, by `connection/owner/name` or `owner/name`."""
         found = await self.office.connections.resolve(Capability.CODE_READ, scope)
@@ -124,9 +158,10 @@ class CodeIntelService:
             return await asyncio.to_thread(local_source, repo.path, repo.branch)
         assert repo.remote is not None
         host = await self.office.connections.adapter(repo.remote.connection)
-        auth = await host.clone_auth(repo.remote)
-        if auth is None:
-            raise CodeIntelError(f"kết nối '{repo.remote.connection}' không cho clone {repo.remote.slug}")
+        auth = None if repo.remote.connection in self.office.settings.code_api_connections else await host.clone_auth(repo.remote)
+        if auth is None:  # cloning is not allowed (by the unit or by the host): read through the API, main branch only
+            loop = asyncio.get_running_loop()
+            return ApiSource(host, repo.remote, lambda coro: asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=300), repo.branch)
         self.office.redact.register(auth.password)
         dest = self.office.settings.data_dir / "repos" / repo.remote.connection / f"{repo.remote.slug}.git"
         return await asyncio.to_thread(mirror, auth.url, dest, repo.branch, auth)

@@ -17,19 +17,19 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from actoroffice.tools.registry import tool_def
+
 from .failures import retry_title
 
-READ_TOOLS = {"Read", "NotebookRead", "list_dir", "doc_get", "ticket_get", "skill_read", "stage_info", "jira_issue", "wiki_page", "code_read", "code_outline", "code_symbol", "source_get"}
-SEARCH_TOOLS = {
-    "Grep", "Glob", "history_search", "memory_search", "kb_search", "rule_search", "WebSearch", "tickets_list",
-    "code_search", "code_refs", "code_impact", "code_pack", "service_map", "repo_list", "source_search",
-}  # fmt: skip
-SOURCE_TOOLS = {"WebFetch", "db_query", "db_schema", "logs_search", "logs_errors", "logs_cluster", "logs_trace", "kafka_peek", "mq_peek", "redis_scan"}
+# The runtime's own tools. What an office tool is comes from its definition (`ToolDef.activity`), not from a name here.
+READ_TOOLS = {"Read", "NotebookRead"}
+SEARCH_TOOLS = {"Grep", "Glob", "WebSearch"}
+SOURCE_TOOLS = {"WebFetch"}
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 SHELL_TOOLS = {"Bash", "PowerShell"}
+RUNTIME_TOOLS = {"read": READ_TOOLS, "search": SEARCH_TOOLS, "source": SOURCE_TOOLS, "edit": EDIT_TOOLS, "shell": SHELL_TOOLS}
 READ_COMMANDS = re.compile(r"^\s*(cat|head|tail|less|more|type|sed -n|wc|ls|dir|tree|find|git (status|log|show|diff|branch))\b")
 SEARCH_COMMANDS = re.compile(r"^\s*(rg|grep|ag|findstr|git grep)\b")
-QUIET_OFFICE = {"plan_steps", "step_done"}  # shown through their own "step" events
 NARRATION_LIMIT = 300
 
 
@@ -179,11 +179,21 @@ def _digest(*parts: str) -> str:
     return hashlib.sha1("\x00".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
 
 
+def activity_of(tool: str) -> str | None:
+    """read | search | source | edit | shell | office | quiet for a tool by its bare name; None when nothing knows it."""
+    for kind, names in RUNTIME_TOOLS.items():
+        if tool in names:
+            return kind
+    definition = tool_def(tool)
+    return definition.activity if definition is not None else None
+
+
 def describe_call(tool: str, args: dict[str, Any]) -> Activity | None:
-    if tool in QUIET_OFFICE:
+    kind = activity_of(tool)
+    if kind == "quiet":  # shown through its own event (the steps of a stage)
         return None
     path = str(args.get("file_path") or args.get("path") or args.get("notebook_path") or "")
-    if tool in EDIT_TOOLS:
+    if kind == "edit":
         added, removed = _line_delta(tool, args)
         old, new = str(args.get("old_string") or ""), str(args.get("new_string") or args.get("content") or "")
         return Activity(
@@ -192,7 +202,7 @@ def describe_call(tool: str, args: dict[str, Any]) -> Activity | None:
             # sig / undo let the watchdog tell "the same edit again" or "an edit undone" from many different edits
             fields={"path": path, "added": added, "removed": removed, "sig": _digest(old, new), "undo": _digest(new, old)},
         )
-    if tool in READ_TOOLS:
+    if kind == "read":
         target = path or str(args.get("key") or args.get("name") or args.get("ticket") or args.get("id") or "")
         part = f"{args.get('offset') or ''}:{args.get('limit') or ''}"
         verb = {
@@ -203,13 +213,13 @@ def describe_call(tool: str, args: dict[str, Any]) -> Activity | None:
         # which ticket, issue or page was read: the sources of a ticket are matched on them (SI-39)
         fields.update({k: str(args[k]) for k in ("ticket", "key", "id") if args.get(k)})
         return Activity(kind="read", title=f"{verb} `{_short_path(target)}`" if target else verb, fields=fields)
-    if tool in SEARCH_TOOLS:
+    if kind == "search":
         query = str(args.get("pattern") or args.get("query") or args.get("glob") or "")
         return Activity(kind="search", title=f"Tìm `{_one_line(query, 80)}`" + (f" trong `{_short_path(path)}`" if path else ""), fields={"tool": tool, "query": query})
-    if tool in SOURCE_TOOLS:
+    if kind == "source":
         target = str(args.get("url") or args.get("sql") or args.get("query") or args.get("topic") or args.get("service") or "")
         return Activity(kind="source", title=f"{tool}: {_one_line(target, 100)}", fields={"tool": tool, "target": target})
-    if tool in SHELL_TOOLS:
+    if kind == "shell":
         command = str(args.get("command") or "")
         if READ_COMMANDS.match(command):
             return Activity(kind="read", title=f"`{_one_line(command, 90)}`", fields={"command": command})

@@ -286,12 +286,14 @@ STAGE_TOOLS: list[ToolDef] = [
         "Declare the steps of the current stage as a checklist people watch (3–10 short steps). Call again to revise.",
         schema({"steps": {"type": "array", "items": {"type": "string"}}}, required=["steps"]),
         plan_steps,
+        activity="quiet",  # shown through its own "steps" event
     ),
     ToolDef(
         "step_done",
         "Tick a step of the current stage (1-based index) with an optional short note.",
         schema({"index": {"type": "integer"}, "note": {"type": "string"}}, required=["index"]),
         step_done,
+        activity="quiet",
     ),
     ToolDef(
         "stage_complete",
@@ -351,7 +353,7 @@ STAGE_TOOLS: list[ToolDef] = [
         plan_deviation,
     ),
     ToolDef("pr_link", "Link the pull request you opened for this ticket.", schema({"url": {"type": "string"}}), pr_link),
-    ToolDef("stage_info", "Show the ticket's stages, the current stage's required outputs, checks, gate and steps.", schema({}, required=[]), stage_info, read_only=True),
+    ToolDef("stage_info", "Show the ticket's stages, the current stage's required outputs, checks, gate and steps.", schema({}, required=[]), stage_info, read_only=True, activity="read"),
 ]
 
 
@@ -416,6 +418,7 @@ STAGE_TOOLS += [
         schema({"query": {"type": "string"}, "limit": {"type": "integer"}}, required=["query"]),
         rule_search,
         read_only=True,
+        activity="search",
     ),
     ToolDef(
         "rule_propose",
@@ -711,6 +714,7 @@ STAGE_TOOLS += [
         schema({"query": {"type": "string"}, "kinds": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer"}}, required=["query"]),
         kb_search,
         read_only=True,
+        activity="search",
     ),
     ToolDef(
         "kb_note",

@@ -15,18 +15,25 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+from collections.abc import Awaitable, Iterable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
 from actoroffice.domain.errors import OfficeError
+from actoroffice.ports.code import RepoRef
+from actoroffice.ports.connection import Capability, ConnectionSpec, ConnectorError, Scope
 
 from .jira import load_credentials
+
+if TYPE_CHECKING:
+    from actoroffice.app import Office
 
 
 class AtlassianError(OfficeError):
     code = 502
+    kind = ""  # the ConnectorError kind when the failure came from a connection ("forbidden", "not_found"…)
 
 
 class Wiki(Protocol):
@@ -236,6 +243,111 @@ class Atlassian:
             if close is not None:
                 with contextlib.suppress(Exception):
                     await close()
+
+
+# ---- the old configuration next to connections -----------------------------------------------------------------
+# Until it is imported (`ConnectionService.import_legacy`), the configuration from before connections keeps working:
+# it counts as the capability it gives, and it is what the tools fall back to when no connection serves a call.
+
+
+def legacy_capability(office: Office, capability: Capability) -> bool:
+    """Whether the old configuration gives a capability: `secrets/jira.json` (Jira and, on the same site, Confluence),
+    `secrets/bitbucket.json`, or a client plugged in with `Atlassian.use` / `JiraMirror(client=…)`."""
+    if capability == Capability.TRACKER:
+        return office.jira.ready()
+    if capability == Capability.WIKI:
+        return office.atlassian.wiki() is not None
+    if capability == Capability.CODE_PR:
+        return office.atlassian.code_host() is not None
+    return False
+
+
+def repo_slug(repo: str) -> str:
+    """ "https://host/acme/billing.git", "git@host:acme/billing.git" or "acme/billing" → "acme/billing"."""
+    repo = repo.strip().rstrip("/").removesuffix(".git")
+    m = re.match(r"^(?:[a-z+]+://[^/]+/|[\w.-]+@[\w.-]+:)(.+)$", repo)
+    return m.group(1) if m else repo
+
+
+def parse_pr(url: str, adapters: Iterable[Any] = ()) -> tuple[str, int] | None:
+    """("workspace/repo", number) of a pull request URL: a URL one of the given code-host adapters owns (GitHub,
+    Bitbucket… by their `parse_pr_url`), else a bitbucket.org URL as the old client takes it."""
+    for adapter in adapters:
+        found = adapter.parse_pr_url(url or "")
+        if found is not None:
+            return found[0].slug, found[1]
+    m = re.search(r"bitbucket\.org/([^/]+)/([^/]+)/pull-requests/(\d+)", url or "")
+    return (f"{m.group(1)}/{m.group(2)}", int(m.group(3))) if m else None
+
+
+class ConnectedCodeHost:
+    """A code-host connection (`ports.code.CodeHost`) behind the methods and shapes of the old client, so the tools and
+    the pull request watcher treat both the same. A failure is an AtlassianError carrying the connector's `kind`.
+    What the port does not tell stays unknown: `approvals` is None, no comment is `resolved`, a reply has no id."""
+
+    def __init__(self, spec: ConnectionSpec, adapter: Any) -> None:
+        self.spec = spec
+        self.adapter = adapter
+        self.label = spec.use  # who says "merged" / "new review" in the ticket
+
+    @staticmethod
+    async def _do(call: Awaitable[Any]) -> Any:
+        try:
+            return await call
+        except ConnectorError as exc:
+            error = AtlassianError(str(exc))
+            error.kind = exc.kind
+            raise error from exc
+
+    def parse_pr(self, url: str) -> tuple[str, int] | None:
+        found = self.adapter.parse_pr_url(url or "")
+        return (found[0].slug, found[1]) if found is not None else None
+
+    async def pr_create(self, repo: str, source: str, destination: str, title: str, description: str) -> dict[str, Any]:
+        pr = await self._do(self.adapter.pr_create(RepoRef(slug=repo_slug(repo)), source, destination, title, description))
+        return {"id": pr.id, "url": pr.url, "state": pr.state.upper()}
+
+    async def pr_get(self, repo: str, pr_id: int) -> dict[str, Any]:
+        pr = await self._do(self.adapter.pr_get(RepoRef(slug=repo_slug(repo)), pr_id))
+        return {"id": pr.id, "state": pr.state.upper(), "title": pr.title, "url": pr.url, "approvals": None}
+
+    async def pr_comments(self, repo: str, pr_id: int) -> list[dict[str, Any]]:
+        comments = await self._do(self.adapter.pr_comments(RepoRef(slug=repo_slug(repo)), pr_id))
+        return [
+            {"id": c.id, "by": c.author, "text": c.body[:4000], "file": c.path, "line": c.line, "parent": c.parent_id, "resolved": False, "at": c.created[:16]}
+            for c in comments
+        ]
+
+    async def pr_reply(self, repo: str, pr_id: int, text: str, *, parent_id: int | None = None) -> dict[str, Any]:
+        await self._do(self.adapter.pr_reply(RepoRef(slug=repo_slug(repo)), pr_id, text, parent_id=parent_id))
+        return {}
+
+
+async def code_hosts(office: Office, scope: Scope | None, *, write: bool = False) -> list[Any]:
+    """The code hosts a ticket can use, best first: its connections (project, team, office; only those with `write` on
+    when the call writes), then the client of the old configuration."""
+    hosts: list[Any] = []
+    for spec in await office.connections.candidates(Capability.CODE_PR, scope):
+        if write and not spec.write:
+            continue
+        try:
+            hosts.append(ConnectedCodeHost(spec, await office.connections.adapter(spec.id)))
+        except ConnectorError:
+            continue  # no secret yet: as good as not connected
+    old = office.atlassian.code_host()
+    if old is not None:
+        hosts.append(old)
+    return hosts
+
+
+async def pr_host(office: Office, scope: Scope | None, url: str, *, write: bool = False) -> tuple[Any, str, int] | None:
+    """Who serves a pull request URL, as (client, "workspace/repo", number): the nearest connection whose adapter says
+    the URL is one of its pull requests, else the old Bitbucket client for a bitbucket.org URL. None: nobody."""
+    for host in await code_hosts(office, scope, write=write):
+        parsed = host.parse_pr(url) if isinstance(host, ConnectedCodeHost) else parse_pr(url)
+        if parsed is not None:
+            return host, parsed[0], parsed[1]
+    return None
 
 
 def html_to_text(html: str) -> str:

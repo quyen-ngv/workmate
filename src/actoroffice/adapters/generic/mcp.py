@@ -351,7 +351,9 @@ class GenericMcp:
             said = short_line(raw, self._secrets)
             raise ConnectorError("invalid", f"{LABEL}: tool «{tool}» báo lỗi" + (f": {said}" if said else ""))
         structured = getattr(result, "structured_content", None) or getattr(result, "structuredContent", None)
-        data = structured if isinstance(structured, dict) else parse_json(raw)
+        # The text is what the tool wrote; `structuredContent` is often only a wrapper around it ({"result": "<the text>"}).
+        parsed = parse_json(raw)
+        data = parsed if isinstance(parsed, dict | list) else (structured if isinstance(structured, dict) else parsed)
         if not raw and data is None:
             raise ConnectorError("invalid", f"{LABEL}: tool «{tool}» không trả về chữ nào")
         return raw or as_text(data), data, len(blocks) - len(texts)

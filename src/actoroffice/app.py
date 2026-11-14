@@ -67,6 +67,7 @@ from actoroffice.services.teams import TeamService
 from actoroffice.services.tickets import TicketService
 from actoroffice.services.ui_preview import UiPreviewService
 from actoroffice.services.wakes import WakeService
+from actoroffice.services.webhooks import WebhookService
 from actoroffice.store import Database
 
 log = logging.getLogger(__name__)
@@ -118,6 +119,7 @@ class Office:
         self.sources = SourceService(self)  # what a ticket's description points to and what the AI read of it (SI-39)
         self.connections = ConnectionService(self)  # accounts on outside systems (Jira, Confluence, Bitbucket, GitHub…)
         self.codeintel = CodeIntelService(self)  # the code index, the code graph and the service map
+        self.webhooks = WebhookService(self)  # events pushed by code hosts (POST /hooks/<connection>)
         docflow.configure(settings.doc_pack_path)  # a pack that is not valid stops the office here, with every problem listed
         self.sourcehub = SourceHub(self)  # documents of outside systems, through whatever is connected
         self.docs = DocService(self)  # Doc Core: documents checked against the standard pack, sources pinned
@@ -161,6 +163,8 @@ class Office:
             self._tasks.append(asyncio.create_task(self.access.run_forever(), name="access-expiry"))
             if self.settings.doc_sweep_s > 0:
                 self._tasks.append(asyncio.create_task(self.docs.run_forever(self.settings.doc_sweep_s), name="doc-sweep"))
+            if self.settings.index_sweep_s > 0:
+                self._tasks.append(asyncio.create_task(self.codeintel.run_forever(self.settings.index_sweep_s), name="index-sweep"))
 
     async def start_notifier(self) -> None:
         ready = asyncio.Event()

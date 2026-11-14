@@ -375,6 +375,7 @@ _DB_SCHEMA = ToolDef(
     schema({"database": {"type": "string"}}, required=["database"]),
     db_schema,
     read_only=True,
+    activity="source",
 )
 _DB_QUERY = ToolDef(
     "db_query",
@@ -383,6 +384,7 @@ _DB_QUERY = ToolDef(
     schema({"database": {"type": "string"}, "sql": {"type": "string"}, "limit": {"type": "integer"}}, required=["database", "sql"]),
     db_query,
     read_only=True,
+    activity="source",
 )
 
 WORK_TOOLS: list[ToolDef] = [

@@ -98,6 +98,35 @@ class ConnectionService:
         await self.office.db.execute("DELETE FROM connections WHERE id = ?", (connection_id,))
         self.office.bus.publish("connections.changed", id=connection_id)
 
+    async def import_legacy(self) -> list[ConnectionSpec]:
+        """The Atlassian configuration from before connections as connections of the office. Run once, on request
+        (`actoroffice connections import-legacy`), never automatically.
+
+        `secrets/jira.json` becomes `jira-main` (jira_cloud) and `confluence-main` (confluence_cloud: same site, same
+        token); `secrets/bitbucket.json` becomes `bitbucket-main` (bitbucket_cloud). Each gets its own copy of the secret
+        (`secrets/<id>.json`), reaches what the old configuration reached (no project, space or repository limit) and
+        may write, as the old one could. A connection whose id exists is left untouched; the old files stay where they
+        are and keep working as the fallback until someone removes them. Returns what was created."""
+        from actoroffice.services.atlassian import load_bitbucket
+        from actoroffice.services.jira import load_credentials
+
+        data_dir = self.office.settings.data_dir
+        wanted: list[tuple[ConnectionSpec, dict[str, str]]] = []
+        jira = load_credentials(data_dir)
+        if jira:
+            secret = {"email": jira["email"], "token": jira["token"]}
+            wanted.append((ConnectionSpec(id="jira-main", use="jira_cloud", config={"site": jira["base_url"]}, write=True), secret))
+            wanted.append((ConnectionSpec(id="confluence-main", use="confluence_cloud", config={"site": jira["base_url"]}, write=True), secret))
+        bitbucket = load_bitbucket(data_dir)
+        if bitbucket:
+            secret = {"email": str(bitbucket["email"]), "token": str(bitbucket["token"])}
+            wanted.append((ConnectionSpec(id="bitbucket-main", use="bitbucket_cloud", config={"workspace": str(bitbucket["workspace"])}, write=True), secret))
+        created = []
+        for spec, secret in wanted:
+            if await self.get(spec.id) is None:
+                created.append(await self.save(spec, secret=secret))
+        return created
+
     async def _drop_live(self, connection_id: str) -> None:
         adapter = self._live.pop(connection_id, None)
         if adapter is not None:

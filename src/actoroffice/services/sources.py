@@ -19,6 +19,7 @@ from actoroffice.domain.ids import utcnow
 from actoroffice.domain.sources import STATUS_LABEL, display, parse_refs
 from actoroffice.domain.work import Comment, Ticket
 from actoroffice.store import Tx
+from actoroffice.tools.registry import tool_def
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -293,22 +294,26 @@ class SourceService:
         return {host} if host else set()
 
 
+def _read(fields: dict[str, Any]) -> tuple[str, str]:
+    """(kind, reference) of the document a recorded call read, as its tool says (`ToolDef.reads_source`): ("ticket",
+    "AO-3"), ("jira", "PAY-120"), ("page", "12345"). ("", "") for a call that read no such document."""
+    definition = tool_def(str(fields.get("tool") or ""))
+    read = definition.reads_source(fields) if definition is not None and definition.reads_source is not None else None
+    what, _, value = (read or "").partition(":")
+    return what, value.strip()
+
+
 def _matches(kind: str, ref: str, fields: dict[str, Any]) -> bool:
     tool = str(fields.get("tool") or "")
-    if kind == "ticket":
-        # doc_get without `ticket` reads the current ticket; ticket_get before SI-39 kept its key in `path` only
-        target = fields.get("ticket") or (fields.get("path") if tool == "ticket_get" else None)
-        return tool in ("ticket_get", "doc_get") and str(target or "").strip().upper() == ref.upper()
-    if kind == "jira":
-        return tool == "jira_issue" and str(fields.get("key") or fields.get("path") or "").strip().upper() == ref.upper()
-    if kind == "url":
-        if tool == "wiki_page":
-            page = str(fields.get("id") or "").strip()
-            return bool(page) and re.search(rf"(?<!\d){re.escape(page)}(?!\d)", ref) is not None
-        if tool == "jira_issue":
-            key = str(fields.get("key") or "").strip().upper()
-            return bool(key) and re.search(rf"(?<![\w-]){re.escape(key)}(?![\w-])", ref.upper()) is not None
-        return False
+    if kind in ("ticket", "jira", "url"):
+        what, value = _read(fields)
+        if not value:
+            return False
+        if kind == "url":  # the URL of a wiki page holds its id, the URL of an issue its key
+            if what == "page":
+                return re.search(rf"(?<!\d){re.escape(value)}(?!\d)", ref) is not None
+            return what == "jira" and re.search(rf"(?<![\w-]){re.escape(value.upper())}(?![\w-])", ref.upper()) is not None
+        return what == kind and value.upper() == ref.upper()
     if kind == "file":
         paths: list[str] = []
         if tool in FILE_READ_TOOLS:

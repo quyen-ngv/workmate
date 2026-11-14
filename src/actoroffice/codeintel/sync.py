@@ -8,9 +8,10 @@ import base64
 import hashlib
 import os
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from actoroffice.ports.code import CloneAuth
 
@@ -133,7 +134,50 @@ class FolderSource:
         return target.is_relative_to(self.root) and target.is_file()
 
 
-Source = GitSource | FolderSource
+class ApiSource:
+    """A repository read through its code host's API, for units that do not allow cloning: the main branch only, no
+    history, one request per changed file. `call` runs a coroutine of the host and waits for its result (the indexer
+    works in a thread, the host's client lives on the event loop)."""
+
+    def __init__(self, host: Any, repo: Any, call: Callable[[Any], Any], branch: str | None = None) -> None:
+        self.host = host
+        self.repo = repo
+        self.call = call
+        self.branch = branch
+        self._commit: str | None = None
+
+    def _do(self, coro: Any) -> Any:
+        try:
+            return self.call(coro)
+        except SyncError:
+            raise
+        except Exception as exc:  # ConnectorError and whatever the bridge raises: one kind of failure for the indexer
+            raise SyncError(str(exc)) from exc
+
+    def commit(self) -> str:
+        if self._commit is None:
+            self._commit = str(self._do(self.host.head(self.repo, self.branch)))
+        return self._commit
+
+    def files(self) -> list[SourceFile]:
+        return [SourceFile(e.path, e.blob_sha, e.size) for e in self._do(self.host.tree(self.repo, self.commit()))]
+
+    def read_many(self, files: list[SourceFile]) -> Iterator[tuple[SourceFile, bytes]]:
+        for f in files:
+            yield f, self._do(self.host.file(self.repo, f.path, self.commit()))
+
+    def read(self, path: str, at: str | None = None) -> bytes:
+        return self._do(self.host.file(self.repo, path, at or self.commit()))
+
+    def exists(self, path: str, at: str | None = None) -> bool:
+        try:
+            self.read(path, at)
+        except SyncError:
+            return False
+        return True
+
+
+Source = GitSource | FolderSource | ApiSource
 
 
 def is_git(path: Path) -> bool:

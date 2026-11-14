@@ -360,6 +360,35 @@ async def cmd_pack(office: Office, args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
+async def cmd_mcp_token(office: Office, args: argparse.Namespace) -> None:
+    """A personal token for a developer's IDE to reach the office as an MCP server. The value is shown here only."""
+    user = await office.teams.find_user(args.user)
+    if user is None:
+        raise OfficeError(f"Không có người dùng '{args.user}'")
+    row, token = await office.mcp_tokens.create(user.id, args.name, team_id=args.team)
+    out(f"Token MCP '{row.name}' của {user.name} (chỉ hiện một lần, hãy lưu lại):")
+    out(token)
+    if not office.settings.mcp_server:
+        out("Lưu ý: MCP server đang tắt. Bật bằng `mcp_server: true` trong config.yaml rồi chạy lại `actoroffice serve`.")
+
+
+async def cmd_connections(office: Office, _args: argparse.Namespace) -> None:
+    """`connections import-legacy`: the configuration of `jira login` / `bitbucket` as connections (run once, by hand)."""
+    from actoroffice.ports.connection import ConnectorError
+
+    try:
+        created = await office.connections.import_legacy()
+    except ConnectorError as exc:
+        out(f"error: {exc}")
+        raise SystemExit(1) from None
+    for spec in created:
+        out(f"Đã tạo kết nối {spec.id} ({spec.use}, phạm vi {spec.scope}, {'được ghi' if spec.write else 'chỉ đọc'}).")
+    if not created:
+        out("Không có gì để chuyển: chưa có cấu hình Jira / Bitbucket cũ, hoặc các kết nối jira-main, confluence-main, bitbucket-main đã có.")
+    else:
+        out("Cấu hình cũ vẫn còn và vẫn chạy. Kiểm tra từng kết nối ở Cài đặt › Kết nối (phạm vi dự án / space / repo, quyền ghi).")
+
+
 # ---- entry -----------------------------------------------------------------------------------
 
 
@@ -376,6 +405,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path", nargs="?", help="folder with pack.yaml (default: the built-in pack)")
     p.add_argument("--against", help="a ticket key: run the pack's rules on its documents")
     p.set_defaults(fn=cmd_pack)
+
+    p = sub.add_parser("mcp-token", help="create a personal token for the read-only MCP server (/mcp); it is printed once")
+    p.add_argument("user", help="user id or name")
+    p.add_argument("--name", default="", help="what the token is for, e.g. the IDE or the machine")
+    p.add_argument("--team", help="team answered for when a call names no ticket (needed for a person in several teams)")
+    p.set_defaults(fn=cmd_mcp_token)
 
     p = sub.add_parser("hire", help="hire an actor into a position")
     p.add_argument("position")
@@ -427,6 +462,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("token", nargs="?")
     p.add_argument("--off", action="store_true", help="remove the token")
     p.set_defaults(fn=cmd_telegram)
+
+    p = sub.add_parser("connections", help="connections import-legacy: turn the old Jira / Bitbucket configuration into connections")
+    p.add_argument("action", choices=["import-legacy"])
+    p.set_defaults(fn=cmd_connections)
 
     cli_team.register(sub)
 

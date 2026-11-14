@@ -13,7 +13,7 @@ from actoroffice.domain.errors import OfficeError
 from actoroffice.domain.run import WakeSource
 from actoroffice.domain.work import InteractionKind, Priority, ProjectAccess, TicketStatus
 
-from .registry import ToolCtx, ToolDef, ToolError, schema
+from .registry import ToolCtx, ToolDef, ToolError, schema, source_ref
 
 S = TicketStatus
 
@@ -411,6 +411,8 @@ OFFICE_TOOLS: list[ToolDef] = [
         schema({**TICKET_ARG, "comments": {"type": "integer"}}, required=[]),
         ticket_get,
         read_only=True,
+        activity="read",
+        reads_source=source_ref("ticket", "ticket", "path"),  # runs from before SI-39 kept the key in `path` only
     ),
     ToolDef(
         "ticket_comment",
@@ -460,6 +462,8 @@ OFFICE_TOOLS: list[ToolDef] = [
         schema({**TICKET_ARG, "key": {"type": "string"}}, required=["key"]),
         doc_get,
         read_only=True,
+        activity="read",
+        reads_source=source_ref("ticket", "ticket"),  # without `ticket` it reads the run's own ticket: not a source
     ),
     ToolDef(
         "doc_put",
@@ -483,6 +487,7 @@ OFFICE_TOOLS: list[ToolDef] = [
         schema({"path": {"type": "string"}}, required=[]),
         list_dir,
         read_only=True,
+        activity="read",
     ),
     ToolDef(
         "work_product_add",

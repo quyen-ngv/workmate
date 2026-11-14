@@ -777,9 +777,9 @@ async function pageStandard(scope = "office") {
       <td><select data-std-rule="${esc(id)}">${Object.entries(RULE_LEVEL).map(([val, label]) => `<option value="${val}" ${mine === val ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></td></tr>`;
   }).join("");
   sheet("Chuẩn tài liệu", `<p class="rev">Mỗi lớp chỉ ghi phần khác với lớp trên: văn phòng → team → project → epic. Lưu xong có hiệu lực ở lần kiểm kế tiếp.</p>
-    <div class="form" data-std-form data-scope="${esc(v.scope)}">
+    <div data-std-form data-scope="${esc(v.scope)}"><div class="form">
       <label>Lớp<select data-std-scope>${scopes.map(([s, l]) => `<option value="${esc(s)}" ${s === v.scope ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
-      <label>Bộ chuẩn (pack)<select data-std-pack><option value="">theo lớp trên</option>${(v.packs || []).map((p) => `<option value="${esc(p)}" ${own.pack === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></label>
+      <label>Bộ chuẩn (pack)<select data-std-pack><option value="">theo lớp trên</option>${(v.packs || []).map((p) => `<option value="${esc(p)}" ${own.pack === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></label></div>
       <div class="rev">Đang dùng: <b>${esc(v.pack.name)}</b> v${esc(v.pack.version)} · luồng: ${esc((v.pack.flows || []).join(", "))}${inherited.length ? ` · lớp trên đã đổi: ${esc(inherited.join(" | "))}` : ""}</div>
       <table class="list"><thead><tr><th>Luật</th><th>Kiểu</th><th>Hiện là</th><th>Lớp này đặt</th></tr></thead><tbody>${rows}</tbody></table>
     </div>
@@ -803,12 +803,13 @@ function connectionBody(form) {
 // ---- service map: who reaches whom, every edge backed by a line of code ---------------------------------------------
 
 const EDGE_LABEL = { calls_http: "HTTP", publishes: "publish", subscribes: "subscribe", reads: "đọc", writes: "ghi", depends_on: "cần", exposes: "mở", calls: "gọi", imports: "import", extends: "kế thừa", implements: "hiện thực", contains: "chứa" };
-const mapState = { team: "", tables: "shared", kinds: new Set(), focus: "", data: null, overlay: null, picked: null };
+const mapState = { team: "", tables: "shared", kinds: new Set(), focus: "", data: null, overlay: null, picked: null, service: "", module: "", head: "" };
 
 function mapSvg(data) {
   const nodes = data.nodes.filter((n) => !mapState.focus || true);
   const edges = data.edges.filter((e) => !mapState.kinds.size || mapState.kinds.has(e.kind));
-  const W = 860, H = 520, cx = W / 2, cy = H / 2, R = Math.min(cx, cy) - 70;
+  const big = Math.max(1, Math.sqrt(nodes.length / 14));  // more nodes: a larger circle, same text size
+  const W = Math.round(860 * big), H = Math.round(520 * big), cx = W / 2, cy = H / 2, R = Math.min(cx, cy) - 70;
   const order = [...nodes].sort((a, b) => (a.kind === "service" ? 0 : 1) - (b.kind === "service" ? 0 : 1) || a.name.localeCompare(b.name));
   const pos = new Map(order.map((n, i) => {
     const a = (2 * Math.PI * i) / Math.max(order.length, 1) - Math.PI / 2;
@@ -820,14 +821,15 @@ function mapSvg(data) {
     const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1, pad = 34;
     const ax = x1 + (dx / len) * pad, ay = y1 + (dy / len) * pad, bx = x2 - (dx / len) * pad, by = y2 - (dy / len) * pad;
     const on = mapState.picked === e.id;
-    return `<g class="map-edge${on ? " on" : ""}" data-map-edge="${e.id}"><line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" ${e.confidence === "heuristic" ? 'stroke-dasharray="6 4"' : ""} marker-end="url(#arrow)"></line>
+    return `<g class="map-edge${on ? " on" : ""}${e.diff && e.diff !== "same" ? ` ${e.diff}` : ""}" data-map-edge="${e.id}"><line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" ${e.confidence === "heuristic" ? 'stroke-dasharray="6 4"' : ""} marker-end="url(#arrow)"></line>
       <line class="hit" x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}"></line>
       <text x="${(ax + bx) / 2}" y="${(ay + by) / 2 - 5}">${esc(EDGE_LABEL[e.kind] || e.kind)}${e.count > 1 ? ` ×${e.count}` : ""}</text></g>`;
   }).join("");
   const dots = order.map((n) => {
     const [x, y] = pos.get(n.id);
     const shape = n.kind === "service" ? `<rect x="${x - 58}" y="${y - 18}" width="116" height="36" rx="8"></rect>` : n.kind === "table" ? `<ellipse cx="${x}" cy="${y}" rx="56" ry="18"></ellipse>` : `<rect x="${x - 58}" y="${y - 16}" width="116" height="32" rx="16"></rect>`;
-    return `<g class="map-node ${esc(n.kind)}${touched.has(n.name) ? " touched" : ""}" data-map-node="${esc(n.name)}">${shape}<text x="${x}" y="${y + 4}">${esc(n.name.length > 18 ? n.name.slice(0, 17) + "…" : n.name)}</text><title>${esc(n.kind)}: ${esc(n.name)}</title></g>`;
+    const drill = (n.kind === "service" && !mapState.service && !mapState.head) || (n.kind === "module" && mapState.service && !mapState.module);
+    return `<g class="map-node ${esc(n.kind)}${touched.has(n.name) ? " touched" : ""}${n.diff && n.diff !== "same" ? ` ${n.diff}` : ""}${drill ? " drill" : ""}" data-map-node="${esc(n.name)}" data-node-kind="${esc(n.kind)}">${shape}<text x="${x}" y="${y + 4}">${esc(n.name.length > 18 ? n.name.slice(0, 17) + "…" : n.name)}</text><title>${esc(n.kind)}: ${esc(n.name)}</title></g>`;
   }).join("");
   return `<svg viewBox="0 0 ${W} ${H}" class="map" role="img" aria-label="Bản đồ dịch vụ"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"></path></marker></defs>${lines}${dots}</svg>`;
 }
@@ -845,23 +847,37 @@ function renderMap() {
       <div class="rev">Nguồn: <code>${esc(e.cite || "—")}</code></div></li>`).join("");
   const index = (d.index || []).map((s) => `<span class="chip ${s.state === "ready" ? "good" : s.state === "error" ? "bad" : "warn"}" title="${esc(s.error || "")}">${esc(s.repo)}: ${esc(s.state)} · ${esc(s.level)} · ${s.files} file · ${esc((s.indexed_commit || "").slice(0, 8))}</span>`).join(" ");
   const ov = mapState.overlay;
-  body.innerHTML = `<div class="map-bar">
+  const crumbs = [`<button class="link" data-map-up="">Hệ thống</button>`];
+  if (mapState.service) crumbs.push(`<button class="link" data-map-up="service">${esc(mapState.service)}</button>`);
+  if (mapState.module) crumbs.push(`<b>${esc(mapState.module)}</b>`);
+  const diff = d.added ? `<span class="chip good">+${d.added.nodes} nút, +${d.added.edges} cạnh</span> <span class="chip bad">−${d.removed.nodes} nút, −${d.removed.edges} cạnh</span> so với nhánh chính` : "";
+  body.innerHTML = `<div class="map-crumbs">${crumbs.join(" › ")}${d.truncated ? ` <span class="chip warn" title="Module lớn: vẽ theo file, không theo từng hàm">rút gọn</span>` : ""} ${diff}</div>
+    <div class="map-bar">
       <label>Team <select data-map="team"><option value="">(không thuộc team)</option>${teams.map((t) => `<option value="${esc(t.id)}" ${mapState.team === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>
       <label>Bảng <select data-map="tables">${[["shared", "dùng chung"], ["all", "tất cả"], ["none", "ẩn"]].map(([v, l]) => `<option value="${v}" ${mapState.tables === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
       <span>${kinds.map((k) => `<label class="inline"><input type="checkbox" data-map-kind="${esc(k)}" ${!mapState.kinds.size || mapState.kinds.has(k) ? "checked" : ""}> ${esc(EDGE_LABEL[k] || k)}</label>`).join(" ")}</span>
       <label>Tô theo ticket <input type="text" data-map="ticket" value="${esc(ov?.ticket || "")}" placeholder="vd. AO-12" size="8"></label>
+      <label title="Nhánh hoặc commit, hoặc mã ticket để lấy nhánh của ticket đó. Để trống: bản đồ của nhánh chính">So nhánh <input type="text" data-map="head" value="${esc(mapState.head)}" placeholder="nhánh / commit / AO-12" size="14"></label>
       <button class="btn small" data-map-copy>Chép Mermaid</button>
     </div>
     <div class="rev">${index || "Chưa có repo nào được lập chỉ mục."}</div>
     ${ov ? `<div class="rev">Ticket ${esc(ov.ticket)} đụng tới: ${esc(ov.services.join(", ") || "—")}${ov.endpoints.length ? ` · endpoint: ${esc(ov.endpoints.join(", "))}` : ""}${ov.tables.length ? ` · bảng: ${esc(ov.tables.join(", "))}` : ""}</div>` : ""}
     <div class="map-wrap">${d.nodes.length ? mapSvg(d) : `<div class="empty">Chưa có service nào. Gắn thư mục code cho project của team, hoặc kết nối Bitbucket / GitHub.</div>`}
       <ul class="map-edges">${list || `<li class="rev">Chưa thấy quan hệ nào giữa các service.</li>`}</ul></div>
-    <div class="rev">Nét đứt: quan hệ đoán theo tên. Mọi cạnh đều kèm dòng code làm bằng chứng.</div>`;
+    <div class="rev">Nét đứt: quan hệ đoán theo tên. Mọi cạnh đều kèm dòng code làm bằng chứng. Bấm một service hoặc module để xem bên trong.${d.added ? " Xanh: thêm ở nhánh so sánh; đỏ: bị bỏ." : ""}</div>`;
 }
 
 async function loadMap() {
   const q = new URLSearchParams({ team: mapState.team, tables: mapState.tables });
-  mapState.data = await api(`/api/map?${q}`);
+  if (mapState.head) {  // a branch against main: system level only
+    mapState.service = mapState.module = "";
+    if (/^[A-Za-z][A-Za-z0-9]*-\d+$/.test(mapState.head)) q.set("ticket", mapState.head); else q.set("head", mapState.head);
+    mapState.data = await api(`/api/map/diff?${q}`);
+  } else {
+    if (mapState.service) q.set("service", mapState.service);
+    if (mapState.module) q.set("module", mapState.module);
+    mapState.data = await api(`/api/map?${q}`);
+  }
   mapState.picked = null;
   renderMap();
 }
@@ -1082,6 +1098,8 @@ document.addEventListener("click", (e) => {
     if (!confirm(`Gỡ kết nối ${ds.connRemove}? Tài liệu đã lấy qua nó cũng bị xoá.`)) return;
     return act(async () => { await api(`/api/connections/${encodeURIComponent(ds.connRemove)}`, { method: "DELETE" }); await pageConnections(); });
   }
+  const mapUp = t.closest("[data-map-up]");
+  if (mapUp) { mapState.module = ""; if (!mapUp.dataset.mapUp) mapState.service = ""; return act(loadMap); }
   const mapEdge = t.closest("[data-map-edge]");
   if (mapEdge) { mapState.picked = Number(mapEdge.dataset.mapEdge); return renderMap(); }
   if (ds.mapCopy !== undefined) return act(async () => { await navigator.clipboard.writeText(mapState.data?.mermaid || ""); toast("Đã chép Mermaid"); });
@@ -1242,7 +1260,9 @@ function connect() {
 document.addEventListener("change", (e) => {
   const el = e.target;
   if (el.dataset?.stdScope !== undefined) return act(() => pageStandard(el.value));
+  if (el.dataset?.map === "team") { mapState.service = mapState.module = ""; }
   if (el.dataset?.map === "team" || el.dataset?.map === "tables") { mapState[el.dataset.map] = el.value; return act(loadMap); }
+  if (el.dataset?.map === "head") { mapState.head = el.value.trim(); return act(loadMap); }
   if (el.dataset?.mapKind) {
     const all = [...document.querySelectorAll("[data-map-kind]")];
     mapState.kinds = all.every((x) => x.checked) ? new Set() : new Set(all.filter((x) => x.checked).map((x) => x.dataset.mapKind));
@@ -1268,3 +1288,11 @@ document.addEventListener("change", (e) => {
   connect();
   setInterval(() => act(loadBoard), 30000);
 })();
+
+// The service map: a service or a module opens the level inside it (an SVG group is not a button, so it has its own listener).
+document.addEventListener("click", (e) => {
+  const node = e.target.closest?.(".map-node.drill");
+  if (!node) return;
+  if (node.dataset.nodeKind === "service") mapState.service = node.dataset.mapNode; else mapState.module = node.dataset.mapNode;
+  act(loadMap);
+});

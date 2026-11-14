@@ -14,8 +14,10 @@ from actoroffice import proctree
 from actoroffice.domain.errors import Conflict, OfficeError
 from actoroffice.domain.run import Run, RunKind, RunStatus, TurnResult, TurnStatus, Usage, WakeRequest, WakeSource
 from actoroffice.domain.work import InteractionKind, InteractionStatus, Ticket, TicketStatus
+from actoroffice.ports.connection import Capability
 from actoroffice.runtimes.base import TurnSpec
 from actoroffice.runtimes.router import is_kiro
+from actoroffice.services.atlassian import legacy_capability
 from actoroffice.services.chat import handle
 from actoroffice.services.checks import command_list
 from actoroffice.services.runs import ticket_session_key
@@ -26,7 +28,7 @@ from actoroffice.tools.infra_tools import INFRA_TOOLS
 from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
 from actoroffice.tools.office_tools import OFFICE_TOOLS
 from actoroffice.tools.proposal_tools import PROPOSE_TICKETS
-from actoroffice.tools.registry import BoundTool, ToolCtx
+from actoroffice.tools.registry import BoundTool, ToolCtx, ToolDef
 from actoroffice.tools.source_tools import SOURCE_TOOLS
 from actoroffice.tools.stage_tools import STAGE_TOOLS
 from actoroffice.tools.work_tools import CHAT_WORK_TOOLS, WORK_TOOLS
@@ -149,6 +151,7 @@ class Executor:
                 system, prompt = pack.system, pack.turn
                 replaced = {t.name for t in INFRA_TOOLS}
                 tools = [t for t in tools if t.name not in replaced] + STAGE_TOOLS + ATLASSIAN_TOOLS + INFRA_TOOLS
+                tools = await self._offered(tools, ticket)  # no Jira / wiki / code host for this ticket: no such tools
                 if team is not None:
                     mcp_servers = dict(team.settings.mcp_servers)
             else:
@@ -259,6 +262,22 @@ class Executor:
             if gate is not None:
                 await self._drop_seen(actor.id, ticket.id, gate, status)
         return status
+
+    async def _offered(self, tools: list[ToolDef], ticket: Ticket | None) -> list[ToolDef]:
+        """The tools a run gets: one that needs an outside system (`ToolDef.needs`) is left out unless every capability
+        it needs is there for the ticket, through a connection of its scope (project → team → office) or through the
+        configuration from before connections. Fewer tokens, and no call that could only fail."""
+        office = self.office
+        scope = office.sourcehub.scope(ticket)
+        known: dict[Capability, bool] = {}
+        offered = []
+        for tool in tools:
+            for capability in tool.needs:
+                if capability not in known:
+                    known[capability] = await office.connections.has(capability, scope) or legacy_capability(office, capability)
+            if all(known[c] for c in tool.needs):
+                offered.append(tool)
+        return offered
 
     async def _ran_before(self, stage_run_id: int, wake: WakeRequest) -> bool:
         row = await self.office.db.fetchone("SELECT COUNT(*) AS n FROM runs WHERE stage_run_id = ?", (stage_run_id,))
@@ -402,7 +421,7 @@ class Executor:
                 resume_session_id=resume,
                 internal_tools=[
                     BoundTool(t, ToolCtx(office, actor, position, run_id, conversation_id=conv.id, workspace=cwd))
-                    for t in CHAT_TOOLS + KNOWLEDGE_TOOLS + CHAT_WORK_TOOLS
+                    for t in await self._offered(CHAT_TOOLS + KNOWLEDGE_TOOLS + CHAT_WORK_TOOLS, None)
                 ],
                 max_turns=12,
                 hook_timeout_s=office.settings.approval_wait_s + 60,

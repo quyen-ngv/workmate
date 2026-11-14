@@ -15,7 +15,6 @@ from actoroffice.app import Office
 from actoroffice.config import Settings
 from actoroffice.ports.connection import Capability, ConnectionSpec, ConnectorError, Health, Scope
 from actoroffice.ports.docs import DocContent, DocHit, DocRef
-from actoroffice.security.policy import UNTRUSTED_OFFICE_TOOLS
 from actoroffice.tools.registry import ToolCtx, ToolError
 from actoroffice.tools.source_tools import SOURCE_TOOLS
 
@@ -177,4 +176,4 @@ async def test_a_cited_outside_document_is_pinned_as_evidence(office: Office) ->
 def test_reading_an_outside_document_taints_the_session() -> None:
     from actoroffice.engine.executor import TICKET_TOOLS
 
-    assert {"source_get", "source_search"} == UNTRUSTED_OFFICE_TOOLS <= {t.name for t in TICKET_TOOLS}
+    assert {"source_get", "source_search"} == {t.name for t in TICKET_TOOLS if t.untrusted}  # ToolDef.untrusted replaced the name set

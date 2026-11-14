@@ -350,3 +350,11 @@ svg.map marker path { fill: var(--muted); }
 .map-edges { list-style: none; margin: 0; padding: 0; max-height: 520px; overflow: auto; font-size: var(--fs-sm); }
 .map-edges li { padding: 6px 8px; border-bottom: 1px solid var(--line); cursor: pointer; }
 .map-edges li.on { background: var(--accent-bg, rgba(37, 99, 235, 0.12)); }
+.map-crumbs { margin-bottom: var(--gap-2); font-size: var(--fs-sm); }
+.map-node.drill { cursor: pointer; }
+.map-node.drill rect { stroke-width: 2; }
+.map-node.module rect { stroke: var(--accent, #2563eb); }
+.map-node.added rect, .map-node.added ellipse { stroke: var(--good, #1a7f37); stroke-width: 2.5; }
+.map-node.removed rect, .map-node.removed ellipse { stroke: var(--bad, #cf222e); stroke-width: 2.5; stroke-dasharray: 4 3; }
+.map-edge.added line:not(.hit) { stroke: var(--good, #1a7f37); stroke-width: 2; }
+.map-edge.removed line:not(.hit) { stroke: var(--bad, #cf222e); stroke-width: 2; }

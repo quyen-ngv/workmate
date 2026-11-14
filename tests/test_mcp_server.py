@@ -5,16 +5,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
+from pydantic import BaseModel
 
 from actoroffice.adapters import registry
-from actoroffice.ports.connection import ConnectionSpec
+from actoroffice.ports.connection import Capability, ConnectionSpec, ConnectorError, Health, Scope
+from actoroffice.ports.docs import DocContent, DocHit, DocRef
 from actoroffice.web import mcp_api
 
-from . import test_sourcehub as wiki
 from .test_docflow import analysis, put
 from .test_docweb import web  # noqa: F401  (fixture)
 from .test_web import HEADERS
@@ -25,6 +27,48 @@ READ_ONLY = {
 }  # fmt: skip
 SECRET_IN_CODE = "MAX_PER_DAY"  # only in the sample repository of team Pay
 SECRET_IN_DOC = "Hạn mức hiện là 5 lần mỗi ngày"  # only in the analysis of the team's ticket
+
+
+LIMITS = "https://wiki.acme/PAY/101"
+PAGES: dict[str, dict[str, Any]] = {}
+
+
+class WikiConfig(BaseModel):
+    spaces: list[str] = []
+
+
+class FakeWiki:
+    """An outside system with pages at https://wiki.acme/<SPACE>/<id>, kept in PAGES."""
+
+    name: ClassVar[str] = "fake_wiki"
+    title: ClassVar[str] = "Wiki giả"
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DOCS})
+    config_schema: ClassVar[type[BaseModel]] = WikiConfig
+    secret_fields: ClassVar[tuple[str, ...]] = ()
+
+    def __init__(self, config: WikiConfig, secret: dict[str, str], *, transport: Any = None) -> None:
+        self.config = config
+
+    def recognize(self, text: str) -> list[DocRef]:
+        return [DocRef(ref=m.group(0), kind="fake_wiki") for m in re.finditer(r"https://wiki\.acme/[A-Z]+/\d+", text)]
+
+    def in_scope(self, ref: DocRef, scope: Scope) -> bool:
+        return True
+
+    async def fetch(self, ref: DocRef, scope: Scope) -> DocContent:
+        page = PAGES.get(ref.ref)
+        if page is None:
+            raise ConnectorError("not_found", f"không có trang {ref.ref}")
+        return DocContent(title=page["title"], text=page["text"], version=str(page["version"]), url=ref.ref)
+
+    async def search_docs(self, query: str, scope: Scope, limit: int = 10) -> list[DocHit]:
+        return [DocHit(ref=DocRef(ref=url), title=p["title"], snippet=p["text"][:40], url=url) for url, p in PAGES.items() if query.lower() in p["text"].lower()][:limit]
+
+    async def test(self) -> Health:
+        return Health(state="ok")
+
+    async def close(self) -> None:
+        return None
 
 
 def rpc(c, token: str | None, method: str, params: dict[str, Any] | None = None, *, msg_id: int = 1):
@@ -232,22 +276,22 @@ def test_documents_of_a_ticket(env) -> None:
 def test_outside_documents_are_masked_and_reading_them_marks_nothing(env) -> None:
     c, office, token = env.c, env.office, env.token
     leaked = "ghp_" + "a1B2" * 9
-    registry.register("fake_wiki", wiki.FakeWiki)
-    wiki.PAGES.clear()
-    wiki.PAGES[wiki.LIMITS] = {"title": "Quy định hạn mức", "text": f"Hạn mức hoàn tiền là 5 lần mỗi ngày. Token cũ: {leaked}", "version": 3}
+    registry.register("fake_wiki", FakeWiki)
+    PAGES.clear()
+    PAGES[LIMITS] = {"title": "Quy định hạn mức", "text": f"Hạn mức hoàn tiền là 5 lần mỗi ngày. Token cũ: {leaked}", "version": 3}
     try:
 
         async def prepare():
             await office.connections.save(ConnectionSpec(id="wiki", use="fake_wiki", scope=f"team:{env.team.id}", config={"spaces": []}))
-            ticket = await office.tickets.create("Theo quy định", description=f"Theo quy định ở {wiki.LIMITS}.")
+            ticket = await office.tickets.create("Theo quy định", description=f"Theo quy định ở {LIMITS}.")
             await office.db.execute("UPDATE tickets SET team_id = ? WHERE id = ?", (env.team.id, ticket.id))
             ticket = await office.tickets.get(ticket.id)
             await office.sources.list(ticket)
             return ticket, await office.sources.unread_required(ticket)
 
         ticket, unread = c.portal.call(prepare)
-        assert unread == [wiki.LIMITS]
-        failed, page = call(c, token, "source_get", ref=wiki.LIMITS, ticket=ticket.key)
+        assert unread == [LIMITS]
+        failed, page = call(c, token, "source_get", ref=LIMITS, ticket=ticket.key)
         assert not failed and page.startswith("# Quy định hạn mức\nNguồn: https://wiki.acme/PAY/101 · phiên bản 3 · qua kết nối wiki")
         assert leaked not in page and "Token cũ: ‹redacted›" in page, "what comes from outside still goes through the redactor"
         assert "Đã ghi nhận" not in page
@@ -255,15 +299,15 @@ def test_outside_documents_are_masked_and_reading_them_marks_nothing(env) -> Non
         async def still_unread():
             return await office.sources.unread_required(ticket)
 
-        assert c.portal.call(still_unread) == [wiki.LIMITS], "a person reading in their IDE is not the AI having read the ticket's source"
+        assert c.portal.call(still_unread) == [LIMITS], "a person reading in their IDE is not the AI having read the ticket's source"
         failed, hits = call(c, token, "source_search", query="hạn mức")
-        assert not failed and hits.startswith(f"- [wiki] {wiki.LIMITS} — Quy định hạn mức") and leaked not in hits, "without a ticket: the team's connections"
+        assert not failed and hits.startswith(f"- [wiki] {LIMITS} — Quy định hạn mức") and leaked not in hits, "without a ticket: the team's connections"
         guest = c.portal.call(office.teams.create_user, "Khách")
-        failed, nothing = call(c, new_token(c, guest.id)["token"], "source_get", ref=wiki.LIMITS)
+        failed, nothing = call(c, new_token(c, guest.id)["token"], "source_get", ref=LIMITS)
         assert failed and "Quy định" not in nothing, "another team's connection is never used"
     finally:
         registry.unregister("fake_wiki")
-        wiki.PAGES.clear()
+        PAGES.clear()
 
 
 # ---- scope -----------------------------------------------------------------------------------------------------------

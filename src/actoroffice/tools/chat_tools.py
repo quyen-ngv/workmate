@@ -9,7 +9,7 @@ from actoroffice.domain.work import InteractionKind, Priority, TicketStatus
 
 from .office_tools import PROJECT_ACCESS_REQUEST, TICKET_UPDATE, doc_get, list_actors, list_dir, ticket_get
 from .proposal_tools import PROPOSE_TICKETS
-from .registry import ToolCtx, ToolDef, ToolError, schema
+from .registry import ToolCtx, ToolDef, ToolError, schema, source_ref
 
 
 async def propose_ticket(args: dict[str, Any], ctx: ToolCtx) -> str:
@@ -92,6 +92,7 @@ CHAT_TOOLS: list[ToolDef] = [
         schema({"path": {"type": "string"}}, required=[]),
         list_dir,
         read_only=True,
+        activity="read",
     ),
     ToolDef(
         "tickets_list",
@@ -106,6 +107,7 @@ CHAT_TOOLS: list[ToolDef] = [
         ),
         tickets_list,
         read_only=True,
+        activity="search",
     ),
     ToolDef(
         "ticket_get",
@@ -113,6 +115,8 @@ CHAT_TOOLS: list[ToolDef] = [
         schema({"ticket": {"type": "string"}, "comments": {"type": "integer"}}, required=["ticket"]),
         ticket_get,
         read_only=True,
+        activity="read",
+        reads_source=source_ref("ticket", "ticket", "path"),  # runs from before SI-39 kept the key in `path` only
     ),
     ToolDef(
         "doc_get",
@@ -120,6 +124,8 @@ CHAT_TOOLS: list[ToolDef] = [
         schema({"ticket": {"type": "string"}, "key": {"type": "string"}}, required=["ticket", "key"]),
         doc_get,
         read_only=True,
+        activity="read",
+        reads_source=source_ref("ticket", "ticket"),  # without `ticket` it reads the run's own ticket: not a source
     ),
     ToolDef(
         "propose_ticket",

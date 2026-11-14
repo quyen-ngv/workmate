@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 from actoroffice.domain.errors import OfficeError
 from actoroffice.domain.run import WakeSource
 
+from .atlassian import pr_host
+
 if TYPE_CHECKING:
     from actoroffice.app import Office
 
@@ -31,19 +33,17 @@ class PullRequestWatcher:
 
     async def poll(self) -> list[str]:
         """One pass. Returns what happened, e.g. ["AO-3 merged", "AO-4: 2 new comments"]."""
-        from actoroffice.tools.atlassian_tools import parse_pr
-
         office = self.office
-        host = office.atlassian.code_host()
-        if host is None:
-            return []
         events: list[str] = []
         rows = await office.db.fetchall("SELECT id FROM tickets WHERE stage = 'pr' AND pr_url IS NOT NULL AND status NOT IN ('done', 'cancelled')")
         for row in rows:
             ticket = await office.tickets.get(row["id"])
-            parsed = parse_pr(ticket.pr_url or "")
-            if parsed is None:
+            # the nearest code-host connection that owns the URL (Bitbucket, GitHub…), else the old Bitbucket client
+            found = await pr_host(office, office.sourcehub.scope(ticket), ticket.pr_url or "")
+            if found is None:
                 continue
+            host, parsed = found[0], found[1:]
+            who = getattr(host, "label", "bitbucket")
             try:
                 info = await host.pr_get(*parsed)
                 comments = await host.pr_comments(*parsed)
@@ -51,7 +51,7 @@ class PullRequestWatcher:
                 log.warning("pull request %s: %s", ticket.pr_url, exc)
                 continue
             if info.get("state") == "MERGED":
-                await office.stages.external_passed(ticket.id, "merge", by="bitbucket", note=f"PR #{parsed[1]} đã merge")
+                await office.stages.external_passed(ticket.id, "merge", by=who, note=f"PR #{parsed[1]} đã merge")
                 events.append(f"{ticket.key} merged")
                 continue
             seen = self.seen.setdefault(ticket.id, await self._known(ticket.id))
@@ -61,7 +61,7 @@ class PullRequestWatcher:
             seen.update(c["id"] for c in fresh)
             lines = "\n".join(f"- #{c['id']} {c['by']}" + (f" {c['file']}:{c['line']}" if c.get("file") else "") + f": {c['text'][:300]}" for c in fresh)
             await office.tickets.add_comment(
-                ticket.id, f"💬 Review mới trên PR #{parsed[1]} ({len(fresh)}):\n{lines}", author_kind="review", author_id="bitbucket"
+                ticket.id, f"💬 Review mới trên PR #{parsed[1]} ({len(fresh)}):\n{lines}", author_kind="review", author_id=who
             )
             await office.db.execute(
                 "INSERT INTO work_products(ticket_id, kind, ref, metadata_json, created_at) VALUES (?, 'review_seen', ?, '{}', datetime('now'))",

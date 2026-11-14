@@ -250,6 +250,7 @@ INFRA_TOOLS: list[ToolDef] = [
         schema({**RES, "database": {"type": "string"}, "table": {"type": "string"}}, required=[]),
         db_schema,
         read_only=True,
+        activity="source",
     ),
     ToolDef(
         "db_query",
@@ -258,6 +259,7 @@ INFRA_TOOLS: list[ToolDef] = [
         schema({**RES, "database": {"type": "string"}, "sql": {"type": "string"}, "limit": {"type": "integer"}}, required=["sql"]),
         db_query,
         read_only=True,
+        activity="source",
     ),
     ToolDef(
         "redis_scan",
@@ -265,6 +267,7 @@ INFRA_TOOLS: list[ToolDef] = [
         schema({**RES, "pattern": {"type": "string"}, "limit": {"type": "integer"}}, required=["resource"]),
         redis_scan,
         read_only=True,
+        activity="source",
     ),
     ToolDef("redis_get", "Read one Redis key (type, TTL, value capped).", schema({**RES, "key": {"type": "string"}}, required=["resource", "key"]), redis_get, read_only=True),
     ToolDef(
@@ -273,6 +276,7 @@ INFRA_TOOLS: list[ToolDef] = [
         schema({**RES, "topic": {"type": "string"}, "n": {"type": "integer"}, "from": {"type": "string", "enum": ["latest", "earliest"]}}, required=["resource", "topic"]),
         kafka_peek,
         read_only=True,
+        activity="source",
     ),
     ToolDef("mq_queues", "RabbitMQ queues with message and consumer counts.", schema({**RES}, required=["resource"]), mq_queues, read_only=True),
     ToolDef(
@@ -281,6 +285,7 @@ INFRA_TOOLS: list[ToolDef] = [
         schema({**RES, "queue": {"type": "string"}, "n": {"type": "integer"}, "vhost": {"type": "string"}}, required=["resource", "queue"]),
         mq_peek,
         read_only=True,
+        activity="source",
     ),
     ToolDef(
         "logs_search",
@@ -288,6 +293,7 @@ INFRA_TOOLS: list[ToolDef] = [
         schema(_when({**RES, "service": {"type": "string"}, "query": {"type": "string"}, "level": {"type": "string"}, "limit": {"type": "integer"}}), required=["resource", "service"]),
         logs_search,
         read_only=True,
+        activity="source",
     ),
     ToolDef(
         "logs_cluster",
@@ -295,6 +301,7 @@ INFRA_TOOLS: list[ToolDef] = [
         schema(_when({**RES, "service": {"type": "string"}, "query": {"type": "string"}}), required=["resource", "service"]),
         logs_cluster,
         read_only=True,
+        activity="source",
     ),
     ToolDef(
         "logs_errors",
@@ -302,6 +309,7 @@ INFRA_TOOLS: list[ToolDef] = [
         schema(_when({**RES, "service": {"type": "string"}}), required=["resource", "service"]),
         logs_errors,
         read_only=True,
+        activity="source",
     ),
     ToolDef(
         "logs_trace",
@@ -309,6 +317,7 @@ INFRA_TOOLS: list[ToolDef] = [
         schema(_when({**RES, "trace_id": {"type": "string"}}), required=["resource", "trace_id"]),
         logs_trace,
         read_only=True,
+        activity="source",
     ),
     ToolDef(
         "logs_diff",

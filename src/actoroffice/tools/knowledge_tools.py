@@ -114,6 +114,7 @@ KNOWLEDGE_TOOLS: list[ToolDef] = [
         schema({"query": {"type": "string"}, "limit": {"type": "integer"}}, required=["query"]),
         memory_search,
         read_only=True,
+        activity="search",
     ),
     ToolDef(
         "history_search",
@@ -122,6 +123,7 @@ KNOWLEDGE_TOOLS: list[ToolDef] = [
         schema({"query": {"type": "string"}, "limit": {"type": "integer"}}, required=["query"]),
         history_search,
         read_only=True,
+        activity="search",
     ),
     ToolDef("skill_list", "List the skills you can use (yours, your role's, the office's).", schema({}, required=[]), skill_list, read_only=True),
     ToolDef(
@@ -130,6 +132,7 @@ KNOWLEDGE_TOOLS: list[ToolDef] = [
         schema({"name": {"type": "string"}, "file": {"type": "string"}}, required=["name"]),
         skill_read,
         read_only=True,
+        activity="read",
     ),
     ToolDef(
         "skill_save",

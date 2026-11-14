@@ -218,13 +218,14 @@ def create_app(office: Office, token: str) -> FastAPI:
     @app.middleware("http")
     async def guard(request: Request, call_next: Any) -> Any:
         host = (request.headers.get("host") or "").rsplit(":", 1)[0].lower()
-        if host not in LOOPBACK:
-            return JSONResponse({"error": "forbidden host"}, status_code=403)
         path = request.url.path
+        hook = path.startswith(intel_api.HOOKS)  # a code host's delivery: any host, no cookie; its signature is the proof
+        if host not in LOOPBACK and not hook:
+            return JSONResponse({"error": "forbidden host"}, status_code=403)
         if path.startswith("/api/") and not authed(request):
             return JSONResponse({"error": "not signed in"}, status_code=401)
         # /mcp does its own auth (a personal bearer token, web/mcp_api.py): an IDE sends neither the cookie nor this header.
-        if request.method not in ("GET", "HEAD") and path != mcp_api.PATH and request.headers.get("x-requested-with") != "actoroffice":
+        if request.method not in ("GET", "HEAD") and path != mcp_api.PATH and not hook and request.headers.get("x-requested-with") != "actoroffice":
             return JSONResponse({"error": "missing request header"}, status_code=403)
         response = await call_next(request)
         if path.startswith("/static/"):

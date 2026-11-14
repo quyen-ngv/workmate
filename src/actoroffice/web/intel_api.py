@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from actoroffice.app import Office
 from actoroffice.codeintel import services as service_map
 from actoroffice.domain.errors import OfficeError
 from actoroffice.ports.connection import ConnectionSpec, ConnectorError
+
+HOOKS = "/hooks/"
 
 ERROR_STATUS = {"auth": 401, "forbidden": 403, "not_found": 404, "rate_limited": 429, "network": 502, "invalid": 422, "unconfigured": 409}
 
@@ -88,6 +90,21 @@ def register(app: FastAPI, office: Office) -> None:
     async def remove_connection(connection_id: str) -> dict[str, Any]:
         await office.connections.remove(connection_id)
         return {"removed": connection_id}
+
+    # ---- events pushed by code hosts ---------------------------------------------------------------------------
+
+    @app.post(HOOKS + "{connection_id}")
+    async def hook(connection_id: str, request: Request) -> dict[str, Any]:
+        """A delivery from a code host. The connection's webhook secret signs it; anything else is refused without
+        saying why."""
+        received = await office.webhooks.receive(connection_id, dict(request.headers), await request.body())
+        if received is None:
+            raise HTTPException(401, "refused")
+        return {"ok": True, "kind": received["kind"]}
+
+    @app.get("/api/hooks")
+    async def hooks() -> list[dict[str, Any]]:
+        return await office.webhooks.recent()
 
     # ---- code index --------------------------------------------------------------------------------------------
 

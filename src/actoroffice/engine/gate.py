@@ -15,19 +15,25 @@ from actoroffice.domain.work import InteractionKind
 from actoroffice.runtimes.base import GateDecision, GateResult
 from actoroffice.security.policy import Decision, Risk, ToolCallContext, Verdict, office_tool, suggest_rules, target_of
 from actoroffice.services.interactions import input_hash
+from actoroffice.tools.registry import tool_def
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
 
 log = logging.getLogger(__name__)
 
-# Our own tools that act outside the machine: they follow the position's "external" rule (usually ask).
 ENV_DUMP = re.compile(
     r"^\s*(env|printenv|set|export\s+-p|declare\s+-x|Get-ChildItem\s+env:|gci\s+env:|dir\s+env:)\s*(\||$)"
     r"|\becho\s+\$\w*(DSN|TOKEN|SECRET|PASSWORD|KEY)\b|\bcat\s+/proc/(self|\d+)/environ",
     re.IGNORECASE,
 )
-EXTERNAL_OFFICE_TOOLS = {"jira_comment", "pr_create", "pr_reply", "repo_fetch"}
+
+
+def acts_outside(tool: str) -> bool:
+    """One of our own tools that acts outside the machine (`ToolDef.effect` "external": a Jira comment, a pull request…):
+    it follows the position's "external" rule (usually ask)."""
+    definition = tool_def(office_tool(tool))
+    return definition is not None and definition.effect == "external"
 
 
 @dataclass
@@ -238,7 +244,7 @@ async def evaluate_call(
         mode=project.permission_mode if project else "workspace",
         project_commands=_profile_commands(project),
     )
-    return CallCheck(office.policy.decide(tool, args, ctx, external=office_tool(tool) in EXTERNAL_OFFICE_TOOLS))
+    return CallCheck(office.policy.decide(tool, args, ctx, external=acts_outside(tool)))
 
 
 def _profile_commands(project: Any) -> list[str]:

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from actoroffice.ports.connection import ConnectorError
+from actoroffice.ports.connection import ConnectionSpec, ConnectorError
+from actoroffice.ports.docs import DocRef
+from actoroffice.services.sourcehub import Fetched
 
 from .registry import ToolCtx, ToolDef, ToolError, schema
 
@@ -24,10 +26,24 @@ async def source_get(args: dict[str, Any], ctx: ToolCtx) -> str:
     ref = str(args.get("ref") or args.get("url") or args.get("key") or "").strip()
     if not ref:
         raise ToolError("Thiếu tham số `ref`: mã issue (PAY-120), URL trang, hoặc id trang.")
+    return await read_document(ctx, ref)
+
+
+async def read_document(ctx: ToolCtx, ref: str, *, direct: tuple[ConnectionSpec, Any] | None = None) -> str:
+    """What `source_get` answers for a reference. `direct` is the (connection, adapter) of a caller that already knows
+    which system the reference belongs to (the old `jira_issue` / `wiki_page`): when no connection recognises the bare
+    reference in free text (an issue key of a project that is not listed, a page id), that adapter reads it."""
     office = ctx.office
     ticket = await _ticket(ctx)
     try:
-        got = await office.sourcehub.get(ticket, ref)
+        try:
+            got = await office.sourcehub.get(ticket, ref)
+        except ConnectorError as exc:
+            if direct is None or exc.kind not in ("not_found", "unconfigured"):
+                raise
+            spec, adapter = direct
+            doc_ref = DocRef(connection=spec.id, ref=ref, kind=spec.use)
+            got = Fetched(spec.id, spec.use, doc_ref, await adapter.fetch(doc_ref, office.sourcehub.scope(ticket)))
     except ConnectorError as exc:
         raise ToolError(str(exc)) from exc
     marked = await office.sourcehub.mark_read(ticket, got, ref) if ticket is not None else []
@@ -66,6 +82,8 @@ SOURCE_TOOLS: list[ToolDef] = [
         schema({"ref": {"type": "string", "description": "Issue key (PAY-120), page URL or page id"}}, required=["ref"]),
         source_get,
         read_only=True,
+        activity="read",
+        untrusted=True,
     ),
     ToolDef(
         "source_search",
@@ -73,5 +91,7 @@ SOURCE_TOOLS: list[ToolDef] = [
         schema({"query": {"type": "string"}, "limit": {"type": "integer"}}, required=["query"]),
         source_search,
         read_only=True,
+        activity="search",
+        untrusted=True,
     ),
 ]

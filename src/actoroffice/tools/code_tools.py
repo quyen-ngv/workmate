@@ -207,7 +207,7 @@ async def service_map_tool(args: dict[str, Any], ctx: ToolCtx) -> str:
 REPO_ARG = {"repo": {"type": "string", "description": "Repo name from repo_list. Omit to use every repo of the ticket."}}
 
 CODE_TOOLS: list[ToolDef] = [
-    ToolDef("repo_list", "List the code repositories this ticket can read and the state of their index.", schema({}, required=[]), repo_list, read_only=True),
+    ToolDef("repo_list", "List the code repositories this ticket can read and the state of their index.", schema({}, required=[]), repo_list, read_only=True, activity="search"),
     ToolDef(
         "code_search",
         "Search the code index (faster and cheaper than Grep + Read on a large repo). Any part of an identifier matches. Returns the best pieces of code "
@@ -224,6 +224,7 @@ CODE_TOOLS: list[ToolDef] = [
         ),
         code_search,
         read_only=True,
+        activity="search",
     ),
     ToolDef(
         "code_outline",
@@ -231,6 +232,7 @@ CODE_TOOLS: list[ToolDef] = [
         schema({"path": {"type": "string"}, **REPO_ARG}, required=["path"]),
         code_outline,
         read_only=True,
+        activity="read",
     ),
     ToolDef(
         "code_symbol",
@@ -238,6 +240,7 @@ CODE_TOOLS: list[ToolDef] = [
         schema({"name": {"type": "string", "description": "Name, qualified name, or part of a name"}, **REPO_ARG, "limit": {"type": "integer"}}, required=["name"]),
         code_symbol,
         read_only=True,
+        activity="read",
     ),
     ToolDef(
         "code_refs",
@@ -248,6 +251,7 @@ CODE_TOOLS: list[ToolDef] = [
         ),
         code_refs,
         read_only=True,
+        activity="search",
     ),
     ToolDef(
         "code_read",
@@ -258,6 +262,7 @@ CODE_TOOLS: list[ToolDef] = [
         ),
         code_read,
         read_only=True,
+        activity="read",
     ),
     ToolDef(
         "code_impact",
@@ -268,6 +273,7 @@ CODE_TOOLS: list[ToolDef] = [
         ),
         code_impact,
         read_only=True,
+        activity="search",
     ),
     ToolDef(
         "code_pack",
@@ -275,6 +281,7 @@ CODE_TOOLS: list[ToolDef] = [
         schema({"question": {"type": "string"}, "budget": {"type": "integer", "description": "Tokens, default 3500"}, **REPO_ARG}, required=["question"]),
         code_pack,
         read_only=True,
+        activity="search",
     ),
     ToolDef(
         "service_map",
@@ -285,5 +292,6 @@ CODE_TOOLS: list[ToolDef] = [
         ),
         service_map_tool,
         read_only=True,
+        activity="search",
     ),
 ]

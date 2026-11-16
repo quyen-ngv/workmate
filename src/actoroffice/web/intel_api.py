@@ -29,6 +29,13 @@ class ConnectionBody(BaseModel):
     secret: dict[str, str] | None = None
 
 
+class RemoteRepoBody(BaseModel):
+    slug: str  # "owner/name", "KEY/repo"
+    team: str = ""
+    connection: str = ""  # a connection id; empty = the nearest one that reads code
+    branch: str = ""  # empty = the repository's default branch
+
+
 class DocProfileBody(BaseModel):
     scope: str = "office"  # office | team:<id> | project:<id> | ticket:<key>
     pack: str | None = None
@@ -120,6 +127,22 @@ def register(app: FastAPI, office: Office) -> None:
     async def index_refresh(team: str = "") -> list[dict[str, Any]]:
         """Bring the index of the team's repositories up to their main branch (only changed files are read again)."""
         return [s.model_dump() for s in await office.codeintel.ensure(await repos_of(team))]
+
+    @app.post("/api/index/remote")
+    async def index_remote(body: RemoteRepoBody) -> dict[str, Any]:
+        """Index a repository that lives on a connected code host (GitHub, Bitbucket, Bitbucket Server) for a team. It
+        is cloned as a mirror, or read through the API when the connection must not be cloned; from then on the
+        background pass and the host's push events keep it fresh."""
+        from actoroffice.ports.connection import Scope
+
+        team_id = None if body.team in ("", "-", "all") else (await office.teams.get_team(body.team)).id
+        try:
+            repo = await office.codeintel.remote_repo(body.slug, Scope(team_id=team_id), connection=body.connection or None, branch=body.branch or None)
+        except ConnectorError as exc:
+            raise fail(exc) from exc
+        if repo is None:
+            raise HTTPException(409, "Chưa có kết nối code host nào đọc được repo này. Thêm kết nối trong Kết nối trước.")
+        return (await office.codeintel.index(repo)).model_dump()
 
     # ---- service map -------------------------------------------------------------------------------------------
 

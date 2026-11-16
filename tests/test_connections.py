@@ -63,7 +63,7 @@ async def office(tmp_path) -> AsyncIterator[Office]:
 
 
 def test_every_builtin_adapter_loads_and_describes_itself() -> None:
-    for name in ("jira_cloud", "confluence_cloud", "bitbucket_cloud", "github"):
+    for name in ("jira_cloud", "confluence_cloud", "bitbucket_cloud", "bitbucket_server", "github"):
         info = registry.describe(name)
         assert info["title"] and info["capabilities"] and info["config_schema"]["properties"], name
         assert "token" in info["secret_fields"]

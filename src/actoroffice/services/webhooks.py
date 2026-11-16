@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from actoroffice.domain.ids import utcnow
@@ -23,13 +24,20 @@ log = logging.getLogger(__name__)
 
 MAX_BODY = 5 * 1024 * 1024
 KEEP_EVENTS = 500
+_SERVER_WEB_RE = re.compile(r"/(projects|users)/([^/]+)/repos/([^/]+)(?:/.*)?$")  # a repository's page on Bitbucket Server
 
 
 def _same_repo(repo_url: str | None, slug: str) -> bool:
-    """`https://github.com/acme/pay.git` and `git@bitbucket.org:acme/pay` are the repository `acme/pay`."""
+    """`https://github.com/acme/pay.git` and `git@bitbucket.org:acme/pay` are the repository `acme/pay`. On Bitbucket Server
+    `https://host/scm/pay/ledger.git`, `https://host/projects/PAY/repos/ledger[/browse]` and `PAY/ledger` are one repository;
+    a personal one is `https://host/users/lan/repos/notes` = `~lan/notes`."""
     if not repo_url or not slug:
         return False
     tail = repo_url.strip().lower().removesuffix(".git").replace(":", "/").rstrip("/")
+    web = _SERVER_WEB_RE.search(tail)
+    if web:
+        owner, key, name = web.groups()
+        tail = f"/{key if owner == 'projects' or key.startswith('~') else '~' + key}/{name}"
     return tail.endswith("/" + slug.lower().strip("/"))
 
 

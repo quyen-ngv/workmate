@@ -1203,6 +1203,7 @@ function renderMap() {
       <span>${kinds.map((k) => `<label class="inline"><input type="checkbox" data-map-kind="${esc(k)}" ${!mapState.kinds.size || mapState.kinds.has(k) ? "checked" : ""}> ${esc(EDGE_LABEL[k] || k)}</label>`).join(" ")}</span>
       <label>Tô theo ticket <input type="text" data-map="ticket" value="${esc(ov?.ticket || "")}" placeholder="vd. AO-12" size="8"></label>
       <label title="Nhánh hoặc commit, hoặc mã ticket để lấy nhánh của ticket đó. Để trống: bản đồ của nhánh chính">So nhánh <input type="text" data-map="head" value="${esc(mapState.head)}" placeholder="nhánh / commit / AO-12" size="14"></label>
+      <label title="Lập chỉ mục một repo trên code host đã kết nối (GitHub, Bitbucket, Bitbucket Server). Ghi KEY/repo rồi Enter">Thêm repo <input type="text" data-map="remote" placeholder="KEY/repo" size="14"></label>
       <button class="btn small" data-map-copy>Chép Mermaid</button>
     </div>
     <div class="rev">${index || "Chưa có repo nào được lập chỉ mục."}</div>
@@ -1700,6 +1701,12 @@ document.addEventListener("change", (e) => {
   if (el.dataset?.map === "team") { mapState.service = mapState.module = ""; }
   if (el.dataset?.map === "team" || el.dataset?.map === "tables") { mapState[el.dataset.map] = el.value; return act(loadMap); }
   if (el.dataset?.map === "head") { mapState.head = el.value.trim(); return act(loadMap); }
+  if (el.dataset?.map === "remote" && el.value.trim()) return act(async () => {
+    toast("Đang lập chỉ mục repo, có thể mất vài phút…");
+    const s = await api("/api/index/remote", { method: "POST", body: { slug: el.value.trim(), team: mapState.team } });
+    toast(s.state === "ready" ? `Đã lập chỉ mục ${s.repo}: ${s.files} file` : `${s.repo}: ${s.state}${s.error ? ` — ${s.error}` : ""}`, s.state !== "ready");
+    await loadMap();
+  });
   if (el.dataset?.mapKind) {
     const all = [...document.querySelectorAll("[data-map-kind]")];
     mapState.kinds = all.every((x) => x.checked) ? new Set() : new Set(all.filter((x) => x.checked).map((x) => x.dataset.mapKind));

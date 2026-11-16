@@ -18,6 +18,7 @@ from actoroffice.ports.connection import Capability, ConnectionSpec, ConnectorEr
 from .seed import IDENT, git
 from .test_codeintel import PY_REPO
 from .test_docweb import web  # noqa: F401  (fixture)
+from .test_web import HEADERS
 
 SECRET = "hook-secret-0123456789"
 
@@ -181,3 +182,36 @@ def test_a_repository_that_must_not_be_cloned_is_indexed_through_the_api(web) ->
         assert not (office.settings.data_dir / "repos").exists(), "nothing was cloned"
     finally:
         registry.unregister("noclone")
+
+
+def test_a_repository_on_a_code_host_is_added_from_the_web_on_its_default_branch(web) -> None:
+    office, c, team, _people, _project = web
+    asked: list[str | None] = []
+
+    class Host(NoCloneHost):
+        name: ClassVar[str] = "noclone2"
+
+        async def repos(self, query: str | None = None) -> list[RepoRef]:
+            return [RepoRef(slug="ACME/shop", default_branch="develop")]
+
+        async def head(self, repo: RepoRef, branch: str | None = None) -> str:
+            asked.append(branch)
+            return "c9"
+
+    registry.register("noclone2", Host)
+    Host.files, Host.reads = dict(PY_REPO), []
+    try:
+        assert c.post("/api/index/remote", json={"slug": "ACME/shop", "team": team.id}, headers=HEADERS).status_code == 409, "nothing connected yet"
+        c.portal.call(lambda: office.connections.save(ConnectionSpec(id="vault2", use="noclone2", scope=f"team:{team.id}")))
+        state = c.post("/api/index/remote", json={"slug": "ACME/shop", "team": team.id}, headers=HEADERS).json()
+        assert state["state"] == "ready" and state["indexed_commit"] == "c9" and state["files"] >= 4
+        assert asked and set(asked) == {"develop"}, "the host's default branch is indexed, not a guessed `main`"
+        slugs = [s["repo"] for s in c.get(f"/api/index?team={team.id}").json()]
+        assert state["repo"] in c.portal.call(lambda: _slugs(office)) and {"shop", state["repo"]} <= set(slugs), "the team sees it next to its own projects"
+        assert c.get("/api/index").json() == [] or state["repo"] not in [s["repo"] for s in c.get("/api/index").json()], "another scope does not"
+    finally:
+        registry.unregister("noclone2")
+
+
+async def _slugs(office) -> list[str]:
+    return [r.slug for r in await office.codeintel.all_repos()]

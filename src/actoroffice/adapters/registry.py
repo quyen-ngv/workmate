@@ -19,7 +19,9 @@ BUILTIN = {
     "jira_cloud": "actoroffice.adapters.atlassian.jira_cloud:JiraCloud",
     "confluence_cloud": "actoroffice.adapters.atlassian.confluence_cloud:ConfluenceCloud",
     "bitbucket_cloud": "actoroffice.adapters.bitbucket_cloud:BitbucketCloud",
+    "bitbucket_server": "actoroffice.adapters.bitbucket_server:BitbucketServer",
     "github": "actoroffice.adapters.github:GitHub",
+    "oracle_schema": "actoroffice.adapters.oracle_schema:OracleSchema",
     # generic: an outside system connected by configuration only
     "http": "actoroffice.adapters.generic.http:GenericHttp",
     "mcp": "actoroffice.adapters.generic.mcp:GenericMcp",

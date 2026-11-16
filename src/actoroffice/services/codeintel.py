@@ -98,7 +98,19 @@ class CodeIntelService:
             repo = self._repo_of(project)
             if repo is not None:
                 found.append(repo)
+        if project_id is None:  # repositories indexed from a code host belong to the team they were added for
+            known = {r.slug for r in found}
+            found += [r for r in self._remote_repos() if r.slug not in known and (r.team_id is None or r.team_id == team_id)]
         return found
+
+    def _remote_repos(self) -> list[Repo]:
+        """Repositories on code hosts that were indexed before, as the index remembers them."""
+        out = []
+        for row in self.store.all("SELECT * FROM repos WHERE connection_id IS NOT NULL AND connection_id <> ''"):
+            slug, connection = str(row["slug"]), str(row["connection_id"])
+            name = slug[len(connection) + 1 :] if slug.startswith(connection + "/") else slug
+            out.append(Repo(slug, row["project_id"], row["team_id"], None, row["default_branch"] or "main", RepoRef(connection=connection, slug=name)))
+        return out
 
     async def for_ticket(self, ticket: Ticket | None) -> list[Repo]:
         """What a ticket may read: its project first, then the other repositories of its team."""
@@ -115,13 +127,7 @@ class CodeIntelService:
         code hosts that were indexed before."""
         found = [repo for project in await self.office.projects.list() if (repo := self._repo_of(project)) is not None]
         known = {r.slug for r in found}
-        for row in self.store.all("SELECT * FROM repos WHERE connection_id IS NOT NULL AND connection_id <> ''"):
-            slug, connection = str(row["slug"]), str(row["connection_id"])
-            if slug in known:
-                continue
-            name = slug[len(connection) + 1 :] if slug.startswith(connection + "/") else slug
-            found.append(Repo(slug, row["project_id"], row["team_id"], None, row["default_branch"] or "main", RepoRef(connection=connection, slug=name)))
-        return found
+        return found + [r for r in self._remote_repos() if r.slug not in known]
 
     async def sweep(self) -> list[IndexState]:
         """Bring every index up to its main branch. What did not change costs one `git rev-parse` per repository."""
@@ -144,13 +150,28 @@ class CodeIntelService:
             except Exception:  # a pass that breaks must not stop the next one
                 logging.getLogger(__name__).exception("index sweep failed")
 
-    async def remote_repo(self, slug: str, scope: Scope) -> Repo | None:
-        """A repository on a connected code host, by `connection/owner/name` or `owner/name`."""
-        found = await self.office.connections.resolve(Capability.CODE_READ, scope)
-        if found is None:
-            return None
-        spec, _ = found
-        return Repo(slug_of(f"{spec.id}/{slug}"), scope.project_id, scope.team_id, None, "main", RepoRef(connection=spec.id, slug=slug))
+    async def remote_repo(self, slug: str, scope: Scope, *, connection: str | None = None, branch: str | None = None) -> Repo | None:
+        """A repository on a connected code host, by `owner/name` (`KEY/repo` on Bitbucket Server). `connection`: that
+        connection instead of the nearest one that reads code. The branch indexed is `branch`, else the repository's
+        default branch as the host reports it, else `main`."""
+        if connection:
+            spec = await self.office.connections.get(connection)
+            if spec is None or not spec.enabled:
+                return None
+            host = await self.office.connections.adapter(spec.id)
+        else:
+            found = await self.office.connections.resolve(Capability.CODE_READ, scope)
+            if found is None:
+                return None
+            spec, host = found
+        slug = slug.strip().strip("/")
+        if not branch:
+            try:
+                listed = await host.repos(slug.rsplit("/", 1)[-1])
+                branch = next((r.default_branch for r in listed if r.slug.lower() == slug.lower()), None)
+            except (ConnectorError, AttributeError):  # the host could not list it now (or cannot list): indexing says what is wrong
+                branch = None
+        return Repo(slug_of(f"{spec.id}/{slug}"), scope.project_id, scope.team_id, None, branch or "main", RepoRef(connection=spec.id, slug=slug))
 
     # ---- sources ---------------------------------------------------------------------------------------------
 

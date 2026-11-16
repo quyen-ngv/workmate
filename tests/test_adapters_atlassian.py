@@ -806,8 +806,10 @@ async def test_confluence_health_and_missing_secret() -> None:
 # ---- the dependency rule -----------------------------------------------------------------------------------
 
 ADAPTERS = Path(__file__).resolve().parents[1] / "src" / "actoroffice" / "adapters"
-OWNED = ["_http.py", "bitbucket_cloud.py", "github.py", *(f"atlassian/{n}.py" for n in ("__init__", "auth", "adf", "storage_html", "jira_cloud", "confluence_cloud"))]
+OWNED = ["_http.py", "bitbucket_cloud.py", "bitbucket_server.py", "github.py", "oracle_schema.py"]
+OWNED += [f"atlassian/{n}.py" for n in ("__init__", "auth", "adf", "storage_html", "jira_cloud", "confluence_cloud")]
 ALLOWED_THIRD_PARTY = {"httpx", "pydantic"}
+EXTRA_THIRD_PARTY = {"oracle_schema.py": {"oracledb"}}  # an optional driver, allowed for that one adapter only
 
 
 @pytest.mark.parametrize("relative", OWNED)
@@ -824,4 +826,4 @@ def test_adapters_import_only_ports_stdlib_httpx_and_pydantic(relative: str) -> 
         if top == "actoroffice":
             assert module.startswith(("actoroffice.ports", "actoroffice.adapters")), f"{relative} imports {module}"
         else:
-            assert top in sys.stdlib_module_names or top in ALLOWED_THIRD_PARTY, f"{relative} imports {module}"
+            assert top in sys.stdlib_module_names or top in ALLOWED_THIRD_PARTY | EXTRA_THIRD_PARTY.get(relative, set()), f"{relative} imports {module}"

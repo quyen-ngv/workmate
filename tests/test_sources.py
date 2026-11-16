@@ -6,7 +6,6 @@ import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -19,15 +18,15 @@ from actoroffice.domain.sources import parse_refs
 from actoroffice.domain.stage import StageRun, default_templates
 from actoroffice.domain.work import Ticket
 from actoroffice.engine import prompt_pack
-from actoroffice.services.jira import JiraClient, JiraMirror
+from actoroffice.ports.connection import ConnectionSpec
 from actoroffice.tools.office_tools import ticket_create
 from actoroffice.tools.registry import ToolCtx, ToolError
 from actoroffice.tools.stage_tools import source_skip
 from actoroffice.web.server import create_app
 
+from .fake_adapters import FakeTracker, connect, install, uninstall
 from .fakes import FakeRuntime, TurnCtx
 from .seed import seed_db
-from .test_jira import FakeJira, adf
 from .test_web import HEADERS, TOKEN, login
 
 
@@ -42,7 +41,9 @@ async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
+    install()
     yield o
+    uninstall()
     await o.close()
 
 
@@ -167,30 +168,30 @@ async def test_ac2_ticket_create_tool_has_sources(office: Office) -> None:
 
 
 async def test_ac2_jira_import_has_sources(office: Office) -> None:
-    fake = FakeJira()
-    office.jira = JiraMirror(office, JiraClient("https://acme.atlassian.net", "bot@acme.vn", "tok", transport=httpx.MockTransport(fake.handler)))
+    fake = FakeTracker
+    await connect(office, "fake_tracker")
     await office.teams.create_team("Billing", jira_project_key="BIL")
-    fake.add("BIL-7", "Hoàn tiền", adf("Đọc docs/x.md"), ["ai"])
+    fake.add("BIL-7", "Hoàn tiền", "Đọc docs/x.md", ["ai"])
     [key] = await office.jira.sync()
     assert [s["ref"] for s in await sources(office, await office.tickets.get(key))] == ["docs/x.md"]
 
 
 async def test_ac3_description_change_keeps_status(office: Office) -> None:
-    fake = FakeJira()
-    office.jira = JiraMirror(office, JiraClient("https://acme.atlassian.net", "bot@acme.vn", "tok", transport=httpx.MockTransport(fake.handler)))
+    fake = FakeTracker
+    await connect(office, "fake_tracker")
     await office.teams.create_team("Billing", jira_project_key="BIL")
-    fake.add("BIL-7", "Hoàn tiền", adf("Đọc docs/a.md"), ["ai"])
+    fake.add("BIL-7", "Hoàn tiền", "Đọc docs/a.md", ["ai"])
     [key] = await office.jira.sync()
     ticket = await office.tickets.get(key)
     await tool_call(office, ticket.id, "Read", {"file_path": "C:\\ws\\SI-1\\docs\\a.md"})
     assert [s["status"] for s in await sources(office, ticket)] == ["read"]
 
-    fake.add("BIL-7", "Hoàn tiền", adf("Đọc docs/a.md và docs/b.md"), ["ai"])
+    fake.add("BIL-7", "Hoàn tiền", "Đọc docs/a.md và docs/b.md", ["ai"])
     await office.jira.sync()
     got = {s["ref"]: s["status"] for s in await sources(office, ticket)}
     assert got == {"docs/a.md": "read", "docs/b.md": "unread"}
 
-    fake.add("BIL-7", "Hoàn tiền", adf("Chỉ còn docs/b.md"), ["ai"])
+    fake.add("BIL-7", "Hoàn tiền", "Chỉ còn docs/b.md", ["ai"])
     await office.jira.sync()
     assert [s["ref"] for s in await sources(office, ticket)] == ["docs/b.md"]  # a source gone is hidden
 
@@ -332,14 +333,15 @@ async def test_ac8_failed_read_of_a_file_that_exists_stays_unread(office: Office
 
 async def test_ac8_jira_and_confluence_reads(office: Office) -> None:
     team = await office.teams.create_team("Billing", jira_project_key="BIL")
-    office.jira = JiraMirror(office, JiraClient("https://acme.atlassian.net", "bot", "tok", transport=httpx.MockTransport(FakeJira().handler)))
+    # the site of a connection is the office's own: a link to it is a source to read, not an outside address
+    await office.connections.save(ConnectionSpec(id="jira-main", use="fake_tracker", config={"site": "https://acme.atlassian.net"}))
     ticket = await staged(office, "Jira", "BIL-3 và https://acme.atlassian.net/wiki/spaces/X/pages/12345/Spec", team_id=team.id)
     listed = await sources(office, ticket)
     assert [(s["kind"], s["required"]) for s in listed] == [("jira", True), ("url", True)]  # the site's own URL is internal
     await tool_call(office, ticket.id, "jira_issue", {"key": "BIL-3"})
-    await tool_call(office, ticket.id, "wiki_page", {"id": "12345"}, error="Confluence is not connected.")
+    await tool_call(office, ticket.id, "wiki_page", {"id": "12345"}, error="No wiki (Confluence) is connected for this ticket.")
     got = {s["kind"]: (s["status"], s["error"]) for s in await sources(office, ticket)}
-    assert got == {"jira": ("read", None), "url": ("error", "Confluence is not connected.")}
+    assert got == {"jira": ("read", None), "url": ("error", "No wiki (Confluence) is connected for this ticket.")}
 
 
 # ---- AC-9, AC-10: the prompt ------------------------------------------------------------------------------------

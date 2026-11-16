@@ -38,7 +38,6 @@ from actoroffice.security.redact import Redactor
 from actoroffice.services import docflow
 from actoroffice.services.access import AccessService
 from actoroffice.services.approvals_recheck import ApprovalRecheck
-from actoroffice.services.atlassian import Atlassian
 from actoroffice.services.automations import AutomationService
 from actoroffice.services.chat import ChatService
 from actoroffice.services.codeintel import CodeIntelService
@@ -51,6 +50,7 @@ from actoroffice.services.interactions import InteractionService
 from actoroffice.services.jira import JiraMirror
 from actoroffice.services.knowledge import KnowledgeService
 from actoroffice.services.logs import LogService
+from actoroffice.services.mcp_servers import McpServerService
 from actoroffice.services.mcp_tokens import McpTokenService
 from actoroffice.services.memory import MemoryService
 from actoroffice.services.merges import MergeService
@@ -110,7 +110,6 @@ class Office:
         self.stages = StageService(self)
         self.jira = JiraMirror(self)
         self.rules = RuleService(self, settings.data_dir / "rules")
-        self.atlassian = Atlassian(settings.data_dir)
         self.prs = PullRequestWatcher(self)
         self.review = ReviewService(self)
         self.access = AccessService(self)
@@ -133,6 +132,7 @@ class Office:
         self.crosscheck = CrossCheckService(self)  # the AI comparison of documents that must agree
         self.doccontext = DocContext(self)  # what the office knows around a ticket's documents: context, impact, memory
         self.mcp_tokens = McpTokenService(self)  # personal tokens of the read-only MCP server for IDEs (web/mcp_api.py)
+        self.mcp_servers = McpServerService(self)  # outside MCP servers attached to a team's AI (secrets stored apart)
         self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(
             ClaudeSdkRuntime(cli_path=settings.claude_cli_path),
@@ -150,6 +150,7 @@ class Office:
         self.chat.default_project_id = default.id
         await self.teams.ensure_local_owner()
         await self.docs.load_profiles()
+        await self.connections.migrate_legacy_once()  # the Jira / Bitbucket files from before connections, once
 
     async def start(self, *, schedule: bool = True) -> None:
         """Open the store, recover orphaned runs, mirror events into chat and start scheduling."""
@@ -164,8 +165,8 @@ class Office:
         if schedule:
             self._tasks.append(asyncio.create_task(self.scheduler.run_forever(), name="scheduler"))
             self._tasks.append(asyncio.create_task(run_timers(self), name="timers"))
-            if self.jira.ready():
-                self._tasks.append(asyncio.create_task(self.jira.run_forever(), name="jira"))
+            # the mirror asks each cycle whether a tracker is connected: one added later is mirrored without a restart
+            self._tasks.append(asyncio.create_task(self.jira.run_forever(), name="jira"))
             self._tasks.append(asyncio.create_task(self.prs.run_forever(), name="pull-requests"))
             self._tasks.append(asyncio.create_task(self.access.run_forever(), name="access-expiry"))
             if self.settings.doc_sweep_s > 0:
@@ -249,8 +250,6 @@ class Office:
         self._tasks.clear()
         if self.telegram is not None:
             await self.telegram.api.close()
-        await self.jira.close()
-        await self.atlassian.close()
         await self.connections.close()
         self.codeintel.close()
         await self.access.close()

@@ -337,8 +337,8 @@ async def test_with_only_a_bitbucket_server_connection_the_work_is_merged_as_a_p
     assert not await has_code_host(office, scope)
     assert (await office.merges.panel(root.key))["available"] and (await check_pr_linked(ctx)).status == "passed", "no code host: reviewed on this machine"
 
-    await connect_tcbs(office)  # read-only, no old configuration
-    assert office.atlassian.code_host() is None and await has_code_host(office, scope)
+    await connect_tcbs(office)  # read-only
+    assert await has_code_host(office, scope)
     assert (await office.merges.panel(root.key)) == {"available": False}
     result = await check_pr_linked(ctx)
     assert result.status == "failed" and "chưa có link PR" in result.summary

@@ -38,12 +38,12 @@ class PullRequestWatcher:
         rows = await office.db.fetchall("SELECT id FROM tickets WHERE stage = 'pr' AND pr_url IS NOT NULL AND status NOT IN ('done', 'cancelled')")
         for row in rows:
             ticket = await office.tickets.get(row["id"])
-            # the nearest code-host connection that owns the URL (Bitbucket, GitHub…), else the old Bitbucket client
+            # the nearest code-host connection that owns the URL (Bitbucket, GitHub…)
             found = await pr_host(office, office.sourcehub.scope(ticket), ticket.pr_url or "")
             if found is None:
                 continue
             host, parsed = found[0], found[1:]
-            who = getattr(host, "label", "bitbucket")
+            who = host.label
             try:
                 info = await host.pr_get(*parsed)
                 comments = await host.pr_comments(*parsed)

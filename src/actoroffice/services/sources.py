@@ -192,7 +192,7 @@ class SourceService:
             str(r["k"]).upper(): r["id"]
             for r in await office.db.fetchall("SELECT id, jira_project_key AS k FROM teams WHERE jira_project_key IS NOT NULL AND jira_project_key <> ''")
         }
-        hosts = self._atlassian_hosts()
+        hosts = await self._atlassian_hosts()
         out = []
         for r in rows:
             kind, ref = r["kind"], r["ref"]
@@ -342,13 +342,15 @@ class SourceService:
                 return {"path": wanted, "text": data[:FILE_LIMIT].decode("utf-8", "replace"), "truncated": len(data) > FILE_LIMIT}
         raise NotFound(f"không tìm thấy {wanted} trong workspace hay thư mục dự án")
 
-    def _atlassian_hosts(self) -> set[str]:
-        from actoroffice.services.jira import load_credentials
-
-        client = getattr(self.office.jira, "client", None)
-        base = getattr(client, "base_url", None) or (load_credentials(self.office.settings.data_dir) or {}).get("base_url")
-        host = (urlparse(base).hostname or "").lower() if base else ""
-        return {host} if host else set()
+    async def _atlassian_hosts(self) -> set[str]:
+        """Hosts of the Atlassian sites the office is connected to (the `site` of its Jira / Confluence connections)."""
+        hosts = set()
+        for spec in await self.office.connections.list():
+            site = spec.config.get("site") if spec.enabled else None
+            host = (urlparse(site if "://" in site else f"https://{site}").hostname or "").lower() if isinstance(site, str) and site else ""
+            if host:
+                hosts.add(host)
+        return hosts
 
 
 def _read(fields: dict[str, Any]) -> tuple[str, str]:

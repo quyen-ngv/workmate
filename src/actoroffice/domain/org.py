@@ -38,7 +38,6 @@ class Position(BaseModel):
     model: str = "sonnet"
     prompt_preset: Literal["claude_code", "custom"] = "custom"
     tools: list[str] = Field(default_factory=lambda: ["Read", "Write", "Edit", "Glob", "Grep"])
-    packs: list[str] = Field(default_factory=list)  # capability packs (MCP connectors)
     policy: PositionPolicy = Field(default_factory=PositionPolicy)
     # Definition of done: documents that must exist (on the ticket, its parent or the tree's root) before this
     # position may set a ticket to done. "report|memo" means either.

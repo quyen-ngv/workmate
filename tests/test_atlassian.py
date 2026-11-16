@@ -1,15 +1,12 @@
-"""Atlassian access for the AI: Confluence read/publish, pull requests on a code host, review watching,
-reference repositories, and "what we already know" at the start of a ticket."""
+"""Pull requests on a code host through a connection (a fake adapter), review watching, and "what we already know" at
+the start of a ticket."""
 
 from __future__ import annotations
 
-import json
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
-import httpx
 import pytest
 
 from actoroffice.app import Office
@@ -17,8 +14,9 @@ from actoroffice.config import Settings
 from actoroffice.domain.knowledge import MemoryKind, MemoryScope
 from actoroffice.domain.run import TurnResult, TurnStatus
 from actoroffice.domain.work import ProjectAccess, TicketStatus
-from actoroffice.services.atlassian import Confluence, html_to_text, markdown_to_storage
+from actoroffice.ports.code import PrComment
 
+from .fake_adapters import FakeCodeHost, connect, install, uninstall
 from .fakes import FakeRuntime, TurnCtx
 from .seed import seed_db
 
@@ -39,30 +37,10 @@ async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
+    install()
     yield o
+    uninstall()
     await o.close()
-
-
-class FakeHost:
-    def __init__(self) -> None:
-        self.created: list[dict[str, Any]] = []
-        self.state = "OPEN"
-        self.comments: list[dict[str, Any]] = []
-        self.replies: list[tuple[int | None, str]] = []
-
-    async def pr_create(self, repo: str, source: str, destination: str, title: str, description: str) -> dict[str, Any]:
-        self.created.append({"repo": repo, "source": source, "destination": destination, "title": title, "description": description})
-        return {"id": 7, "url": "https://bitbucket.org/acme/billing/pull-requests/7", "state": "OPEN"}
-
-    async def pr_get(self, repo: str, pr_id: int) -> dict[str, Any]:
-        return {"id": pr_id, "state": self.state, "title": "x", "url": "", "approvals": []}
-
-    async def pr_comments(self, repo: str, pr_id: int) -> list[dict[str, Any]]:
-        return self.comments
-
-    async def pr_reply(self, repo: str, pr_id: int, text: str, *, parent_id: int | None = None) -> dict[str, Any]:
-        self.replies.append((parent_id, text))
-        return {"id": 99}
 
 
 async def test_pull_request_flow_with_review_and_merge(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
@@ -78,8 +56,8 @@ async def test_pull_request_flow_with_review_and_merge(office: Office, runtime: 
     git(repo, "push", "-q", "-u", "origin", "main")
     project = await office.projects.create("billing", path=str(repo), access=ProjectAccess.WORKTREE)
     await office.projects.configure(project.id, repo_url="acme/billing")
-    host = FakeHost()
-    office.atlassian.use(code_host=host)
+    host = FakeCodeHost
+    await connect(office, "fake_code", write=True)
     ai = await office.ensure_ai()
     await office.org.add_allow_rule(ai.id, "mcp__office__pr_create")
     await office.org.add_allow_rule(ai.id, "mcp__office__pr_reply")
@@ -109,23 +87,23 @@ async def test_pull_request_flow_with_review_and_merge(office: Office, runtime: 
     await office.tickets.assign(ticket.id, ai.id, by="user")
     await office.scheduler.wait_idle(timeout=30)
     t = await office.tickets.get(ticket.id)
-    assert t.pr_url == "https://bitbucket.org/acme/billing/pull-requests/7" and t.status == TicketStatus.IN_REVIEW
+    assert t.pr_url == "https://git.test/acme/billing/pull/7" and t.status == TicketStatus.IN_REVIEW
     assert host.created[0]["source"].startswith("t/") and host.created[0]["destination"] == "main" and host.created[0]["repo"] == "acme/billing"
     assert host.created[0]["source"] in git(remote, "branch", "--list")  # the branch was pushed
 
-    host.comments = [{"id": 501, "by": "Minh", "text": "thiếu test VIP", "file": "src/refund.py", "line": 3, "parent": None, "resolved": False, "at": ""}]
+    host.comments = [PrComment(id=501, author="Minh", body="thiếu test VIP", path="src/refund.py", line=3)]
     assert await office.prs.poll() == [f"{ticket.key}: 1 new comments"]
     assert await office.prs.poll() == []  # each comment is passed on once
     await office.scheduler.wait_idle(timeout=30)
     assert host.replies == [(501, "Đã thêm test VIP")]
 
-    host.state = "MERGED"
+    host.state = "merged"
     assert await office.prs.poll() == [f"{ticket.key} merged"]
     assert (await office.tickets.get(ticket.id)).stage == "close"
 
 
 async def test_external_tools_follow_the_project_permission_mode(office: Office, runtime: FakeRuntime) -> None:
-    office.atlassian.use(code_host=FakeHost())
+    await connect(office, "fake_code", write=True)
     seen: list[str] = []
 
     async def try_reply(ctx: TurnCtx) -> TurnResult:
@@ -151,41 +129,6 @@ async def test_external_tools_follow_the_project_permission_mode(office: Office,
     await office.stages.start(other.id, template="code", by="user")
     await office.scheduler.wait_idle(timeout=20)
     assert seen == ["defer", "allow"]
-
-
-async def test_confluence_search_read_and_publish() -> None:
-    calls: list[tuple[str, str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content) if request.content else None
-        calls.append((request.method, request.url.path, body))
-        path = request.url.path
-        if path.endswith("/rest/api/content/search"):
-            assert 'text ~ "hoàn tiền"' in request.url.params["cql"]
-            page = {"id": "11", "title": "Refund policy", "space": {"key": "BIL"}, "version": {"when": "2025-03-01T00:00"}, "_links": {"webui": "/spaces/BIL/pages/11"}}
-            return httpx.Response(200, json={"results": [page]})
-        if path.endswith("/api/v2/pages/11"):
-            body = {"storage": {"value": "<h2>Rules</h2><p>VIP: 60 ngày</p><ul><li>Khác: 30</li></ul>"}}
-            return httpx.Response(200, json={"id": "11", "title": "Refund policy", "version": {"number": 4, "createdAt": "2025-03-01"}, "body": body, "_links": {"webui": "/x"}})
-        if path.endswith("/api/v2/spaces"):
-            return httpx.Response(200, json={"results": [{"id": "900", "key": "BIL"}]})
-        if path.endswith("/api/v2/pages") and request.method == "GET":
-            return httpx.Response(200, json={"results": []})
-        if path.endswith("/api/v2/pages") and request.method == "POST":
-            return httpx.Response(200, json={"id": "12", "_links": {"webui": "/spaces/BIL/pages/12"}})
-        return httpx.Response(404)
-
-    wiki = Confluence("https://acme.atlassian.net", "bot@acme.vn", "tok", transport=httpx.MockTransport(handler))
-    pages = await wiki.search("hoàn tiền", space="BIL")
-    assert pages[0]["id"] == "11" and pages[0]["updated"] == "2025-03-01" and pages[0]["url"].endswith("/wiki/spaces/BIL/pages/11")
-    page = await wiki.page("11")
-    assert "## Rules" in page["text"] and "VIP: 60 ngày" in page["text"] and "- Khác: 30" in page["text"]
-    published = await wiki.upsert_page("BIL", "AO-7 · Hoàn tiền", markdown_to_storage("# Dossier\n- a\n\n| AC | Test |\n|---|---|\n| AC-1 | t1 |"), parent_id="5")
-    assert published["id"] == "12"
-    post = next(c for c in calls if c[0] == "POST")
-    assert post[2]["spaceId"] == "900" and post[2]["parentId"] == "5" and "<table>" in post[2]["body"]["value"]
-    await wiki.close()
-    assert html_to_text("<p>a &amp; b</p>") == "a & b"
 
 
 async def test_known_context_is_posted_and_in_the_prompt(office: Office, runtime: FakeRuntime) -> None:

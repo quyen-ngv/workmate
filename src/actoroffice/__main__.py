@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from actoroffice import cli_team
+from actoroffice import cli_connections, cli_team
 from actoroffice.app import Office
 from actoroffice.config import load_settings, write_default_config
 from actoroffice.core.events import Event
@@ -372,23 +372,6 @@ async def cmd_mcp_token(office: Office, args: argparse.Namespace) -> None:
         out("Lưu ý: MCP server đang tắt. Bật bằng `mcp_server: true` trong config.yaml rồi chạy lại `actoroffice serve`.")
 
 
-async def cmd_connections(office: Office, _args: argparse.Namespace) -> None:
-    """`connections import-legacy`: the configuration of `jira login` / `bitbucket` as connections (run once, by hand)."""
-    from actoroffice.ports.connection import ConnectorError
-
-    try:
-        created = await office.connections.import_legacy()
-    except ConnectorError as exc:
-        out(f"error: {exc}")
-        raise SystemExit(1) from None
-    for spec in created:
-        out(f"Đã tạo kết nối {spec.id} ({spec.use}, phạm vi {spec.scope}, {'được ghi' if spec.write else 'chỉ đọc'}).")
-    if not created:
-        out("Không có gì để chuyển: chưa có cấu hình Jira / Bitbucket cũ, hoặc các kết nối jira-main, confluence-main, bitbucket-main đã có.")
-    else:
-        out("Cấu hình cũ vẫn còn và vẫn chạy. Kiểm tra từng kết nối ở Cài đặt › Kết nối (phạm vi dự án / space / repo, quyền ghi).")
-
-
 # ---- entry -----------------------------------------------------------------------------------
 
 
@@ -463,10 +446,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--off", action="store_true", help="remove the token")
     p.set_defaults(fn=cmd_telegram)
 
-    p = sub.add_parser("connections", help="connections import-legacy: turn the old Jira / Bitbucket configuration into connections")
-    p.add_argument("action", choices=["import-legacy"])
-    p.set_defaults(fn=cmd_connections)
-
+    cli_connections.register(sub)
     cli_team.register(sub)
 
     p = sub.add_parser("serve", help="run the office with the web UI")

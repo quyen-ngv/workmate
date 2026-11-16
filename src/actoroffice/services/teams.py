@@ -307,6 +307,7 @@ def _team(row: dict[str, Any]) -> Team:
         jira_project_key=row.get("jira_project_key"),
         confluence_space=row.get("confluence_space"),
         confluence_parent_id=row.get("confluence_parent_id"),
-        settings=TeamSettings.model_validate_json(row.get("settings_json") or "{}"),
+        # "stored": entries of `mcp_servers` written in the old free shape still load (domain/team.py McpServer.from_stored)
+        settings=TeamSettings.model_validate_json(row.get("settings_json") or "{}", context={"stored": True}),
         created_at=row.get("created_at") or "",
     )

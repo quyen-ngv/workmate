@@ -148,7 +148,7 @@ def _self_link(data: dict[str, Any]) -> str:
 
 class BitbucketServer:
     name: ClassVar[str] = NAME
-    title: ClassVar[str] = "Bitbucket Server / Data Center"
+    title: ClassVar[str] = "Bitbucket Server / Data Center (tự cài, địa chỉ riêng của công ty)"
     capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.CODE_READ, Capability.CODE_PR, Capability.WEBHOOK})
     config_schema: ClassVar[type[BaseModel]] = BitbucketServerConfig
     secret_fields: ClassVar[tuple[str, ...]] = ("token", "username", "webhook_secret")

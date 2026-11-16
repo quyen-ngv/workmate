@@ -54,6 +54,8 @@ class OfficeGate:
     policies: list[Any] = field(default_factory=list)  # team policy rules in effect (services/rules.py)
     watchdog: Any = None  # engine/watchdog.py: a detected loop stops the next call
     stats: RunStats = field(default_factory=RunStats)
+    # The team's outside MCP servers of this run: server → globs of its tools that run without asking (set by the executor)
+    mcp_allowed: dict[str, list[str]] = field(default_factory=dict)
 
     async def before_tool(self, tool: str, args: dict[str, Any], tool_use_id: str | None) -> GateResult:
         office = self.office
@@ -95,7 +97,7 @@ class OfficeGate:
         project = await self._project()
         check = await evaluate_call(
             office, self.actor.id, self.position, project, self.workspace, self.read_dirs, self.tainted, self.policies,
-            tool, args, on_ticket=self.ticket_id is not None,
+            tool, args, on_ticket=self.ticket_id is not None, mcp_allowed=self.mcp_allowed,
         )
         verdict = check.verdict
         if check.env_dump:
@@ -219,6 +221,7 @@ async def evaluate_call(
     args: dict[str, Any],
     *,
     on_ticket: bool,
+    mcp_allowed: dict[str, list[str]] | None = None,
 ) -> CallCheck:
     """The permission decision for one call: env dump, team policies, then the policy engine with the project's mode
     and the "always allow" rules as they are now. The gate and the re-check of pending cards share it."""
@@ -243,6 +246,7 @@ async def evaluate_call(
         trust_all=actor.permission_mode == PermissionMode.TRUST_ALL,
         mode=project.permission_mode if project else "workspace",
         project_commands=_profile_commands(project),
+        mcp_allowed=mcp_allowed or {},
     )
     return CallCheck(office.policy.decide(tool, args, ctx, external=acts_outside(tool)))
 

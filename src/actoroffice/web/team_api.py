@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from actoroffice.app import Office
 from actoroffice.domain.errors import NotFound, OfficeError
 from actoroffice.domain.stage import TEMPLATE_TITLES, default_templates
-from actoroffice.domain.team import LOCAL_OWNER_ID, TeamSettings
+from actoroffice.domain.team import LOCAL_OWNER_ID, MCP_DEFAULT_ALLOWED, TeamSettings
 from actoroffice.domain.work import TicketStatus
 from actoroffice.services.docflow import pack_templates
 from actoroffice.services.stages import stage_title
@@ -170,11 +170,17 @@ def register(app: FastAPI, office: Office) -> None:
 
     # ---- people & teams ---------------------------------------------------------------------------------
 
+    def team_view(team: Any) -> dict[str, Any]:
+        """A team as the API shows it: its MCP servers without any secret value (an old entry may hold one inline)."""
+        view = team.model_dump()
+        view["settings"]["mcp_servers"] = {s["name"]: s for s in office.mcp_servers.list(team)}
+        return view
+
     @app.get("/api/people")
     async def people() -> dict[str, Any]:
         result = []
         for team in await teams.list_teams():
-            result.append({**team.model_dump(), "members": [m.model_dump() for m in await teams.members(team.id)]})
+            result.append({**team_view(team), "members": [m.model_dump() for m in await teams.members(team.id)]})
         return {"teams": result, "users": [u.model_dump() for u in await teams.list_users()], "templates": [*default_templates(), *pack_templates()], "template_titles": TEMPLATE_TITLES}
 
     @app.post("/api/people")
@@ -189,20 +195,52 @@ def register(app: FastAPI, office: Office) -> None:
     @app.post("/api/teams")
     async def add_team(body: TeamBody) -> dict[str, Any]:
         team = await teams.create_team(body.name, jira_project_key=body.jira_project_key, confluence_space=body.confluence_space, settings=body.settings)
-        return team.model_dump()
+        return team_view(team)
 
     @app.put("/api/teams/{team_id}")
     async def edit_team(team_id: str, body: TeamBody) -> dict[str, Any]:
         team = await teams.get_team(team_id)
+        # MCP servers change only through /api/teams/{id}/mcp (their secrets are stored apart): kept as they are here
+        settings = body.settings.model_copy(update={"mcp_servers": team.settings.mcp_servers}) if body.settings else team.settings
         updated = team.model_copy(
             update={
                 "name": body.name.strip() or team.name,
                 "jira_project_key": (body.jira_project_key or "").strip().upper() or None,
                 "confluence_space": body.confluence_space,
-                "settings": body.settings or team.settings,
+                "settings": settings,
             }
         )
-        return (await teams.update_team(updated)).model_dump()
+        return team_view(await teams.update_team(updated))
+
+    # ---- a team's outside MCP servers (services/mcp_servers.py) --------------------------------------------
+
+    @app.get("/api/teams/{team_id}/mcp")
+    async def mcp_list(team_id: str) -> dict[str, Any]:
+        team = await teams.get_team(team_id)
+        return {"team": {"id": team.id, "name": team.name}, "servers": office.mcp_servers.list(team), "default_allowed_tools": list(MCP_DEFAULT_ALLOWED)}
+
+    @app.put("/api/teams/{team_id}/mcp/{name}")
+    async def mcp_save(team_id: str, name: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Body: the server (domain/team.py McpServer) plus `secrets: {name: value}`; an empty value keeps the stored one."""
+        team = await teams.get_team(team_id)
+        server = {k: v for k, v in body.items() if k not in ("secrets", "name", "state", "reason")}
+        for part in ("secret_env", "secret_headers"):  # also accepted as shown by GET: {NAME: is it set}
+            if isinstance(server.get(part), dict):
+                server[part] = list(server[part])
+        secrets = body.get("secrets")
+        if secrets is not None and not isinstance(secrets, dict):
+            raise HTTPException(422, "secrets: phải là {tên: giá trị}")
+        team = await office.mcp_servers.save(team, name, server, secrets)
+        return {"servers": office.mcp_servers.list(team)}
+
+    @app.delete("/api/teams/{team_id}/mcp/{name}")
+    async def mcp_remove(team_id: str, name: str) -> dict[str, Any]:
+        team = await office.mcp_servers.remove(await teams.get_team(team_id), name)
+        return {"servers": office.mcp_servers.list(team)}
+
+    @app.post("/api/teams/{team_id}/mcp/{name}/test")
+    async def mcp_test(team_id: str, name: str) -> dict[str, Any]:
+        return await office.mcp_servers.test(await teams.get_team(team_id), name)
 
     @app.post("/api/teams/{team_id}/members")
     async def set_member(team_id: str, body: MemberBody) -> dict[str, Any]:
@@ -644,18 +682,6 @@ class SetupProject(BaseModel):
     ui_paths: str = ""  # globs, separated by commas, spaces or new lines
 
 
-class JiraBody(BaseModel):
-    base_url: str
-    email: str
-    token: str
-
-
-class BitbucketBody(BaseModel):
-    email: str
-    token: str
-    workspace: str
-
-
 class TelegramBody(BaseModel):
     token: str
 
@@ -768,7 +794,7 @@ async def _bot_name(office: Office) -> str | None:
     return office.telegram.bot_name or getattr(office.telegram.api, "bot_id", None)
 
 
-SETUP_TRANSPORT: Any = None  # tests plug an httpx.MockTransport here to fake Jira/Bitbucket/Telegram
+SETUP_TRANSPORT: Any = None  # tests plug an httpx.MockTransport here to fake Telegram
 
 
 def register_setup(app: FastAPI, office: Office) -> None:
@@ -777,11 +803,21 @@ def register_setup(app: FastAPI, office: Office) -> None:
     @app.get("/api/setup")
     async def setup() -> dict[str, Any]:
         from actoroffice.channels.telegram import load_token
-        from actoroffice.services.atlassian import load_bitbucket
-        from actoroffice.services.jira import load_credentials
 
-        jira = load_credentials(office.settings.data_dir)
-        bitbucket = load_bitbucket(office.settings.data_dir)
+        # the outside systems in use, from the connections (Cài đặt › Kết nối); never a config value or a secret
+        integrations = [
+            {
+                "name": a["name"],
+                "title": a["title"],
+                "capabilities": a["capabilities"],
+                "connections": [
+                    {"id": c["id"], "scope": c["scope"], "enabled": c["enabled"], "write": c["write"], "state": c["health"].get("state"), "identity": c["health"].get("identity")}
+                    for c in a["connections"]
+                ],
+            }
+            for a in await office.connections.overview()
+            if a["connections"]
+        ]
         projects = [p for p in await office.projects.list() if not p.is_default]
         return {
             "ai": {"name": office.settings.ai_name, "model": office.settings.ai_model or office.settings.default_model},
@@ -789,7 +825,11 @@ def register_setup(app: FastAPI, office: Office) -> None:
                 {**p.model_dump(), "test": _cmd(p.profile, "test"), "build": _cmd(p.profile, "build"), "lint": _cmd(p.profile, "lint"), "setup": _cmd(p.profile, "setup"), **_ui_fields(p.profile)}
                 for p in projects
             ],
-            "teams": [t.model_dump() for t in await office.teams.list_teams()],
+            # team settings without any secret value: an old MCP entry may hold a token inline
+            "teams": [
+                {**(view := t.model_dump()), "settings": {**view["settings"], "mcp_servers": {s["name"]: s for s in office.mcp_servers.list(t)}}}
+                for t in await office.teams.list_teams()
+            ],
             "people": len([u for u in await office.teams.list_users() if u.id != LOCAL_OWNER_ID]),
             "connections": {
                 "telegram": {
@@ -799,9 +839,8 @@ def register_setup(app: FastAPI, office: Office) -> None:
                     "bot": await _bot_name(office),
                     "env_override": _telegram_env_key(),
                 },
-                "jira": {"configured": bool(jira), "base_url": (jira or {}).get("base_url"), "email": (jira or {}).get("email")},
-                "bitbucket": {"configured": bool(bitbucket), "workspace": (bitbucket or {}).get("workspace")},
             },
+            "integrations": integrations,
         }
 
     @app.post("/api/setup/project")
@@ -845,46 +884,14 @@ def register_setup(app: FastAPI, office: Office) -> None:
         return {"project": project.model_dump(), "imported_rules": [r.id for r in imported], "warnings": warnings}
 
     @app.post("/api/setup/jira")
-    async def setup_jira(body: JiraBody) -> dict[str, Any]:
-        from actoroffice.services.jira import JiraClient, JiraError, save_credentials
-
-        if not (body.base_url.strip() and body.email.strip() and body.token.strip()):
-            raise HTTPException(422, "Cần đủ URL, email và API token")
-        if not body.base_url.strip().startswith("https://"):
-            raise HTTPException(422, "URL phải là https://<site>.atlassian.net")
-        client = JiraClient(body.base_url.strip(), body.email.strip(), body.token.strip(), transport=SETUP_TRANSPORT)
-        try:
-            me = await client._call("GET", "/rest/api/3/myself")
-        except JiraError as exc:
-            raise HTTPException(422, f"Jira từ chối: {exc}") from exc
-        finally:
-            await client.close()
-        save_credentials(office.settings.data_dir, body.base_url.strip(), body.email.strip(), body.token.strip())
-        await office.jira.close()
-        office.jira.client = None
-        office.atlassian._wiki = None
-        if office.jira.ready() and not any(t.get_name() == "jira" for t in office._tasks):
-            import asyncio
-
-            office._tasks.append(asyncio.create_task(office.jira.run_forever(), name="jira"))
-        return {"ok": True, "user": me.get("displayName")}
-
     @app.post("/api/setup/bitbucket")
-    async def setup_bitbucket(body: BitbucketBody) -> dict[str, Any]:
-        from actoroffice.services.atlassian import AtlassianError, BitbucketCloud, _call, save_bitbucket
-
-        if not (body.email.strip() and body.token.strip() and body.workspace.strip()):
-            raise HTTPException(422, "Cần đủ email, API token và workspace")
-        client = BitbucketCloud(body.email.strip(), body.token.strip(), body.workspace.strip(), transport=SETUP_TRANSPORT)
-        try:
-            await _call(client.http, "GET", f"/workspaces/{body.workspace}")
-        except AtlassianError as exc:
-            raise HTTPException(422, f"Bitbucket từ chối: {exc}") from exc
-        finally:
-            await client.close()
-        save_bitbucket(office.settings.data_dir, body.email.strip(), body.token.strip(), body.workspace.strip())
-        office.atlassian._code = None
-        return {"ok": True}
+    async def setup_moved() -> dict[str, Any]:
+        """The forms from before connections. Gone: every outside system is a connection now."""
+        raise HTTPException(
+            410,
+            "Form này đã bỏ. Jira, Confluence, Bitbucket (Cloud hoặc Server / Data Center), GitHub… giờ nối ở Cài đặt › Kết nối "
+            "(hoặc lệnh `actoroffice connections add`).",
+        )
 
     @app.post("/api/setup/telegram")
     async def setup_telegram(body: TelegramBody) -> dict[str, Any]:

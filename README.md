@@ -50,8 +50,15 @@ uv run actoroffice task "Hoàn tiền VIP 60 ngày" --team Billing --owner Lan -
 uv run actoroffice serve                                  # web: /team (herdr-like) · Telegram: /task, topic per ticket
 ```
 
-- Connections (credentials stay in `<data>/secrets`, never shown to the AI): `jira login <url> <email> <token>`
-  (Jira + Confluence), `bitbucket <email> <token> <workspace>`, `resource add` for shared environments.
+- Connections (credentials stay in `<data>/secrets`, never shown to the AI): every outside system (Jira, Confluence,
+  Bitbucket Server / Data Center or Bitbucket Cloud, GitHub, an Oracle schema…) is one connection, made on the web
+  page Cài đặt › Kết nối or with
+  `connections add <id> --use <adapter> --config '<json>' [--scope team:<id>] [--write] [--secret-file token.json]`
+  (e.g. `--use bitbucket_server --config '{"base_url": "https://git.company.vn", "projects": ["PAY"]}'`); the secret
+  comes from the file or a prompt, never from the command line. `connections list | test <id> | remove <id>`;
+  `doctor` checks each connection, TLS, proxy, `git ls-remote` of bound projects and the AI CLI. The old
+  `jira login` / `bitbucket` commands are gone (an office that used them gets its connections created once, at the
+  next start). `resource add` is for shared environments.
 - Rules: `rules add … --scope team:<id>` / web Rules page / `/rule` on Telegram; repo `CLAUDE.md`, `AGENTS.md`,
   `.kiro/steering/*.md` are imported with `rules import <project>`.
 - Small, clear changes (a layout fix, a typo, a config value) take the **quick** workflow: one short plan, one

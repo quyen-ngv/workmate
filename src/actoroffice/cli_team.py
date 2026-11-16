@@ -104,28 +104,34 @@ async def cmd_stage(office: Office, args: argparse.Namespace) -> None:
         out(f"  - {r.stage:10} #{r.attempt} {r.outcome or 'đang mở':10} {tokens / 1000:.1f}k tok")
 
 
-async def cmd_jira(office: Office, args: argparse.Namespace) -> None:
-    from actoroffice.services.jira import JiraClient, JiraMirror, save_credentials
+CONNECT_JIRA = (
+    "Lệnh `jira login` đã bỏ: Jira giờ là một kết nối. Tạo file token.json ({\"email\": \"…\", \"token\": \"…\"}) rồi chạy:\n"
+    "  actoroffice connections add jira-main --use jira_cloud --config '{\"site\": \"https://<site>.atlassian.net\"}' --write --secret-file token.json\n"
+    "Confluence: như trên với --use confluence_cloud. Hoặc dùng trang Cài đặt › Kết nối."
+)
+CONNECT_BITBUCKET = (
+    "Lệnh `bitbucket` đã bỏ: code host giờ là một kết nối. Tạo file token.json rồi chạy một trong hai:\n"
+    "  Bitbucket Server / Data Center (tự cài), token.json là {\"token\": \"…\"}:\n"
+    "    actoroffice connections add bitbucket-main --use bitbucket_server --config '{\"base_url\": \"https://git.congty.vn\", \"projects\": [\"PAY\"]}' --write --secret-file token.json\n"
+    "  Bitbucket Cloud (bitbucket.org), token.json là {\"email\": \"…\", \"token\": \"…\"}:\n"
+    "    actoroffice connections add bitbucket-main --use bitbucket_cloud --config '{\"workspace\": \"<workspace>\"}' --write --secret-file token.json\n"
+    "Hoặc dùng trang Cài đặt › Kết nối."
+)
 
+
+async def cmd_jira(office: Office, args: argparse.Namespace) -> None:
     if args.action == "login":
-        if not (args.base_url and args.email and args.token):
-            raise OfficeError("Cách dùng: actoroffice jira login <https://x.atlassian.net> <email> <api token>")
-        client = JiraClient(args.base_url, args.email, args.token)
-        try:
-            me = await client._call("GET", "/rest/api/3/myself")
-        finally:
-            await client.close()
-        save_credentials(office.settings.data_dir, args.base_url, args.email, args.token)
-        out(f"Đã lưu Jira ({me.get('displayName')}). Gắn project cho team: actoroffice team add <tên> --jira KEY")
-    else:
-        mirror = JiraMirror(office)
-        if not mirror.ready():
-            raise OfficeError("Chưa đăng nhập Jira: actoroffice jira login <url> <email> <token>")
-        try:
-            created = await mirror.sync()
-        finally:
-            await mirror.close()
-        out(f"Đã đồng bộ: {len(created)} ticket mới" + (f" ({', '.join(created)})" if created else ""))
+        out(CONNECT_JIRA)
+        raise SystemExit(2)
+    if not await office.jira.ready():
+        raise OfficeError("Chưa có kết nối Jira nào: actoroffice connections add jira-main --use jira_cloud … (hoặc Cài đặt › Kết nối)")
+    from actoroffice.ports.connection import ConnectorError
+
+    try:
+        created = await office.jira.sync()
+    except ConnectorError as exc:
+        raise OfficeError(f"Jira: {exc}") from exc
+    out(f"Đã đồng bộ: {len(created)} ticket mới" + (f" ({', '.join(created)})" if created else ""))
 
 
 async def cmd_rules(office: Office, args: argparse.Namespace) -> None:
@@ -152,20 +158,9 @@ async def cmd_rules(office: Office, args: argparse.Namespace) -> None:
             out(f"{rule.id:6} {rule.status.value:8} {rule.kind.value:9} {rule.scope:24} {rule.stage:10} {rule.title}")
 
 
-async def cmd_bitbucket(office: Office, args: argparse.Namespace) -> None:
-    from actoroffice.services.atlassian import BitbucketCloud, save_bitbucket
-
-    if not (args.email and args.token and args.workspace):
-        raise OfficeError("Cách dùng: actoroffice bitbucket <email> <api token> <workspace>")
-    client = BitbucketCloud(args.email, args.token, args.workspace)
-    try:
-        from actoroffice.services.atlassian import _call
-
-        await _call(client.http, "GET", f"/workspaces/{args.workspace}")
-    finally:
-        await client.close()
-    save_bitbucket(office.settings.data_dir, args.email, args.token, args.workspace)
-    out(f"Đã lưu Bitbucket Cloud (workspace {args.workspace}).")
+async def cmd_bitbucket(_office: Office, _args: argparse.Namespace) -> None:
+    out(CONNECT_BITBUCKET)
+    raise SystemExit(2)
 
 
 async def cmd_project(office: Office, args: argparse.Namespace) -> None:
@@ -312,6 +307,11 @@ async def cmd_doctor(office: Office, _args: argparse.Namespace) -> None:
             out(f"• {tip}")
     else:
         out("\nMôi trường đủ để chạy.")
+    from actoroffice.services.doctor import network_report, render
+
+    out("\nMạng và kết nối:")
+    for line in render(await network_report(office)):
+        out(line)
 
 
 def save_environment(office: Office, env: dict[str, Any]) -> None:
@@ -363,7 +363,7 @@ def register(sub: Any) -> None:
     p.add_argument("text", nargs="*")
     p.set_defaults(fn=cmd_stage)
 
-    p = sub.add_parser("jira", help="jira login <url> <email> <token> | jira sync")
+    p = sub.add_parser("jira", help="jira sync: mirror the Jira issues now (connect Jira with `connections add`; `jira login` is gone)")
     p.add_argument("action", choices=["login", "sync"])
     p.add_argument("base_url", nargs="?")
     p.add_argument("email", nargs="?")
@@ -381,7 +381,7 @@ def register(sub: Any) -> None:
     p.add_argument("--only-global", action="store_true")
     p.set_defaults(fn=cmd_rules)
 
-    p = sub.add_parser("bitbucket", help="connect Bitbucket Cloud: bitbucket <email> <api token> <workspace>")
+    p = sub.add_parser("bitbucket", help="gone: connect a code host with `connections add`")
     p.add_argument("email", nargs="?")
     p.add_argument("token", nargs="?")
     p.add_argument("workspace", nargs="?")

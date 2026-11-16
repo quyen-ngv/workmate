@@ -76,6 +76,8 @@ class ApprovalRecheck:
             [Path(d) for d in context.get("read_dirs") or []],
             bool(context.get("tainted")),
             policies, tool, args, on_ticket=True,
+            # a tool of the team's MCP server that has been put on the unattended list since the card was made
+            mcp_allowed=office.mcp_servers.allowed(await office.teams.get_team(ticket.team_id)) if ticket.team_id and ticket.stage else None,
         )
         if check.verdict.decision != Decision.ALLOW:
             return False

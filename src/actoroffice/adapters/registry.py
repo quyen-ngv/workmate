@@ -62,16 +62,23 @@ def adapter_class(name: str) -> type:
         raise ConnectorError("invalid", f"adapter '{name}' không nạp được: {exc}") from exc
 
 
+def _optional_secrets(cls: type) -> set[str]:
+    return set(getattr(cls, "optional_secret_fields", ())) | {"webhook_secret"}
+
+
 def describe(name: str) -> dict[str, Any]:
     """What the settings page needs to draw one adapter: title, capabilities, the config form, the secret fields."""
     cls = adapter_class(name)
     schema: type[BaseModel] = cls.config_schema
+    secret_fields = list(getattr(cls, "secret_fields", ()))
+    optional = _optional_secrets(cls)
     return {
         "name": name,
         "title": getattr(cls, "title", name),
         "capabilities": sorted(str(c) for c in cls.capabilities),
         "config_schema": schema.model_json_schema(),
-        "secret_fields": list(getattr(cls, "secret_fields", ())),
+        "secret_fields": secret_fields,
+        "optional_secret_fields": [f for f in secret_fields if f in optional],  # a connection works without these
         "required_scopes": {str(k): v for k, v in getattr(cls, "required_scopes", {}).items()},
     }
 
@@ -93,7 +100,7 @@ def validate(spec: ConnectionSpec) -> BaseModel:
 def build(spec: ConnectionSpec, secret: dict[str, str], *, transport: Any = None) -> Any:
     cls = adapter_class(spec.use)
     config = validate(spec)
-    optional = set(getattr(cls, "optional_secret_fields", ())) | {"webhook_secret"}
+    optional = _optional_secrets(cls)
     missing = [f for f in getattr(cls, "secret_fields", ()) if f not in optional and not secret.get(f)]
     if missing:
         raise ConnectorError("unconfigured", f"kết nối '{spec.id}' thiếu bí mật: {', '.join(missing)}")

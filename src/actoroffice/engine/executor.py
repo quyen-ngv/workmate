@@ -18,7 +18,6 @@ from actoroffice.domain.work import Comment, InteractionKind, InteractionStatus,
 from actoroffice.ports.connection import Capability
 from actoroffice.runtimes.base import TurnSpec
 from actoroffice.runtimes.router import is_kiro
-from actoroffice.services.atlassian import legacy_capability
 from actoroffice.services.chat import handle
 from actoroffice.services.checks import command_list
 from actoroffice.services.runs import ticket_session_key
@@ -154,7 +153,11 @@ class Executor:
                 tools = [t for t in tools if t.name not in replaced] + STAGE_TOOLS + ATLASSIAN_TOOLS + INFRA_TOOLS
                 tools = await self._offered(tools, ticket)  # no Jira / wiki / code host for this ticket: no such tools
                 if team is not None:
-                    mcp_servers = dict(team.settings.mcp_servers)
+                    # the team's outside MCP servers, secrets merged in; one line in the run for each one left out
+                    attached = office.mcp_servers.resolved(team)
+                    mcp_servers, gate.mcp_allowed = attached.servers, attached.allowed
+                    for line in attached.skipped:
+                        await office.runs.event(run_id, "health", {"state": "mcp_skipped", "title": line})
             else:
                 prompt = context.ticket_prompt(
                     ticket,
@@ -266,8 +269,7 @@ class Executor:
 
     async def _offered(self, tools: list[ToolDef], ticket: Ticket | None) -> list[ToolDef]:
         """The tools a run gets: one that needs an outside system (`ToolDef.needs`) is left out unless every capability
-        it needs is there for the ticket, through a connection of its scope (project → team → office) or through the
-        configuration from before connections. Fewer tokens, and no call that could only fail."""
+        it needs is there for the ticket, through a connection of its scope (project → team → office). Fewer tokens, and no call that could only fail."""
         office = self.office
         scope = office.sourcehub.scope(ticket)
         known: dict[Capability, bool] = {}
@@ -275,7 +277,7 @@ class Executor:
         for tool in tools:
             for capability in tool.needs:
                 if capability not in known:
-                    known[capability] = await office.connections.has(capability, scope) or legacy_capability(office, capability)
+                    known[capability] = await office.connections.has(capability, scope)
             if all(known[c] for c in tool.needs):
                 offered.append(tool)
         return offered

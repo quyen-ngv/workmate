@@ -19,14 +19,6 @@ TG_TOKEN = "123456789:" + "A" * 35
 
 def fake(request: httpx.Request) -> httpx.Response:
     url = str(request.url)
-    if url.endswith("/rest/api/3/myself"):
-        import base64
-
-        user_token = base64.b64decode(request.headers["authorization"].split()[1]).decode()
-        if user_token.endswith(":s3cret-jira"):
-            return httpx.Response(200, json={"displayName": "Lan BA"})
-    if "/workspaces/acme" in url:
-        return httpx.Response(200, json={"slug": "acme"})
     if url.endswith("/getMe"):
         return httpx.Response(200, json={"ok": True, "result": {"username": "copilot_bot"}})
     return httpx.Response(401, json={"ok": False, "description": "Unauthorized"})
@@ -51,11 +43,8 @@ def test_setup_status_and_ai_model(client, tmp_path):  # noqa: F811
     login(client)
     s = client.get("/api/setup").json()
     assert s["projects"] == [] and s["people"] == 0
-    assert s["connections"] == {
-        "telegram": {"configured": False, "running": False, "bound": False, "bot": None, "env_override": None},
-        "jira": {"configured": False, "base_url": None, "email": None},
-        "bitbucket": {"configured": False, "workspace": None},
-    }
+    assert s["connections"] == {"telegram": {"configured": False, "running": False, "bound": False, "bot": None, "env_override": None}}
+    assert s["integrations"] == [], "outside systems come from the connections"
     assert client.post("/api/setup/ai", json={"model": "opus"}, headers=HEADERS).json()["model"] == "opus"
     assert client.get("/api/setup").json()["ai"]["model"] == "opus"
     assert yaml.safe_load((tmp_path / "home" / "config.yaml").read_text(encoding="utf-8"))["ai_model"] == "opus"
@@ -92,15 +81,23 @@ def test_project_from_the_web_with_commands_and_conventions(client, tmp_path):  
 
 def test_connections_are_verified_and_secrets_never_returned(client, tmp_path, mocked):  # noqa: F811
     login(client)
-    bad = client.post("/api/setup/jira", json={"base_url": "https://acme.atlassian.net", "email": "x@acme.vn", "token": ""}, headers=HEADERS)
-    assert bad.status_code == 422
-    wrong = client.post("/api/setup/jira", json={"base_url": "https://acme.atlassian.net", "email": "x@acme.vn", "token": "wrong"}, headers=HEADERS)
-    assert wrong.status_code == 422 and "Jira từ chối" in wrong.json()["detail"]
-    assert not list((tmp_path / "home" / "secrets").glob("jira*"))
-    ok = client.post("/api/setup/jira", json={"base_url": "https://acme.atlassian.net", "email": "lan@acme.vn", "token": "s3cret-jira"}, headers=HEADERS)
-    assert ok.json() == {"ok": True, "user": "Lan BA"}
-    assert client.post("/api/setup/bitbucket", json={"email": "lan@acme.vn", "token": "s3cret-bb", "workspace": "acme"}, headers=HEADERS).json() == {"ok": True}
-    assert client.post("/api/setup/bitbucket", json={"email": "lan@acme.vn", "token": "x", "workspace": "other"}, headers=HEADERS).status_code == 422
+    # the forms from before connections are gone: 410, pointing to Kết nối, and nothing is saved
+    for path, body in (
+        ("/api/setup/jira", {"base_url": "https://acme.atlassian.net", "email": "lan@acme.vn", "token": "s3cret-jira"}),
+        ("/api/setup/bitbucket", {"email": "lan@acme.vn", "token": "s3cret-bb", "workspace": "acme"}),
+        ("/api/setup/jira", {}),
+    ):
+        gone = client.post(path, json=body, headers=HEADERS)
+        assert gone.status_code == 410 and "Kết nối" in gone.json()["detail"] and "connections add" in gone.json()["detail"]
+    assert not (tmp_path / "home" / "secrets").exists() or not list((tmp_path / "home" / "secrets").glob("*.json"))
+
+    # a connection made on the Kết nối page is what the setup page lists
+    saved = client.post(
+        "/api/connections",
+        json={"id": "jira-main", "use": "jira_cloud", "config": {"site": "https://acme.atlassian.net"}, "secret": {"email": "lan@acme.vn", "token": "s3cret-jira"}},
+        headers=HEADERS,
+    )
+    assert saved.status_code == 200, saved.text
 
     assert client.post("/api/setup/telegram", json={"token": "not-a-token"}, headers=HEADERS).status_code == 422
     r = client.post("/api/setup/telegram", json={"token": TG_TOKEN}, headers=HEADERS).json()
@@ -108,10 +105,13 @@ def test_connections_are_verified_and_secrets_never_returned(client, tmp_path, m
     assert (tmp_path / "home" / "secrets" / "telegram_token").read_text(encoding="utf-8") == TG_TOKEN
 
     text = json.dumps(client.get("/api/setup").json())
-    for secret in ("s3cret-jira", "s3cret-bb", TG_TOKEN):
+    for secret in ("s3cret-jira", "s3cret-bb", TG_TOKEN, "lan@acme.vn", "acme.atlassian.net"):
         assert secret not in text
-    c = client.get("/api/setup").json()["connections"]
-    assert c["jira"]["configured"] and c["jira"]["email"] == "lan@acme.vn" and c["bitbucket"]["workspace"] == "acme" and c["telegram"]["configured"]
+    setup = client.get("/api/setup").json()
+    assert setup["connections"]["telegram"]["configured"] and set(setup["connections"]) == {"telegram"}
+    assert [(a["name"], a["title"], [(c["id"], c["scope"], c["enabled"], c["write"]) for c in a["connections"]]) for a in setup["integrations"]] == [
+        ("jira_cloud", "Jira Cloud", [("jira-main", "office", True, False)])
+    ]
 
 
 def test_launchers_exist():

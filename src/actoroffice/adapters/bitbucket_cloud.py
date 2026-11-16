@@ -82,7 +82,7 @@ def _safe_path(path: str) -> str:
 
 class BitbucketCloud:
     name: ClassVar[str] = NAME
-    title: ClassVar[str] = "Bitbucket Cloud"
+    title: ClassVar[str] = "Bitbucket Cloud (bitbucket.org)"
     capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.CODE_READ, Capability.CODE_PR, Capability.WEBHOOK})
     config_schema: ClassVar[type[BaseModel]] = BitbucketCloudConfig
     secret_fields: ClassVar[tuple[str, ...]] = ("email", "token", "webhook_secret")

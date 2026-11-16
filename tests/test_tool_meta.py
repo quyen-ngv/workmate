@@ -1,6 +1,6 @@
 """Tool metadata (`ToolDef.effect / activity / reads_source / needs / untrusted`) instead of sets of tool names, tools
-offered only when what they need is connected, and the old Jira / Confluence / code-host tools through connections with
-the configuration from before connections as the fallback."""
+offered only when what they need is connected, and the Jira / Confluence / code-host tools through connections only
+(the configuration files from before connections are read by nothing but the one-time import)."""
 
 from __future__ import annotations
 
@@ -24,8 +24,7 @@ from actoroffice.ports.code import PrComment, PullRequest, RepoRef
 from actoroffice.ports.connection import Capability, ConnectionSpec, ConnectorError, Health, Scope
 from actoroffice.ports.docs import DocContent, DocRef, Issue, PageRef
 from actoroffice.security.policy import brings_untrusted
-from actoroffice.services.atlassian import parse_pr, save_bitbucket
-from actoroffice.services.jira import JiraMirror, save_credentials
+from actoroffice.services.atlassian import parse_pr
 from actoroffice.services.sources import _matches
 from actoroffice.tools.atlassian_tools import ATLASSIAN_TOOLS
 from actoroffice.tools.chat_tools import CHAT_TOOLS
@@ -152,16 +151,6 @@ class FakeCode:
         return None
 
 
-class OldHost:
-    """The client of the configuration from before connections (`Atlassian.use(code_host=…)`)."""
-
-    async def pr_get(self, repo: str, pr_id: int) -> dict[str, Any]:
-        return {"id": pr_id, "state": "OPEN", "title": "cũ", "url": "", "approvals": ["Lan"]}
-
-    async def pr_comments(self, repo: str, pr_id: int) -> list[dict[str, Any]]:
-        return []
-
-
 FAKES = {"meta_tracker": FakeTracker, "meta_wiki": FakePages, "meta_code": FakeCode}
 
 
@@ -185,6 +174,13 @@ async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     for name in FAKES:
         registry.unregister(name)
     await o.close()
+
+
+def old_files(data_dir: Any) -> None:
+    """The configuration files `jira login` and `bitbucket` used to write."""
+    (data_dir / "secrets").mkdir(parents=True, exist_ok=True)
+    (data_dir / "secrets" / "jira.json").write_text(json.dumps({"base_url": "https://acme.atlassian.net", "email": "bot@acme.vn", "token": "jira-token"}), encoding="utf-8")
+    (data_dir / "secrets" / "bitbucket.json").write_text(json.dumps({"email": "bot@acme.vn", "token": "bb-token", "workspace": "acme"}), encoding="utf-8")
 
 
 async def connect(office: Office, use: str, *, scope: str = "office", write: bool = False) -> None:
@@ -276,11 +272,11 @@ def test_activity_gate_policy_and_sources_read_the_metadata() -> None:
 
 def test_parse_pr_takes_the_urls_of_the_adapters_given() -> None:
     github = "https://git.test/acme/billing/pull/12"
-    assert parse_pr("https://bitbucket.org/acme/billing/pull-requests/7") == ("acme/billing", 7)
-    assert parse_pr(github) is None
+    bitbucket = "https://bitbucket.org/acme/billing/pull-requests/7"
+    assert parse_pr(bitbucket) is None and parse_pr(github) is None, "no adapter given: nobody's pull request"
     code = FakeCode(Config(), {})
     assert parse_pr(github, [code]) == ("acme/billing", 12)
-    assert parse_pr("https://bitbucket.org/acme/billing/pull-requests/7", [code]) == ("acme/billing", 7)
+    assert parse_pr(bitbucket, [code]) is None, "a bitbucket.org URL is only what a Bitbucket adapter says it is"
     assert parse_pr("https://git.test/other/x/pull/1", [code]) is None
 
 
@@ -301,8 +297,7 @@ async def test_a_team_with_nothing_connected_gets_no_jira_wiki_or_pr_tools(offic
     assert seen and not seen[0] & CONNECTED
     assert {"repo_fetch", "repos_list", "source_get", "source_search", "stage_complete", "ticket_get"} <= seen[0]
 
-    # the configuration from before connections counts as the capability it gives
-    office.atlassian.use(code_host=OldHost())
+    await connect(office, "meta_code")
     runtime.scripts.append(look)
     other = await office.tickets.create("y", description="y")
     await office.stages.start(other.id, template="code", by="user")
@@ -310,14 +305,12 @@ async def test_a_team_with_nothing_connected_gets_no_jira_wiki_or_pr_tools(offic
     assert seen[1] & CONNECTED == {"pr_create", "pr_comments", "pr_reply"}
 
 
-async def test_old_configuration_and_connections_both_satisfy_needs(office: Office) -> None:
+async def test_the_old_files_alone_give_no_tool(office: Office) -> None:
     ticket, _ = await ticket_ctx(office)
     assert await offered(office, ticket) == {"repo_fetch", "repos_list"}
-    # old: Jira credentials give the tracker and, on the same site, the wiki
-    save_credentials(office.settings.data_dir, "https://acme.atlassian.net", "bot@acme.vn", "tok")
-    assert await offered(office, ticket) == {"repo_fetch", "repos_list", "jira_issue", "jira_search", "jira_comment", "wiki_search", "wiki_page"}
-    await office.jira.close()
-    await office.atlassian.close()
+    old_files(office.settings.data_dir)  # written after the office opened: nothing reads them any more
+    assert await offered(office, ticket) == {"repo_fetch", "repos_list"}
+    assert not await office.jira.ready()
 
 
 async def test_a_connection_satisfies_needs_in_its_scope_only(office: Office) -> None:
@@ -363,21 +356,24 @@ async def test_wiki_tools_through_a_connection(office: Office) -> None:
         await call("wiki_page")({}, ctx)
 
 
-async def test_old_configuration_still_answers_as_before(office: Office) -> None:
+async def test_with_nothing_connected_each_tool_says_what_is_missing(office: Office) -> None:
+    old_files(office.settings.data_dir)
     ticket, ctx = await ticket_ctx(office)
-    with pytest.raises(ToolError, match="Jira is not connected"):
-        await call("jira_issue")({"key": "BIL-3"}, ctx)
-    with pytest.raises(ToolError, match="Confluence is not connected"):
-        await call("wiki_page")({"id": "1"}, ctx)
+    for name, args in (("jira_issue", {"key": "BIL-3"}), ("jira_search", {"jql": "x"}), ("jira_comment", {"key": "BIL-3", "body": "x"})):
+        with pytest.raises(ToolError, match="No issue tracker .* Kết nối"):
+            await call(name)(args, ctx)
+    for name, args in (("wiki_page", {"id": "1"}), ("wiki_search", {"text": "x"})):
+        with pytest.raises(ToolError, match="No wiki .* Kết nối"):
+            await call(name)(args, ctx)
     with pytest.raises(ToolError, match="No code host connected"):
-        await call("pr_comments")({}, ctx)
+        await call("pr_comments")({"url": "https://bitbucket.org/acme/billing/pull-requests/7"}, ctx)
     with pytest.raises(ToolError, match="No code host is connected: this repository is reviewed on this machine"):
         await call("pr_create")({"title": "x", "description": "x"}, ctx)
-    office.atlassian.use(code_host=OldHost())
-    out = await call("pr_comments")({"url": "https://bitbucket.org/acme/billing/pull-requests/7"}, ctx)
-    assert out == "PR #7 [OPEN] cũ · approved by: Lan" and not office.gates["run_1"].tainted
+    await connect(office, "meta_code")
     with pytest.raises(ToolError, match="No pull request linked"):
         await call("pr_comments")({}, ctx)
+    with pytest.raises(ToolError, match="No connected code host has the pull request"):
+        await call("pr_comments")({"url": "https://bitbucket.org/acme/billing/pull-requests/7"}, ctx)
 
 
 async def test_writes_need_a_connection_with_write_on(office: Office) -> None:
@@ -417,8 +413,7 @@ async def test_the_watcher_follows_a_pull_request_of_a_connection(office: Office
 async def test_import_legacy_creates_equivalent_connections_once(office: Office) -> None:
     data = office.settings.data_dir
     assert await office.connections.import_legacy() == []
-    save_credentials(data, "https://acme.atlassian.net", "bot@acme.vn", "jira-token")
-    save_bitbucket(data, "bot@acme.vn", "bb-token", "acme")
+    old_files(data)
     await office.connections.save(ConnectionSpec(id="confluence-main", use="meta_wiki"))  # already there: left as it is
     created = await office.connections.import_legacy()
     assert [(c.id, c.use, c.scope, c.write) for c in created] == [("jira-main", "jira_cloud", "office", True), ("bitbucket-main", "bitbucket_cloud", "office", True)]
@@ -429,5 +424,4 @@ async def test_import_legacy_creates_equivalent_connections_once(office: Office)
     assert json.loads((data / "secrets" / "jira.json").read_text(encoding="utf-8"))["base_url"] == "https://acme.atlassian.net", "the old file stays"
     assert await office.connections.import_legacy() == []
     assert await office.connections.has(Capability.CODE_PR) and await office.connections.has(Capability.TRACKER)
-    assert isinstance(office.jira, JiraMirror) and office.jira.ready(), "the old path keeps working next to the connections"
-    await office.jira.close()
+    assert await office.jira.ready(), "the mirror runs through the imported connection"

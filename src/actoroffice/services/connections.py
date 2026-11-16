@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,6 +19,8 @@ from actoroffice.ports.connection import Capability, ConnectionSpec, ConnectorEr
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
+
+log = logging.getLogger(__name__)
 
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 SCOPE_RE = re.compile(r"^(office|team:[\w-]+|project:[\w-]+)$")
@@ -98,33 +101,71 @@ class ConnectionService:
         await self.office.db.execute("DELETE FROM connections WHERE id = ?", (connection_id,))
         self.office.bus.publish("connections.changed", id=connection_id)
 
-    async def import_legacy(self) -> list[ConnectionSpec]:
-        """The Atlassian configuration from before connections as connections of the office. Run once, on request
-        (`actoroffice connections import-legacy`), never automatically.
+    def _legacy_wanted(self) -> list[tuple[Capability, ConnectionSpec, dict[str, str]]]:
+        """What the configuration files from before connections hold, as the connections they become."""
+        secrets = self.office.settings.data_dir / "secrets"
+
+        def read(name: str, keys: tuple[str, ...]) -> dict[str, str] | None:
+            try:
+                data = json.loads((secrets / name).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+            return {k: str(data[k]) for k in keys} if isinstance(data, dict) and all(data.get(k) for k in keys) else None
+
+        wanted: list[tuple[Capability, ConnectionSpec, dict[str, str]]] = []
+        jira = read("jira.json", ("base_url", "email", "token"))
+        if jira:
+            secret = {"email": jira["email"], "token": jira["token"]}
+            wanted.append((Capability.TRACKER, ConnectionSpec(id="jira-main", use="jira_cloud", config={"site": jira["base_url"]}, write=True), secret))
+            wanted.append((Capability.WIKI, ConnectionSpec(id="confluence-main", use="confluence_cloud", config={"site": jira["base_url"]}, write=True), secret))
+        bitbucket = read("bitbucket.json", ("email", "token", "workspace"))
+        if bitbucket:
+            secret = {"email": bitbucket["email"], "token": bitbucket["token"]}
+            wanted.append((Capability.CODE_PR, ConnectionSpec(id="bitbucket-main", use="bitbucket_cloud", config={"workspace": bitbucket["workspace"]}, write=True), secret))
+        return wanted
+
+    async def import_legacy(self, *, only_missing: bool = False) -> list[ConnectionSpec]:
+        """The Atlassian configuration from before connections as connections of the office.
 
         `secrets/jira.json` becomes `jira-main` (jira_cloud) and `confluence-main` (confluence_cloud: same site, same
         token); `secrets/bitbucket.json` becomes `bitbucket-main` (bitbucket_cloud). Each gets its own copy of the secret
         (`secrets/<id>.json`), reaches what the old configuration reached (no project, space or repository limit) and
-        may write, as the old one could. A connection whose id exists is left untouched; the old files stay where they
-        are and keep working as the fallback until someone removes them. Returns what was created."""
-        from actoroffice.services.atlassian import load_bitbucket
-        from actoroffice.services.jira import load_credentials
-
-        data_dir = self.office.settings.data_dir
-        wanted: list[tuple[ConnectionSpec, dict[str, str]]] = []
-        jira = load_credentials(data_dir)
-        if jira:
-            secret = {"email": jira["email"], "token": jira["token"]}
-            wanted.append((ConnectionSpec(id="jira-main", use="jira_cloud", config={"site": jira["base_url"]}, write=True), secret))
-            wanted.append((ConnectionSpec(id="confluence-main", use="confluence_cloud", config={"site": jira["base_url"]}, write=True), secret))
-        bitbucket = load_bitbucket(data_dir)
-        if bitbucket:
-            secret = {"email": str(bitbucket["email"]), "token": str(bitbucket["token"])}
-            wanted.append((ConnectionSpec(id="bitbucket-main", use="bitbucket_cloud", config={"workspace": str(bitbucket["workspace"])}, write=True), secret))
+        may write, as the old one could. A connection whose id exists is left untouched; with `only_missing`, so is a
+        capability some connection already gives. The old files stay where they are; nothing else reads them.
+        Returns what was created."""
         created = []
-        for spec, secret in wanted:
-            if await self.get(spec.id) is None:
-                created.append(await self.save(spec, secret=secret))
+        for capability, spec, secret in self._legacy_wanted():
+            if await self.get(spec.id) is not None or (only_missing and await self._anyone_gives(capability)):
+                continue
+            created.append(await self.save(spec, secret=secret))
+        return created
+
+    async def _anyone_gives(self, capability: Capability) -> bool:
+        for spec in await self.list():
+            with contextlib.suppress(ConnectorError):
+                if capability in registry.capabilities(spec.use):
+                    return True
+        return False
+
+    @property
+    def _legacy_marker(self) -> Path:
+        return self.office.settings.data_dir / "legacy-import.json"
+
+    async def migrate_legacy_once(self) -> list[ConnectionSpec]:
+        """At office start: the old Jira / Bitbucket files become connections, once. A marker file records that it ran,
+        so a connection people remove afterwards does not come back at the next start."""
+        marker = self._legacy_marker
+        if marker.exists() or not self._legacy_wanted():
+            return []
+        try:
+            created = await self.import_legacy(only_missing=True)
+        except ConnectorError as exc:  # an old file the adapters refuse (a site that is not an address…): say so, do not stop the office
+            log.warning("old Jira / Bitbucket configuration was not turned into connections: %s", exc)
+            created = []
+        with contextlib.suppress(OSError):
+            marker.write_text(json.dumps({"at": utcnow(), "created": [s.id for s in created]}), encoding="utf-8")
+        for spec in created:
+            log.warning("old configuration → connection %s (%s, scope %s, may write): check it in Cài đặt › Kết nối", spec.id, spec.use, spec.scope)
         return created
 
     async def _drop_live(self, connection_id: str) -> None:

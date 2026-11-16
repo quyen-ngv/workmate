@@ -245,7 +245,7 @@ def signed(body: bytes, secret: str = HOOK_SECRET) -> str:
 
 
 def test_declares_itself_and_is_built_in() -> None:
-    assert (BitbucketServer.name, BitbucketServer.title) == ("bitbucket_server", "Bitbucket Server / Data Center")
+    assert (BitbucketServer.name, BitbucketServer.title) == ("bitbucket_server", "Bitbucket Server / Data Center (tự cài, địa chỉ riêng của công ty)")
     assert BitbucketServer.capabilities == frozenset({Capability.CODE_READ, Capability.CODE_PR, Capability.WEBHOOK})
     assert BitbucketServer.secret_fields == ("token", "username", "webhook_secret") and BitbucketServer.optional_secret_fields == ("username",)
     assert registry.BUILTIN["bitbucket_server"].endswith(":BitbucketServer") and registry.adapter_class("bitbucket_server") is BitbucketServer

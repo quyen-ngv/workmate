@@ -2,9 +2,8 @@
 office's credentials (the AI never sees a token). Writes (jira_comment, pr_create, pr_reply, repo_fetch) follow the
 position's "external" rule in the gate (usually: a person approves the exact call).
 
-Each tool works through a connection of the ticket's scope when one has the capability it needs (`ToolDef.needs`), and
-through the configuration from before connections (`services/jira.py`, `services/atlassian.py`) otherwise. A run only
-gets the tools one of the two can serve. `jira_issue`, `wiki_page` and `wiki_search` are kept for one version as other
+Each tool works through a connection of the ticket's scope that has the capability it needs (`ToolDef.needs`); a run
+only gets the tools a connection can serve. `jira_issue`, `wiki_page` and `wiki_search` are kept for one version as other
 names of `source_get` / `source_search`.
 """
 
@@ -49,7 +48,7 @@ async def _scope(ctx: ToolCtx) -> Scope:
 
 async def _connection(ctx: ToolCtx, capability: Capability, *, write: bool = False) -> tuple[ConnectionSpec, Any] | None:
     """The nearest connection of the ticket's scope with a capability (and with `write` on, for a call that writes),
-    with its adapter. None: the old configuration serves the call, if there is one."""
+    with its adapter. None: nothing connected can serve the call."""
     office = ctx.office
     for spec in await office.connections.candidates(capability, await _scope(ctx)):
         if write and not spec.write:
@@ -78,64 +77,37 @@ async def _document(ctx: ToolCtx, found: tuple[ConnectionSpec, Any], ref: str, w
     return text
 
 
-async def _jira(ctx: ToolCtx) -> Any:
-    if not ctx.office.jira.ready():
-        raise ToolError("Jira is not connected (an admin runs `actoroffice jira login`).")
-    return ctx.office.jira.client
+NO_TRACKER = "No issue tracker (Jira) is connected for this ticket. A person adds one in Cài đặt › Kết nối."
+NO_WIKI = "No wiki (Confluence) is connected for this ticket. A person adds one in Cài đặt › Kết nối."
 
 
 async def jira_issue(args: dict[str, Any], ctx: ToolCtx) -> str:
-    from actoroffice.services.jira import adf_to_text
-
     key = str(args.get("key") or "").strip().upper()
     found = await _connection(ctx, Capability.TRACKER)
-    if found is not None:
-        return await _document(ctx, found, key, "key")
-    client = await _jira(ctx)
-    try:
-        issue = await client.issue(key)
-        comments = await client._call("GET", f"/rest/api/3/issue/{key}/comment", params={"maxResults": 20, "orderBy": "-created"})
-    except OfficeError as exc:
-        raise ToolError(str(exc)) from exc
-    f = issue.get("fields") or {}
-    lines = [
-        f"{key} · {f.get('summary')}",
-        f"Status: {(f.get('status') or {}).get('name')} · Type: {(f.get('issuetype') or {}).get('name')} · Labels: {', '.join(f.get('labels') or [])}",
-        "",
-        adf_to_text(f.get("description")) or "(no description)",
-    ]
-    for c in (comments or {}).get("comments", [])[:20]:
-        lines += ["", f"— {(c.get('author') or {}).get('displayName')} ({str(c.get('created'))[:10]}): {adf_to_text(c.get('body'))[:1500]}"]
-    return _cut("\n".join(lines))
+    if found is None:
+        raise ToolError(NO_TRACKER)
+    return await _document(ctx, found, key, "key")
 
 
 async def jira_search(args: dict[str, Any], ctx: ToolCtx) -> str:
     limit = min(int(args.get("limit") or 15), 30)
     found = await _connection(ctx, Capability.TRACKER)
-    if found is not None:
-        try:
-            listed = await found[1].search(str(args.get("jql") or ""), limit)
-        except ConnectorError as exc:
-            raise ToolError(str(exc)) from exc
-        _outside_content(ctx)
-        return "\n".join(f"{i.key} · {i.title} [{i.status}]" for i in listed) or "No issues."
-    client = await _jira(ctx)
+    if found is None:
+        raise ToolError(NO_TRACKER)
     try:
-        issues = await client.search(str(args.get("jql") or ""), limit=limit)
-    except OfficeError as exc:
+        listed = await found[1].search(str(args.get("jql") or ""), limit)
+    except ConnectorError as exc:
         raise ToolError(str(exc)) from exc
-    if not issues:
-        return "No issues."
-    return "\n".join(
-        f"{i['key']} · {(i.get('fields') or {}).get('summary')} [{((i.get('fields') or {}).get('status') or {}).get('name')}]" for i in issues
-    )
+    _outside_content(ctx)
+    return "\n".join(f"{i.key} · {i.title} [{i.status}]" for i in listed) or "No issues."
 
 
 async def jira_comment(args: dict[str, Any], ctx: ToolCtx) -> str:
     found = await _connection(ctx, Capability.TRACKER, write=True)
-    if found is None and not ctx.office.jira.ready() and await _connection(ctx, Capability.TRACKER) is not None:
-        raise ToolError(f"The Jira connection is read-only ({READ_ONLY_HINT}). Until then you cannot comment on Jira.")
-    client = await _jira(ctx) if found is None else None
+    if found is None:
+        if await _connection(ctx, Capability.TRACKER) is not None:
+            raise ToolError(f"The Jira connection is read-only ({READ_ONLY_HINT}). Until then you cannot comment on Jira.")
+        raise ToolError(NO_TRACKER)
     key = str(args.get("key") or "").strip().upper()
     if not key and ctx.ticket_id is not None:
         key = (await ctx.office.tickets.get(ctx.ticket_id)).jira_key or ""
@@ -143,11 +115,8 @@ async def jira_comment(args: dict[str, Any], ctx: ToolCtx) -> str:
         raise ToolError("key is required (this ticket has no Jira issue)")
     body = str(args.get("body") or "")[:30000]
     try:
-        if found is not None:
-            await found[1].comment(key, body)
-        else:
-            await client.comment(key, body)
-    except (OfficeError, ConnectorError) as exc:
+        await found[1].comment(key, body)
+    except ConnectorError as exc:
         raise ToolError(str(exc)) from exc
     return f"Commented on {key}."
 
@@ -155,37 +124,21 @@ async def jira_comment(args: dict[str, Any], ctx: ToolCtx) -> str:
 async def wiki_search(args: dict[str, Any], ctx: ToolCtx) -> str:
     limit = min(int(args.get("limit") or 10), 25)
     found = await _connection(ctx, Capability.WIKI)
-    if found is not None:
-        try:
-            listed = await found[1].search(str(args.get("text") or ""), space=args.get("space") or None, limit=limit)
-        except ConnectorError as exc:
-            raise ToolError(str(exc)) from exc
-        _outside_content(ctx)
-        return "\n".join(f"{p.id} · {p.title} (space {p.space}) {p.url}" for p in listed) or "No pages."
-    wiki = ctx.office.atlassian.wiki()
-    if wiki is None:
-        raise ToolError("Confluence is not connected (same credentials as Jira).")
+    if found is None:
+        raise ToolError(NO_WIKI)
     try:
-        pages = await wiki.search(str(args.get("text") or ""), space=args.get("space"), limit=limit)
-    except OfficeError as exc:
+        listed = await found[1].search(str(args.get("text") or ""), space=args.get("space") or None, limit=limit)
+    except ConnectorError as exc:
         raise ToolError(str(exc)) from exc
-    if not pages:
-        return "No pages."
-    return "\n".join(f"{p['id']} · {p['title']} (space {p['space']}, updated {p['updated']}) {p['url']}" for p in pages)
+    _outside_content(ctx)
+    return "\n".join(f"{p.id} · {p.title} (space {p.space}) {p.url}" for p in listed) or "No pages."
 
 
 async def wiki_page(args: dict[str, Any], ctx: ToolCtx) -> str:
     found = await _connection(ctx, Capability.WIKI)
-    if found is not None:
-        return await _document(ctx, found, str(args.get("id") or "").strip(), "id")
-    wiki = ctx.office.atlassian.wiki()
-    if wiki is None:
-        raise ToolError("Confluence is not connected.")
-    try:
-        page = await wiki.page(str(args.get("id") or ""))
-    except OfficeError as exc:
-        raise ToolError(str(exc)) from exc
-    return _cut(f"{page['title']} (version {page['version']}, updated {page['updated']}) {page['url']}\n\n{page['text']}")
+    if found is None:
+        raise ToolError(NO_WIKI)
+    return await _document(ctx, found, str(args.get("id") or "").strip(), "id")
 
 
 # ---- pull requests -----------------------------------------------------------------------------------------
@@ -207,7 +160,7 @@ async def _git(cwd: Path, *args: str, timeout: float = 120, env: dict[str, str] 
 async def pr_create(args: dict[str, Any], ctx: ToolCtx) -> str:
     office = ctx.office
     scope = await _scope(ctx)
-    hosts = await code_hosts(office, scope, write=True)  # connections that may write, then the old Bitbucket client
+    hosts = await code_hosts(office, scope, write=True)  # connections that may write
     if not hosts:
         if await code_hosts(office, scope):
             raise ToolError(
@@ -369,8 +322,7 @@ async def repos_list(_args: dict[str, Any], ctx: ToolCtx) -> str:
     return "\n".join(f"- {p.name}: {p.path} ({p.repo_url or ''})" for p in rows)
 
 
-# `needs`: a run gets the tool only when a connection of the ticket's scope (or the old configuration) has the
-# capability. `effect="external"`: acts outside the machine, so the position's "external" rule decides.
+# `needs`: a run gets the tool only when a connection of the ticket's scope has the capability. `effect="external"`: acts outside the machine, so the position's "external" rule decides.
 ATLASSIAN_TOOLS: list[ToolDef] = [
     ToolDef(
         "jira_issue",

@@ -24,6 +24,7 @@ from actoroffice.engine.workspace import branch_name
 from actoroffice.services.merges import MergeError
 from actoroffice.web.server import create_app
 
+from .fake_adapters import connect, install, uninstall
 from .fakes import FakeRuntime
 from .seed import seed_db
 from .test_web import HEADERS, TOKEN, login
@@ -128,9 +129,11 @@ async def test_ac1_status_available_only_for_root_without_code_host(office: Offi
     await office.db.execute("UPDATE tickets SET stage = 'pr', stage_template = 'code' WHERE id = ?", (child.id,))
     assert (await office.merges.panel(child.key))["available"] is False
 
-    monkeypatch.setattr(office.atlassian, "code_host", lambda: object())
+    install()
+    await connect(office, "fake_code")  # a code host: the work is merged there, as a pull request
     assert (await office.merges.panel(root.key))["available"] is False
-    monkeypatch.undo()
+    await office.connections.remove("fake-code")
+    uninstall()
 
     await office.db.execute("UPDATE tickets SET pr_url = 'https://example.org/pr/1' WHERE id = ?", (root.id,))
     assert (await office.merges.panel(root.key))["available"] is False

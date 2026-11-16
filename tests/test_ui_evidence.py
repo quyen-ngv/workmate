@@ -627,10 +627,11 @@ async def test_ac8_gate_card_payload_has_ui_evidence(office: Office, tmp_path: P
 # ---- AC-10 PR description ----------------------------------------------------------------------------------
 
 
-async def test_ac10_pr_create_appends_ui_evidence_section(office: Office, tmp_path: Path) -> None:
+async def test_ac10_pr_create_appends_ui_evidence_section(office: Office, tmp_path: Path, request: pytest.FixtureRequest) -> None:
     from actoroffice.tools.atlassian_tools import pr_create
 
-    from .test_atlassian import FakeHost, git
+    from .fake_adapters import FakeCodeHost, connect, install, uninstall
+    from .test_atlassian import git
 
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
@@ -638,8 +639,10 @@ async def test_ac10_pr_create_appends_ui_evidence_section(office: Office, tmp_pa
     git(repo, "remote", "add", "origin", str(remote))
     git(repo, "checkout", "-q", "-b", "t/si-x")
     await office.projects.configure(project.id, repo_url="acme/web")
-    host = FakeHost()
-    office.atlassian.use(code_host=host)
+    host = FakeCodeHost
+    install()
+    request.addfinalizer(uninstall)
+    await connect(office, "fake_code", write=True)
     await set_doc(office, ticket.id, "requirements", UI_REQUIREMENTS)
     await set_doc(office, ticket.id, "handoff", "| AC-3 | không chụp được: máy không có Chrome |\n")
     await office.tickets.add_work_product(ticket.id, "screenshot", "/a/artifacts/X/ac-2-nut.png", {"note": "Nút hoàn tiền", "ac": "AC-2"})

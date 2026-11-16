@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -24,9 +25,12 @@ from pydantic import BaseModel, Field
 
 from actoroffice.domain.errors import NotFound, OfficeError
 from actoroffice.domain.ids import utcnow
+from actoroffice.ports.connection import Capability, ConnectorError, Scope
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
+
+log = logging.getLogger(__name__)
 
 KINDS = ("fact", "code_note", "decision", "contract", "flow")
 KIND_VI = {"fact": "Nghiệp vụ & thuật ngữ", "code_note": "Ghi chú code", "decision": "Quyết định", "contract": "Hợp đồng tích hợp", "flow": "Luồng nghiệp vụ"}
@@ -199,22 +203,34 @@ class KnowledgeService:
 
     # ---- Confluence ---------------------------------------------------------------------------------------
 
-    async def publish(self, ticket_id: int) -> list[str]:
-        """One-way publish: the ticket's dossier page and the team's KB pages (one per kind). Never blocks closing."""
-        from actoroffice.services.atlassian import markdown_to_storage
+    async def _wiki(self, ticket: Any, team: Any) -> tuple[Any, str]:
+        """(the wiki to publish to, "") or (None, why nothing is published)."""
+        if team is None or not team.confluence_space:
+            return None, "team chưa khai space Confluence"
+        scope = Scope(team_id=team.id, project_id=ticket.project_id, ticket_key=ticket.key)
+        specs = await self.office.connections.candidates(Capability.WIKI, scope)
+        for spec in specs:
+            if spec.write:
+                with contextlib.suppress(ConnectorError):  # no secret yet: as good as not connected
+                    return await self.office.connections.adapter(spec.id), ""
+        return None, "kết nối wiki đang ở chế độ chỉ đọc (bật «Cho phép ghi» ở Cài đặt › Kết nối)" if specs else "chưa có kết nối wiki (Cài đặt › Kết nối)"
 
+    async def publish(self, ticket_id: int) -> list[str]:
+        """One-way publish through a wiki connection that may write: the ticket's dossier page and the team's KB pages
+        (one per kind). Nothing connected (or read-only): skipped, with the reason in the log. Never blocks closing."""
         office = self.office
         ticket = await office.tickets.get(ticket_id)
         team = await office.teams.get_team(ticket.team_id) if ticket.team_id else None
-        wiki = office.atlassian.wiki()
-        if wiki is None or team is None or not team.confluence_space:
+        wiki, reason = await self._wiki(ticket, team)
+        if wiki is None:
+            log.info("knowledge: %s is not published: %s", ticket.key, reason)
             return []
         urls: list[str] = []
         dossier = await office.tickets.get_document(ticket.id, "dossier")
         body = (dossier.body if dossier else "") + "\n\n" + "\n".join(f"- {k}: {v}" for k, v in (("Jira", ticket.jira_url), ("PR", ticket.pr_url)) if v)
-        page = await wiki.upsert_page(team.confluence_space, f"{ticket.key} · {ticket.title}"[:250], markdown_to_storage(body), parent_id=team.confluence_parent_id)
-        urls.append(page["url"])
-        await office.db.execute("UPDATE tickets SET confluence_url = ? WHERE id = ?", (page["url"], ticket.id))
+        page = await wiki.upsert_page(team.confluence_space, f"{ticket.key} · {ticket.title}"[:250], body, parent_id=team.confluence_parent_id)
+        urls.append(page.url)
+        await office.db.execute("UPDATE tickets SET confluence_url = ? WHERE id = ?", (page.url, ticket.id))
         for kind in KINDS:
             items = [i for i in await self.list(team_id=team.id, kind=kind) if i.status in ("verified", "stale")]
             if not items:
@@ -228,8 +244,8 @@ class KnowledgeService:
                 if item.data:
                     lines += ["```", json.dumps(item.data, ensure_ascii=False, indent=1)[:4000], "```"]
                 lines.append("")
-            page = await wiki.upsert_page(team.confluence_space, f"KB · {team.name} · {KIND_VI[kind]}", markdown_to_storage("\n".join(lines)), parent_id=team.confluence_parent_id)
-            urls.append(page["url"])
+            page = await wiki.upsert_page(team.confluence_space, f"KB · {team.name} · {KIND_VI[kind]}", "\n".join(lines), parent_id=team.confluence_parent_id)
+            urls.append(page.url)
         return urls
 
 

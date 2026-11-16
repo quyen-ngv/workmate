@@ -51,8 +51,9 @@ class TurnSpec:
     hook_timeout_s: float = 180.0
     env: dict[str, str] = field(default_factory=dict)  # extra environment for the agent process and its tools
     show_thinking: bool = True  # stream the model's (summarized) thinking as "thinking" events
-    # Extra MCP servers (a team's connectors): name → {"type": "http", "url", "headers"} or
-    # {"type": "stdio", "command", "args", "env"}. Their tools go through the same gate ("external" rule).
+    # A team's outside MCP servers, resolved for this run (services/mcp_servers.py: secrets merged in, never logged):
+    # name → {"type": "http" | "sse", "url", "headers"} or {"type": "stdio", "command", "args", "env"}. Their tools go
+    # through the same gate: "external" rule, except the tools a person listed as running unattended.
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
     # JSON schema of the final answer: a runtime that supports structured output returns it in TurnResult.structured;
     # the others ignore it (the caller still parses TurnResult.text).

@@ -423,6 +423,10 @@ class _Turn:
             verdict_ok = True  # office tools are gated inside the tool server, with their real arguments
         else:
             name, args = _gate_view(call)
+            # a tool of a team's MCP server gets the name the policy knows (mcp__<server>__<tool>), as with Claude
+            mcp_name = _mcp_tool_name(call, self.spec.mcp_servers)
+            if mcp_name:
+                name, args = mcp_name, call.get("rawInput") if isinstance(call.get("rawInput"), dict) else {}
             verdict = await self.gate.before_tool(name, args, call.get("toolCallId"))
             verdict_ok = verdict.decision == GateDecision.ALLOW
             if verdict.decision == GateDecision.DEFER:
@@ -573,6 +577,28 @@ KIRO_TOOL_NAMES = {
     "execute_bash": "Bash", "shell": "Bash", "execute_cmd": "Bash", "fs_write": "Write", "write": "Write",
     "fs_read": "Read", "read": "Read", "glob": "Glob", "grep": "Grep", "web_fetch": "WebFetch", "web_search": "WebSearch",
 }
+
+
+def _mcp_tool_name(call: dict[str, Any], servers: Any) -> str | None:
+    """`mcp__<server>__<tool>` for a call to a tool of one of the run's outside MCP servers, else None. Kiro says which
+    server a tool belongs to in `_meta.kiro.mcpTool`; without it the tool's own name is read (`@server/tool`,
+    `server___tool`, or the title `server_tool` Kiro shows for the office's tools)."""
+    meta = ((call.get("_meta") or {}).get("kiro") or {}).get("mcpTool") or {}
+    server = str(meta.get("serverName") or "")
+    named = str(call.get("name") or call.get("title") or "")
+    if server in servers:
+        tool = str(meta.get("toolName") or meta.get("name") or "")
+        for prefix in (f"@{server}/", f"{server}___", f"{server}_"):
+            if not tool and named.startswith(prefix):
+                tool = named[len(prefix):]
+        return f"mcp__{server}__{tool or named}"
+    if server:
+        return None  # a server that is not this run's: the policy sees it as an unknown tool and asks
+    for known in sorted(servers, key=len, reverse=True):
+        for prefix in (f"@{known}/", f"{known}___"):
+            if named.startswith(prefix) and len(named) > len(prefix):
+                return f"mcp__{known}__{named[len(prefix):]}"
+    return None
 
 
 def _gate_view(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:

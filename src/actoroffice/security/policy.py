@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from actoroffice.domain.org import Position, Rule
+from actoroffice.domain.team import mcp_unattended
 from actoroffice.security import shell
 
 
@@ -63,6 +64,8 @@ class ToolCallContext:
     trust_all: bool = False  # actor in "allow everything" mode
     mode: str = "workspace"  # the project's permission mode: read_only | workspace | folder | full
     project_commands: list[str] = field(default_factory=list)  # the project's own test/build/lint commands
+    # The team's outside MCP servers of this run: server → globs of its bare tool names that run without asking
+    mcp_allowed: dict[str, list[str]] = field(default_factory=dict)
 
 
 MODES = ("read_only", "workspace", "folder", "full")
@@ -85,6 +88,16 @@ def office_tool(tool: str) -> str | None:
         if tool.startswith(prefix):
             return tool[len(prefix):]
     return None
+
+
+def mcp_tool_unattended(tool: str, allowed: dict[str, list[str]]) -> bool:
+    """`mcp__<server>__<tool>` of a server whose list of unattended tools matches the bare tool name. A tool of another
+    server, of a server not in this run, or of the office's own server (reserved name) never matches."""
+    for server in sorted(allowed, key=len, reverse=True):  # the longest name first: "jira" must not claim "jira__dc"'s tools
+        prefix = f"mcp__{server}__"
+        if server != "office" and tool.startswith(prefix):
+            return mcp_unattended(allowed[server], tool[len(prefix):])
+    return False
 
 
 def brings_untrusted(tool: str) -> bool:
@@ -195,8 +208,13 @@ class PolicyEngine:
             rule = ctx.position.policy.web
             return Verdict(_decision(rule), Risk.READ, f"web access is '{rule}' for this position", taints=True)
         if tool.startswith("mcp__"):
-            # Capability-pack connectors: anything that acts outside the machine.
-            return self._external(tool, ctx)
+            # A team's outside MCP servers: anything that acts outside the machine.
+            verdict = self._external(tool, ctx)
+            if verdict.decision != Decision.DENY and mcp_tool_unattended(tool, ctx.mcp_allowed):
+                # A person listed this tool of this server as one that runs without asking (a read). What it returns
+                # is content of an outside system: the session is tainted, acting outside afterwards asks first.
+                return Verdict(Decision.ALLOW, Risk.EXTERNAL, "tool is on the server's unattended list", taints=True)
+            return verdict
         return Verdict(Decision.ASK, Risk.EXEC, f"unknown tool {tool}")
 
     # ---- files ----------------------------------------------------------------------------

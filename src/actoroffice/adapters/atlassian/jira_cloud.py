@@ -42,8 +42,8 @@ COMMENT_ORDER = "-created"  # `orderBy` value that returns the newest comment fi
 CHILDREN_JQL = "parent = {key}"  # issues under an epic, and sub-tasks
 IDENTITY_PATH = f"{API}/myself"
 
-BASE_FIELDS = ["summary", "description", "status", "issuetype", "labels", "updated", "parent", "issuelinks", "subtasks", "attachment"]
-SEARCH_FIELDS = ["summary", "description", "status", "issuetype", "labels", "updated", "parent"]
+BASE_FIELDS = ["summary", "description", "status", "issuetype", "labels", "updated", "parent", "reporter", "issuelinks", "subtasks", "attachment"]
+SEARCH_FIELDS = ["summary", "description", "status", "issuetype", "labels", "updated", "parent", "reporter"]
 FIELD_TITLES = {"acceptance": "Tiêu chí chấp nhận"}
 SEARCH_PAGE = 50
 
@@ -233,6 +233,8 @@ class JiraCloud:
                 for a in fields.get("attachment") or []
             ],
             fields={name: _field_text(fields.get(field_id)) for name, field_id in self.config.fields.items()},
+            reporter_name=str((fields.get("reporter") or {}).get("displayName") or ""),
+            reporter_email=str((fields.get("reporter") or {}).get("emailAddress") or ""),
         )
         return issue, extra
 

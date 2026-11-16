@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -15,6 +14,7 @@ from actoroffice.domain.run import TurnResult, TurnStatus
 from actoroffice.domain.work import ProjectAccess
 from actoroffice.services.knowledge import KbError
 
+from .fake_adapters import FakeWiki, connect, install, uninstall
 from .fakes import FakeRuntime, TurnCtx
 from .seed import seed_db
 
@@ -30,23 +30,10 @@ async def office(tmp_path, runtime) -> AsyncIterator[Office]:
     seed_db(o.settings.db_path)
     await o.open()
     await o.start_notifier()
+    install()
     yield o
+    uninstall()
     await o.close()
-
-
-class FakeWiki:
-    def __init__(self) -> None:
-        self.pages: dict[str, str] = {}
-
-    async def search(self, text: str, *, space: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
-        return []
-
-    async def page(self, page_id: str) -> dict[str, Any]:
-        return {}
-
-    async def upsert_page(self, space: str, title: str, html: str, *, parent_id: str | None = None) -> dict[str, Any]:
-        self.pages[title] = html
-        return {"id": str(len(self.pages)), "url": f"https://acme.atlassian.net/wiki/{len(self.pages)}"}
 
 
 async def test_items_dedupe_search_and_verification(office: Office) -> None:
@@ -70,8 +57,7 @@ async def test_items_dedupe_search_and_verification(office: Office) -> None:
 
 async def test_code_notes_go_stale_after_a_merge_and_the_team_publishes_to_confluence(office: Office, runtime: FakeRuntime, tmp_path: Path) -> None:
     team = await office.teams.create_team("Billing", confluence_space="BIL")
-    wiki = FakeWiki()
-    office.atlassian.use(wiki=wiki)
+    await connect(office, "fake_wiki", write=True)
     repo = tmp_path / "svc"
     repo.mkdir()
     for args in (["init", "-q", "-b", "main"],):
@@ -113,11 +99,36 @@ async def test_code_notes_go_stale_after_a_merge_and_the_team_publishes_to_confl
     gate = next(i for i in await office.interactions.pending(ticket_id=ticket.id) if i.payload.get("gate") == "knowledge")
     await office.answer(gate.id, {"approved": True}, by="user")
     for _ in range(100):
-        if any(t.startswith("KB · Billing") for t in wiki.pages):
+        if any(p["title"].startswith("KB · Billing") for p in FakeWiki.published):
             break
         import asyncio
 
         await asyncio.sleep(0.02)
-    assert f"{ticket.key} · Sửa làm tròn" in wiki.pages and "HALF_UP" in wiki.pages[f"{ticket.key} · Sửa làm tròn"]
-    assert "HALF_UP" in wiki.pages["KB · Billing · Ghi chú code"]
-    assert (await office.tickets.get(ticket.id)).confluence_url
+    pages = {p["title"]: p for p in FakeWiki.published}
+    assert f"{ticket.key} · Sửa làm tròn" in pages and "HALF_UP" in pages[f"{ticket.key} · Sửa làm tròn"]["body"]
+    assert "HALF_UP" in pages["KB · Billing · Ghi chú code"]["body"] and pages["KB · Billing · Ghi chú code"]["space"] == "BIL"
+    assert pages["KB · Billing · Ghi chú code"]["body"].startswith("# Ghi chú code"), "markdown goes to the adapter, which converts it"
+    assert (await office.tickets.get(ticket.id)).confluence_url == "https://wiki.test/BIL/1"
+
+
+async def test_publish_goes_through_a_wiki_connection_that_may_write(office: Office, caplog) -> None:
+    team = await office.teams.create_team("Billing", confluence_space="BIL")
+    other = await office.teams.create_team("Ledger")
+    ticket = await office.tickets.create("Hoàn tiền", description="x")
+    await office.db.execute("UPDATE tickets SET team_id = ? WHERE id = ?", (team.id, ticket.id))
+    await office.tickets.put_document(ticket.id, "dossier", "# Dossier\n\nVIP 60 ngày", author="Copilot", base_revision=None)
+    caplog.set_level("INFO", logger="actoroffice.services.knowledge")
+
+    assert await office.knowledge.publish(ticket.id) == [] and "chưa có kết nối wiki" in caplog.text, "nothing connected: skipped, with the reason"
+    await connect(office, "fake_wiki")
+    assert await office.knowledge.publish(ticket.id) == [] and "chỉ đọc" in caplog.text, "read-only: skipped, with the reason"
+    await connect(office, "fake_wiki", scope=f"team:{other.id}", write=True, connection_id="wiki-ledger")
+    assert await office.knowledge.publish(ticket.id) == [] and FakeWiki.published == [], "another team's wiki is not this ticket's"
+
+    await connect(office, "fake_wiki", write=True)
+    assert await office.knowledge.publish(ticket.id) == ["https://wiki.test/BIL/1"]
+    assert FakeWiki.published == [{"space": "BIL", "title": f"{ticket.key} · Hoàn tiền", "body": "# Dossier\n\nVIP 60 ngày\n\n", "parent_id": None}]
+    assert (await office.tickets.get(ticket.id)).confluence_url == "https://wiki.test/BIL/1"
+
+    loose = await office.tickets.create("Không team", description="x")
+    assert await office.knowledge.publish(loose.id) == [] and "chưa khai space" in caplog.text

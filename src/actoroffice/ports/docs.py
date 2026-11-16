@@ -67,6 +67,8 @@ class Issue(BaseModel):
     links: list[DocRef] = Field(default_factory=list)  # linked issues, remote links (wiki pages)
     attachments: list[Attachment] = Field(default_factory=list)
     fields: dict[str, Any] = Field(default_factory=dict)  # configured custom fields, e.g. {"acceptance": "…"}
+    reporter_name: str = ""  # who asked: the mirror makes that person the ticket's owner when the office knows them
+    reporter_email: str = ""  # often hidden by the tracker (privacy settings); the name is the fallback
 
 
 class Tracker(Protocol):

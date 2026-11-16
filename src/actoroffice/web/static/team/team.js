@@ -979,8 +979,8 @@ async function renderWelcome() {
   const steps = [
     ["Thêm người và team (BA, Dev…)", s.people > 0 && s.teams.length > 0, "people"],
     ["Thêm repo/dự án cho AI làm việc", s.projects.length > 0, "setup"],
-    ["Kết nối Telegram (tuỳ chọn)", s.connections.telegram.configured, "setup"],
-    ["Kết nối Jira + Confluence (tuỳ chọn)", s.connections.jira.configured, "setup"],
+    ["Kết nối Telegram (tuỳ chọn)", !!s.connections?.telegram?.configured, "setup"],
+    ["Kết nối code host / tài liệu: Bitbucket, Confluence, Oracle… (tuỳ chọn)", (s.integrations || []).length > 0, "connections"],
     ["Giao việc đầu tiên cho AI", state.board.tickets.length > 0, "new"],
   ];
   if (steps.every(([, ok]) => ok)) return;
@@ -1061,6 +1061,8 @@ async function pageRules() {
 
 const CAP_LABEL = { docs: "đọc tài liệu", tracker: "issue", wiki: "trang wiki", code_read: "đọc code", code_pr: "pull request", webhook: "webhook" };
 const HEALTH = { ok: ["good", "hoạt động"], degraded: ["warn", "chập chờn"], error: ["bad", "lỗi"], unconfigured: ["", "chưa cấu hình"] };
+// an example for a list field, by its name in the adapter's config
+const LIST_EXAMPLE = { projects: "PAY, CORE", spaces: "PAY, ARCH", repos: "PAY/*, PAY/ledger-api", schemas: "BOND, REF", allow: "DOC-, docs/*.md", args: "-y, @acme/docs-mcp", fetch: "svn, cat, svn://host/docs/{ref}" };
 
 function connectionForm(a, c) {
   const props = a.config_schema?.properties || {};
@@ -1071,12 +1073,17 @@ function connectionForm(a, c) {
     const kind = spec.type === "boolean" ? "bool" : spec.type === "array" ? "list" : spec.type === "integer" || spec.type === "number" ? "num" : spec.type === "object" || spec.$ref || spec.additionalProperties ? "json" : "text";
     const input = kind === "bool"
       ? `<input type="checkbox" data-cfg="${esc(k)}" data-kind="bool" ${current ? "checked" : ""}>`
-      : `<input type="text" data-cfg="${esc(k)}" data-kind="${kind}" value="${esc(val(current))}" placeholder="${kind === "list" ? "cách nhau bằng dấu phẩy" : kind === "json" ? "JSON" : ""}">`;
-    return `<label>${esc(k)}${required.has(k) ? " *" : ""}${input}</label>`;
+      : `<input type="text" data-cfg="${esc(k)}" data-kind="${kind}" value="${esc(val(current))}" title="${esc(spec.description || "")}" placeholder="${kind === "list" ? `vd. ${esc(LIST_EXAMPLE[k] || "A, B")} (cách nhau bằng dấu phẩy)` : kind === "json" ? "JSON" : ""}">`;
+    return `<label title="${esc(spec.description || "")}">${esc(k)}${required.has(k) ? " *" : ""}${input}</label>`;
   }).join("");
-  const secrets = (a.secret_fields || []).map((k) => `<label>${esc(k)} (bí mật)<input type="password" data-sec="${esc(k)}" autocomplete="new-password" placeholder="${c ? "để trống = giữ nguyên" : ""}"></label>`).join("");
+  const optional = new Set(a.optional_secret_fields || []);
+  const secrets = (a.secret_fields || []).map((k) => `<label>${esc(k)} (bí mật${optional.has(k) ? ", không bắt buộc" : ""})<input type="password" data-sec="${esc(k)}" autocomplete="new-password" placeholder="${c ? "để trống = giữ nguyên" : optional.has(k) ? "không bắt buộc" : ""}"></label>`).join("");
   const scopes = [["office", "Cả văn phòng"], ...(state.board.teams || []).map((t) => [`team:${t.id}`, `Team ${t.name}`])];
+  // the permissions the token needs, per capability: what people tick when they create the token
+  const needs = Object.entries(a.required_scopes || {}).filter(([, v]) => (v || []).length).map(([cap, v]) => `${CAP_LABEL[cap] || cap}: ${v.join(", ")}`);
   return `<div class="conn-form" data-conn-form data-use="${esc(a.name)}">
+    <div class="b">Loại kết nối: <b>${esc(a.title || a.name)}</b> <span class="chip">${esc(a.name)}</span></div>
+    ${needs.length ? `<div class="rev">Quyền token cần có — ${esc(needs.join(" · "))}</div>` : ""}
     <div class="form">
       <label>Id *<input type="text" data-c="id" value="${esc(c?.id || "")}" ${c ? "readonly" : ""} placeholder="vd. ${esc(a.name.split("_")[0])}-main"></label>
       <label>Phạm vi<select data-c="scope">${scopes.map(([v, l]) => `<option value="${esc(v)}" ${c?.scope === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
@@ -1097,7 +1104,7 @@ async function pageConnections() {
       return `<details class="conn"><summary><b>${esc(c.id)}</b> <span class="chip ${cls}">${label}</span> <span class="rev">${esc(c.scope)}${c.enabled ? "" : " · đang tắt"}${c.write ? " · được ghi" : " · chỉ đọc"}${c.health?.identity ? ` · ${esc(c.health.identity)}` : ""}</span>
         ${c.health?.detail ? `<div class="rev">${esc(c.health.detail)}</div>` : ""}</summary>${connectionForm(a, c)}</details>`;
     }).join("");
-    return `<section class="adapter"><h3>${esc(a.title || a.name)} <span class="chip ${a.state === "connected" ? "good" : ""}">${a.state === "connected" ? "đã kết nối" : "chưa cấu hình"}</span></h3>
+    return `<section class="adapter"><h3>${esc(a.title || a.name)} <span class="chip">${esc(a.name)}</span> <span class="chip ${a.state === "connected" ? "good" : ""}">${a.state === "connected" ? "đã kết nối" : "chưa cấu hình"}</span></h3>
       <div class="rev">${esc(caps)}${a.error ? ` · ${esc(a.error)}` : ""}</div>${conns}
       <details class="conn"><summary>＋ Thêm kết nối ${esc(a.title || a.name)}</summary>${connectionForm(a, null)}</details></section>`;
   }).join("");
@@ -1253,7 +1260,157 @@ async function pagePeople() {
     ${p.teams.map((t) => `<div class="rule"><div class="h"><b>${esc(t.name)}</b>${t.jira_project_key ? `<span class="chip">Jira ${esc(t.jira_project_key)}</span>` : ""}</div>
       <div class="b">${t.members.map((m) => `${esc(m.user.name)} (${esc(m.roles.join(", "))})`).join(" · ") || "chưa có thành viên"}</div>
       <div class="form"><label>Người<select data-m-user="${esc(t.id)}">${p.users.filter((u) => u.id !== "user").map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join("")}</select></label>
-        <label>Vai trong team<input data-m-roles="${esc(t.id)}" placeholder="ba dev"></label><button class="btn" data-add-member="${esc(t.id)}">Gán</button></div></div>`).join("")}`);
+        <label>Vai trong team<input data-m-roles="${esc(t.id)}" placeholder="ba dev"></label><button class="btn" data-add-member="${esc(t.id)}">Gán</button>
+        <button class="btn" data-mcp-team="${esc(t.id)}">MCP server (${Object.keys((t.settings || {}).mcp_servers || {}).length})</button></div></div>`).join("")}`);
+}
+
+// ---- outside MCP servers of a team's AI (/api/teams/{id}/mcp) ------------------------------------------------
+
+const MCP_STATES = { on: ["good", "đang bật"], off: ["", "đang tắt"], missing_secret: ["warn", "thiếu bí mật"], invalid: ["bad", "cấu hình cũ"] };
+const MCP_MASK = "•••"; // how the API shows a secret an old entry still holds inline
+const mcpState = { team: "", data: null, form: null, results: {} };
+const mcpLines = (text) => String(text || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+function mcpPairs(text, sep, what) {
+  const out = {};
+  for (const line of mcpLines(text)) {
+    const i = line.indexOf(sep);
+    if (i < 1) throw new Error(`${what}: dòng «${line}» cần dạng TÊN${sep}giá trị`);
+    out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return out;
+}
+
+async function pageMcp(team) {
+  if (team !== mcpState.team) Object.assign(mcpState, { team, form: null, results: {} });
+  mcpState.data = await api(`/api/teams/${encodeURIComponent(team)}/mcp`);
+  renderMcp();
+}
+
+function mcpFormOf(s) {
+  // the form of a stored server; a secret an old entry holds inline becomes a secret name to enter again
+  const plain = (obj, sep) => Object.entries(obj || {}).filter(([, v]) => v !== MCP_MASK).map(([k, v]) => `${k}${sep}${v}`).join("\n");
+  const inline = Object.entries({ ...(s.env || {}), ...(s.headers || {}) }).filter(([, v]) => v === MCP_MASK).map(([k]) => ({ name: k, set: false, value: "" }));
+  const named = Object.entries((s.type === "stdio" ? s.secret_env : s.secret_headers) || {}).map(([name, set]) => ({ name, set, value: "" }));
+  return {
+    editing: true, name: s.name, type: s.type, command: s.command || "", args: (s.args || []).join("\n"), env: plain(s.env, "="), url: s.url || "",
+    headers: plain(s.headers, ": "), secrets: [...named, ...inline], allowed: (s.allowed_tools || []).join(", "), disabled: !!s.disabled, timeout: s.timeout_s || "",
+  };
+}
+
+function readMcpForm() {
+  const f = mcpState.form;
+  if (!f) return null;
+  for (const el of document.querySelectorAll("[data-mcp]")) {
+    if (el.dataset.mcp === "secret_name") continue;
+    f[el.dataset.mcp] = el.type === "checkbox" ? el.checked : el.value;
+  }
+  for (const s of f.secrets) s.value = $(`[data-mcp-secret="${CSS.escape(s.name)}"]`)?.value || "";
+  return f;
+}
+
+function mcpFormHtml(f) {
+  const stdio = f.type === "stdio";
+  return `<h3>${f.editing ? `Sửa ${esc(f.name)}` : "Thêm MCP server"}</h3>
+    <div class="form">
+      <label>Tên<input data-mcp="name" value="${esc(f.name)}" ${f.editing ? "disabled" : ""} placeholder="vd. bitbucket"></label>
+      <label>Loại<select data-mcp="type">${[["stdio", "stdio: chạy một lệnh trên máy office"], ["http", "http: gọi một địa chỉ"], ["sse", "sse: gọi một địa chỉ (kiểu cũ)"]].map(([v, l]) => `<option value="${v}" ${v === f.type ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+      ${stdio ? `<label>Chương trình<input data-mcp="command" value="${esc(f.command)}" placeholder="vd. npx"></label>
+      <label>Đối số (mỗi dòng một đối số)<textarea data-mcp="args" rows="3" placeholder="-y&#10;@acme/bitbucket-mcp">${esc(f.args)}</textarea></label>
+      <label>Biến môi trường không bí mật (mỗi dòng TÊN=giá trị)<textarea data-mcp="env" rows="2" placeholder="BITBUCKET_URL=https://git.acme.example">${esc(f.env)}</textarea></label>`
+    : `<label>URL<input data-mcp="url" value="${esc(f.url)}" placeholder="https://mcp.acme.example/mcp"></label>
+      <label>Header không bí mật (mỗi dòng Tên: giá trị)<textarea data-mcp="headers" rows="2" placeholder="X-Site: acme">${esc(f.headers)}</textarea></label>`}
+    </div>
+    <div class="form">
+      ${f.secrets.map((s) => `<label>${esc(s.name)}<input type="password" autocomplete="new-password" data-mcp-secret="${esc(s.name)}" value="${esc(s.value)}" placeholder="${s.set ? "đã đặt (để trống để giữ)" : "chưa đặt"}"></label><button class="btn small" data-mcp-drop-secret="${esc(s.name)}">Bỏ ${esc(s.name)}</button>`).join("")}
+      <label>${stdio ? "Tên biến môi trường bí mật" : "Tên header bí mật"}<input data-mcp="secret_name" placeholder="${stdio ? "vd. BITBUCKET_TOKEN" : "vd. Authorization"}"></label><button class="btn" data-mcp-add-secret>Thêm bí mật</button>
+    </div>
+    <p class="hint">Giá trị bí mật lưu riêng trên máy chủ (thư mục secrets), không hiện lại và không nằm trong cài đặt của team.${stdio ? "" : " Với header Authorization, nhập cả giá trị, vd. «Bearer &lt;token&gt;»."}</p>
+    <div class="form">
+      <label>Tool được tự chạy (mẫu tên tool, cách nhau bằng dấu phẩy)<input data-mcp="allowed" value="${esc(f.allowed)}" placeholder="để trống: tool nào cũng hỏi"></label>
+      <label>Thời gian chờ khi thử (giây)<input data-mcp="timeout" type="number" min="1" max="600" value="${esc(f.timeout)}" placeholder="30"></label>
+      <label class="check"><input type="checkbox" data-mcp="disabled" ${f.disabled ? "checked" : ""}>Tạm tắt</label>
+    </div>
+    <p class="hint">⚠ Mọi tool của server này có tên khớp một mẫu ở trên sẽ chạy mà không hỏi ai. Chỉ ghi các tool chỉ đọc (get_*, list_*, search_*…); phân biệt hoa thường. Tool không khớp vẫn hỏi người như trước. Bấm «Thử» sau khi lưu để xem từng tool rơi vào nhóm nào.</p>
+    <div class="form"><button class="btn primary" data-mcp-save>Lưu</button><button class="btn" data-mcp-cancel>Huỷ</button></div>`;
+}
+
+function mcpServerHtml(s) {
+  const [cls, label] = MCP_STATES[s.state] || ["", s.state];
+  const res = mcpState.results[s.name];
+  const tried = !res ? "" : res.ok
+    ? `<div class="b">Tự chạy (${res.unattended.length}): ${esc(res.unattended.join(", ") || "không có")}
+Sẽ hỏi (${res.asks.length}): ${esc(res.asks.join(", ") || "không có")}</div>`
+    : `<div class="b">⚠ ${esc(res.error)}</div>`;
+  return `<div class="rule"><div class="h"><b>${esc(s.name)}</b><span class="chip">${esc(s.type)}</span><span class="chip ${cls}">${esc(label)}</span></div>
+    <div class="b">${esc(s.type === "stdio" ? [s.command, ...(s.args || [])].join(" ") : s.url)}${s.reason ? `\n${esc(s.reason)}` : ""}${s.legacy_inline_secret ? "\n⚠ Cấu hình cũ còn giữ bí mật ngay trong cài đặt của team: bấm Sửa, nhập lại giá trị bí mật rồi Lưu." : ""}
+Tool tự chạy: ${esc((s.allowed_tools || []).join(", ") || "không có (tool nào cũng hỏi)")}</div>${tried}
+    <div class="form"><button class="btn" data-mcp-edit="${esc(s.name)}">Sửa</button><button class="btn" data-mcp-test="${esc(s.name)}">Thử</button><button class="btn bad" data-mcp-del="${esc(s.name)}">Xoá</button></div></div>`;
+}
+
+function renderMcp() {
+  const { data, form } = mcpState;
+  sheet(`MCP server · ${data.team.name}`, `
+    <p class="hint">MCP server bên ngoài gắn cho AI của team này (vd. Bitbucket, Jira dùng chung), dùng token riêng của team. Tool của chúng đi qua cùng cửa duyệt: chỉ các tool bạn ghi ở «Tool được tự chạy» mới chạy mà không hỏi.</p>
+    ${data.servers.map(mcpServerHtml).join("") || `<p class="hint">Team chưa có MCP server nào.</p>`}
+    ${form ? mcpFormHtml(form) : `<div class="form"><button class="btn primary" data-mcp-new>Thêm MCP server</button><button class="btn" data-page="people">← Người & team</button></div>`}`);
+}
+
+// The type of a server is a <select>, not a button: its own listener (the fields of the other type are swapped in).
+document.addEventListener("change", (e) => {
+  if (!e.target.matches?.('[data-mcp="type"]') || !readMcpForm()) return;
+  mcpState.form.secrets = [];
+  renderMcp();
+});
+
+function mcpClick(ds) {
+  const base = `/api/teams/${encodeURIComponent(mcpState.team)}/mcp`;
+  if (ds.mcpNew !== undefined) {
+    mcpState.form = { editing: false, name: "", type: "stdio", command: "", args: "", env: "", url: "", headers: "", secrets: [], allowed: (mcpState.data.default_allowed_tools || []).join(", "), disabled: false, timeout: "" };
+    return renderMcp();
+  }
+  if (ds.mcpCancel !== undefined) { mcpState.form = null; return renderMcp(); }
+  if (ds.mcpEdit) { mcpState.form = mcpFormOf(mcpState.data.servers.find((s) => s.name === ds.mcpEdit)); return renderMcp(); }
+  if (ds.mcpAddSecret !== undefined) {
+    const f = readMcpForm();
+    const name = ($('[data-mcp="secret_name"]').value || "").trim();
+    if (!name) return toast("Cần tên bí mật", true);
+    if (!f.secrets.some((s) => s.name === name)) f.secrets.push({ name, set: false, value: "" });
+    return renderMcp();
+  }
+  if (ds.mcpDropSecret) { const f = readMcpForm(); f.secrets = f.secrets.filter((s) => s.name !== ds.mcpDropSecret); return renderMcp(); }
+  if (ds.mcpSave !== undefined) return act(async () => {
+    const f = readMcpForm();
+    const name = f.name.trim();
+    if (!name) throw new Error("Cần tên MCP server");
+    const stdio = f.type === "stdio";
+    const names = f.secrets.map((s) => s.name);
+    const body = {
+      type: f.type, allowed_tools: f.allowed.split(/[\s,]+/).filter(Boolean), disabled: !!f.disabled, timeout_s: f.timeout ? Number(f.timeout) : null,
+      secrets: Object.fromEntries(f.secrets.map((s) => [s.name, s.value || ""])),
+      ...(stdio ? { command: f.command.trim(), args: mcpLines(f.args), env: mcpPairs(f.env, "=", "Biến môi trường"), secret_env: names }
+        : { url: f.url.trim(), headers: mcpPairs(f.headers, ":", "Header"), secret_headers: names }),
+    };
+    mcpState.data.servers = (await api(`${base}/${encodeURIComponent(name)}`, { method: "PUT", body })).servers;
+    mcpState.form = null;
+    delete mcpState.results[name];
+    toast(`Đã lưu MCP server ${name}`);
+    renderMcp();
+  });
+  if (ds.mcpTest) return act(async () => {
+    toast(`Đang thử ${ds.mcpTest}…`);
+    mcpState.results[ds.mcpTest] = await api(`${base}/${encodeURIComponent(ds.mcpTest)}/test`, { method: "POST" });
+    readMcpForm(); // an open form keeps what was typed
+    renderMcp();
+  });
+  if (ds.mcpDel) return act(async () => {
+    if (!confirm(`Xoá MCP server ${ds.mcpDel} của team này? Bí mật đã lưu của nó cũng bị xoá.`)) return;
+    mcpState.data.servers = (await api(`${base}/${encodeURIComponent(ds.mcpDel)}`, { method: "DELETE" })).servers;
+    readMcpForm();
+    if (mcpState.form?.editing && mcpState.form.name === ds.mcpDel) mcpState.form = null;
+    delete mcpState.results[ds.mcpDel];
+    renderMcp();
+  });
 }
 
 const MODELS = [["sonnet", "Claude Sonnet (khuyên dùng)"], ["opus", "Claude Opus (mạnh nhất, tốn hơn)"], ["haiku", "Claude Haiku (nhanh, rẻ)"], ["kiro", "Kiro CLI (cần cài kiro-cli)"]];
@@ -1261,6 +1418,7 @@ const MODELS = [["sonnet", "Claude Sonnet (khuyên dùng)"], ["opus", "Claude Op
 async function pageSetup() {
   const s = await api("/api/setup");
   const c = s.connections;
+  const integrations = s.integrations || [];  // outside systems in use, from the connections
   const status = (ok, text) => `<span class="chip ${ok ? "working" : ""}">${ok ? "✓ " : ""}${esc(text)}</span>`;
   const teamOpts = (sel) => `<option value="">—</option>${s.teams.map((t) => `<option value="${esc(t.id)}" ${t.id === sel ? "selected" : ""}>${esc(t.name)}</option>`).join("")}`;
   // connections that read code: the code host a project's repository is on
@@ -1288,15 +1446,10 @@ async function pageSetup() {
       <div class="form"><label>Bot token${c.telegram.running ? " mới" : ""}<input data-c="tg_token" type="password" placeholder="123456789:AA…"></label><button class="btn primary" data-save-telegram>${c.telegram.running ? "Đổi bot" : "Kết nối"}</button>
         ${c.telegram.running && c.telegram.bound ? `<button class="btn" data-telegram-unbind>Chuyển sang group mới</button>` : ""}
         ${c.telegram.configured ? `<button class="btn bad" data-telegram-off>Tắt Telegram</button>` : ""}</div></div>
-    <div class="rule"><div class="h"><b>Jira + Confluence (Cloud)</b>${status(c.jira.configured, c.jira.configured ? `${c.jira.email} · ${c.jira.base_url}` : "chưa kết nối")}</div>
-      <div class="b">Tạo API token tại id.atlassian.com → Security → API tokens.</div>
-      <div class="form"><label>URL<input data-c="jira_url" placeholder="vd. https://acme.atlassian.net" value="${esc(c.jira.base_url || "")}"></label>
-        <label>Email<input data-c="jira_email" value="${esc(c.jira.email || "")}"></label><label>API token<input data-c="jira_token" type="password"></label>
-        <button class="btn primary" data-save-jira>Kiểm tra & lưu</button></div></div>
-    <div class="rule"><div class="h"><b>Bitbucket Cloud</b>${status(c.bitbucket.configured, c.bitbucket.configured ? `workspace ${c.bitbucket.workspace}` : "chưa kết nối")}</div>
-      <div class="b">Dùng để AI tạo PR và đọc review. Không có cũng được: AI sẽ nhờ Dev tạo PR.</div>
-      <div class="form"><label>Email<input data-c="bb_email"></label><label>API token<input data-c="bb_token" type="password"></label>
-        <label>Workspace<input data-c="bb_workspace" value="${esc(c.bitbucket.workspace || "")}"></label><button class="btn primary" data-save-bitbucket>Kiểm tra & lưu</button></div></div>`);
+    <div class="rule"><div class="h"><b>Jira, Confluence, Bitbucket, GitHub, Oracle…</b>${status(integrations.length > 0, integrations.length ? `${integrations.length} hệ thống đã nối` : "chưa nối hệ thống nào")}</div>
+      <div class="b">${integrations.length ? integrations.map((a) => `${esc(a.title)}: ${a.connections.map((x) => `${esc(x.id)} (${x.enabled ? (HEALTH[x.state] || HEALTH.unconfigured)[1] : "đang tắt"}, ${x.write ? "được ghi" : "chỉ đọc"})`).join(", ")}`).join("\n")
+        : "Mọi hệ thống bên ngoài (Jira, Confluence, Bitbucket Cloud hoặc Server / Data Center, GitHub, lược đồ Oracle…) được nối ở trang Kết nối. Không có cũng được: AI làm trên máy này và nhờ người tạo PR."}</div>
+      <div class="form"><button class="btn primary" data-page="connections">Mở Kết nối</button></div></div>`);
 }
 
 const PERM_MODES = [
@@ -1435,8 +1588,6 @@ document.addEventListener("click", (e) => {
     return act(async () => { const r = await api("/api/setup/telegram/unbind", { method: "POST" }); toast(r.next); await pageSetup(); });
   }
   if (ds.telegramOff !== undefined) return act(async () => { const r = await api("/api/setup/telegram/off", { method: "POST" }); toast("Đã tắt Telegram"); if (r.warning) toast(r.warning, true); await pageSetup(); });
-  if (ds.saveJira !== undefined) return act(async () => { const r = await api("/api/setup/jira", { method: "POST", body: { base_url: conn("jira_url"), email: conn("jira_email"), token: conn("jira_token") } }); toast(`Jira OK: ${r.user || ""}`); await pageSetup(); });
-  if (ds.saveBitbucket !== undefined) return act(async () => { await api("/api/setup/bitbucket", { method: "POST", body: { email: conn("bb_email"), token: conn("bb_token"), workspace: conn("bb_workspace") } }); toast("Bitbucket OK"); await pageSetup(); });
   const pane = t.closest("[data-pane]");
   const key = pane?.dataset.pane;
   if (ds.merge && key) {
@@ -1583,6 +1734,8 @@ document.addEventListener("click", (e) => {
   if (ds.ruleApprove) return act(async () => { await api(`/api/rules/${ds.ruleApprove}/approve`, { method: "POST" }); await pageRules(); });
   if (ds.ruleDisable) return act(async () => { await api(`/api/rules/${ds.ruleDisable}/disable`, { method: "POST" }); await pageRules(); });
   if (ds.kb) return act(async () => { await api(`/api/kb/${ds.kb}/status`, { method: "POST", body: { status: ds.kbStatus } }); await pageKb(); });
+  if (ds.mcpTeam) return act(() => pageMcp(ds.mcpTeam));
+  if (Object.keys(ds).some((k) => k.startsWith("mcp"))) return mcpClick(ds);
   if (ds.addPerson !== undefined) return act(async () => {
     const p = (n) => ($(`[data-p="${n}"]`).value || "").trim();
     await api("/api/people", { method: "POST", body: { name: p("name"), email: p("email") || null, telegram_id: p("telegram_id") ? Number(p("telegram_id")) : null, roles: p("roles").split(/[\s,]+/).filter(Boolean) } });

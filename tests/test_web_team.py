@@ -94,7 +94,7 @@ def test_ac9_team_js_renders_review_acs() -> None:
     start = js.index("function reviewAcList(items)")
     body = js[start : js.index("\n}\n", start)]
     assert "AC kiểm bằng review" in body and "Cách kiểm" in body and "Đã kiểm" in body and "a.done" in body
-    card = js[js.index("function card(item)") : js.index("function renderPane(key)")]
+    card = js[js.index("function gateCard(item, key)") : js.index("function renderPane(key)")]
     assert "reviewAcList(p.review_acs)" in card
     pane = js[js.index("function renderPane(key)") :]
     assert 'reviewList(d.stage?.review) + reviewAcList(d.stage?.review_acs)' in pane

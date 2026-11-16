@@ -44,12 +44,17 @@ Phiên bản: 1 · Cập nhật: 2026-11-13 · Người viết: Lan
 ## 1. Phạm vi
 - Nâng hạn mức hoàn tiền mỗi ngày.
 
+## Thuật ngữ
+Không có từ mới.
+
 ## 2. Yêu cầu
 ### REQ-1: Hạn mức hoàn tiền mỗi ngày là 9
 Lấy từ mô tả epic.
+Nguồn: {key}
 
 ### REQ-2: Từ chối phải kèm lý do
 Lấy từ mô tả epic.
+Nguồn: {key}
 
 ## 3. Hiện trạng
 ### F-1: Hạn mức hiện là 5 lần mỗi ngày
@@ -100,6 +105,9 @@ Phiên bản: 1 · Cập nhật: 2026-11-13 · Người viết: Lan
 ## 1. Mục tiêu
 - Đáp ứng yêu cầu của epic {epic}.
 
+## Thuật ngữ
+Không có từ mới.
+
 ## 2. User stories
 ### US-1: Hoàn tiền trong hạn mức
 Là khách hàng, tôi muốn hoàn tiền nhiều lần hơn, để không phải chờ sang ngày.
@@ -120,7 +128,13 @@ Thay đổi: {epic}/F-1
 |---|---|---|
 | BR-1 | 5 lần | 9 lần |
 
+## Ngoài phạm vi
+Không có.
+
 ## 5. Phụ thuộc
+Không có.
+
+## Câu hỏi mở
 Không có.
 
 ## 6. Giả định
@@ -148,6 +162,11 @@ Hiện tại `create_refund` trả `{{"ok": false}}` khi `LimitService.check` t�
 Nguồn: src/shop/refund.py:10-15
 Truy vết: AC-1.2
 
+## Ảnh hưởng
+| Nơi bị chạm | Loại | Xử lý bởi |
+|---|---|---|
+| src/shop/refund.py:10-15 | caller | C-2 |
+
 ## 3. Mô hình dữ liệu
 Không đổi.
 
@@ -156,10 +175,22 @@ Không đổi.
 
 ## 5. Quyết định kỹ thuật
 ### D-1: Giữ hạn mức là hằng số trong code
-- Phương án: đưa vào cấu hình, hoặc giữ hằng số. Chọn giữ hằng số.
+- Phương án A: đưa vào cấu hình
+- Phương án B: giữ hằng số
+Chọn: B — chưa ai cần đổi lúc chạy
+Chọn bởi: Minh
+
+## Phi chức năng
+Không áp dụng vì chỉ đổi một hằng số và một trường trả về.
 
 ## 6. Kiểm thử
-Unit cho AC-1.1 và AC-1.2.
+| AC | Loại test | Mô tả |
+|---|---|---|
+| AC-1.1 | unit | lần hoàn thứ 9 được chấp nhận |
+| AC-1.2 | unit | lần thứ 10 bị từ chối kèm lý do |
+
+## Triển khai & rollback
+Không áp dụng vì không đổi dữ liệu.
 
 ## 7. Rủi ro
 Không có.
@@ -174,6 +205,9 @@ Không có.
 ## 9. Các bước làm
 1. Sửa hằng số (C-1)
 2. Thêm trường `reason` vào câu trả lời từ chối của `create_refund` (C-2)
+
+## Câu hỏi mở
+Không có.
 
 ## 10. Giả định
 - A-1: Không đổi cách đếm sau khi nâng hạn mức.

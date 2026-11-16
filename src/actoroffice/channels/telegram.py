@@ -157,6 +157,7 @@ class TelegramBridge:
         self.progress = LiveProgress(self)
         self.team = TeamCommands(self)
         self._hinted: set[int] = set()  # unregistered senders already told how to join
+        self._rejecting: dict[str, tuple[str, int | None]] = {}  # person → (gate card, thread) whose "why" they still owe
 
     # ---- lifecycle --------------------------------------------------------------------------------
 
@@ -264,6 +265,29 @@ class TelegramBridge:
             await self._on_conversation(data["conversation"])
         elif kind == "team.changed":
             await self.sync_dms()
+        elif kind == "doc.state":
+            await self._on_doc_state(data)
+
+    async def _on_doc_state(self, data: dict[str, Any]) -> None:
+        """An approved document no longer matches what it was written from: said in the ticket's own topic."""
+        try:
+            ticket = await self.office.tickets.get(int(data["ticket_id"]))
+        except (OfficeError, KeyError, ValueError):
+            return
+        thread = await self.topic_for(ticket.origin_conversation_id) if ticket.origin_conversation_id else None
+        if thread is None:
+            return
+        label = fmt.STATE_VI.get(str(data.get("state")), str(data.get("state")))
+        then = {"revise": "Giai đoạn viết tài liệu này được mở lại.", "reopen_gate": "Cổng duyệt được mở lại."}.get(
+            str(data.get("action")), "Người viết xem lại và cập nhật nếu cần."
+        )
+        await self.send(thread, f"⚠️ <b>{fmt.esc(ticket.key)}</b>: tài liệu <code>{fmt.esc(data.get('key'))}</code> đã duyệt hiện <b>{fmt.esc(label)}</b>. {then}")
+
+    def web_url(self, ticket_key: str = "") -> str:
+        """The ticket page on the web (the office listens on this machine only)."""
+        s = self.office.settings
+        host = "localhost" if s.web_host in ("127.0.0.1", "0.0.0.0", "::1", "") else s.web_host
+        return f"http://{host}:{s.web_port}/team" + (f"#{ticket_key}" if ticket_key else "")
 
     async def _on_message(self, m: dict[str, Any]) -> None:
         conv_id = m["conversation_id"]
@@ -420,7 +444,7 @@ class TelegramBridge:
             item = (await self.office.interactions.get(interaction_id)).model_dump()
         except OfficeError:
             return
-        text, rows = fmt.card(item)
+        text, rows = fmt.card(item, web=self.web_url(str((item.get("payload") or {}).get("ticket") or "")))
         if item["status"] != "pending":
             text, rows = text + f"\n\n<b>{fmt.esc(fmt.verdict(item))}</b>", []
         message_id = await self.send(thread, text, rows)
@@ -435,7 +459,7 @@ class TelegramBridge:
         )
         if not row:
             return
-        text, rows = fmt.card(item)
+        text, rows = fmt.card(item, web=self.web_url(str((item.get("payload") or {}).get("ticket") or "")))
         with contextlib.suppress(TelegramError):  # "message is not modified" when nothing changed
             if item.get("status") == "pending":  # e.g. one of two approvals came in: keep the buttons
                 await self._edit(row["message_id"], text, rows)
@@ -477,15 +501,66 @@ class TelegramBridge:
                     await self._refresh_card(item.model_dump())
                 elif who is None:
                     note, alert = "Bạn chưa được đăng ký: nhờ admin reply tin của bạn với /adduser Tên vai.", True
+                elif item.kind.value == "approve_stage" and item.payload.get("gate") != "knowledge":
+                    note, alert = await self._gate_button(item, choice, who, message.get("message_thread_id"))
                 else:
                     await self.office.answer(interaction_id, fmt.response_for(item.model_dump(), choice), by=who)
                     self.office.scheduler.kick()
         except Conflict:
             note = "Việc này đã được trả lời rồi."
         except (OfficeError, ValueError, IndexError, KeyError) as exc:
-            note, alert = f"Không thực hiện được: {exc}"[:190], True
+            note, alert = f"Không thực hiện được: {fmt.plain_error(exc)}"[:190], True
         with contextlib.suppress(TelegramError):
             await self.api.call("answerCallbackQuery", callback_query_id=cq["id"], text=note, show_alert=alert)
+
+    async def _gate_button(self, item: Any, choice: str, who: str, thread: int | None) -> tuple[str, bool]:
+        """👍 / 👎 on a stage gate card. 👍 never approves with defaults a card that needs choices (tasks to keep and
+        hand over, differences that need a reason): it points at the web. 👎 asks for the reason first."""
+        office = self.office
+        p = item.payload
+        ticket = await office.tickets.get(item.ticket_id)
+        roles = [str(r) for r in p.get("roles") or []]
+        if who != "user" and not await office.teams.can_act(who, ticket, roles):
+            return f"Cần vai {p.get('roles_label') or ', '.join(roles)} để trả lời thẻ này.", True
+        name = "Bạn" if who == "user" else (await office.teams.get_user(who)).name
+        if choice == "n":
+            self._rejecting[who] = (item.id, thread)
+            verb = "cho làm lại" if p.get("phase") == "submit" else "trả lại"
+            await self.send(thread, f"✍️ <b>{fmt.esc(name)}</b>: ghi lý do {verb} {fmt.esc(ticket.key)} · {fmt.esc(p.get('stage_title'))} trong một tin nhắn ở đây. /cancel để thôi.")
+            return "Ghi lý do trong topic này", False
+        left = None
+        if "doc_core" in p and p.get("phase") != "submit":
+            left = len(await office.docs.blocking(ticket, await office.stages.stage_def(ticket)))
+        reason = fmt.web_only_reason(p, left)
+        if reason:
+            await self.send(
+                thread,
+                f"🌐 <b>{fmt.esc(ticket.key)}</b> chưa duyệt được từ Telegram: {fmt.esc(reason)}.\nMở trên web: <code>{fmt.esc(self.web_url(ticket.key))}</code>"
+                + ("\nHoặc chấp nhận từng điểm: <code>/accept " + fmt.esc(ticket.key) + " &lt;mã điểm lệch&gt; &lt;lý do&gt;</code>" if left else ""),
+            )
+            return "Thẻ này cần chọn trên web (xem tin nhắn trong topic).", True
+        await office.answer(item.id, {"approved": True}, by=who)
+        office.scheduler.kick()
+        return "Đã gửi duyệt" if p.get("phase") == "submit" else "Đã duyệt", False
+
+    async def _accept_command(self, args: str, who: str, thread: int | None) -> None:
+        """/accept <ticket> <finding id> <reason>: own one open difference from Telegram (the id is on the card)."""
+        parts = args.split(maxsplit=2)
+        if len(parts) < 3:
+            await self.send(thread, "Cách dùng: <code>/accept AO-12 x1f0a9 lý do chấp nhận</code> (mã điểm lệch ghi trên thẻ duyệt).")
+            return
+        office = self.office
+        try:
+            ticket = await office.tickets.get(parts[0].upper())
+            found = [f for f in await office.docs.blocking(ticket, await office.stages.stage_def(ticket)) if f.id.startswith(parts[1])]
+            if len(found) != 1:
+                await self.send(thread, f"<i>{fmt.esc(ticket.key)} {'không có' if not found else 'có nhiều'} điểm lệch đang mở với mã <code>{fmt.esc(parts[1])}</code>.</i>")
+                return
+            await office.docs.accept(ticket, found[0].id, by=who, reason=parts[2])
+        except OfficeError as exc:
+            await self.send(thread, f"<i>Không chấp nhận được: {fmt.esc(fmt.plain_error(exc))}</i>")
+            return
+        await self.send(thread, f"☑ Đã chấp nhận điểm lệch ở {fmt.esc(found[0].item or found[0].doc)} của {fmt.esc(ticket.key)}: {fmt.esc(parts[2])}")
 
     async def _open_project_button(self, project_id: str, thread: int | None) -> str:
         project = await self.office.projects.get(project_id)
@@ -529,6 +604,13 @@ class TelegramBridge:
         if text.startswith("/"):
             command = text.split()[0].split("@")[0].lower()
             args = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
+            sender = await self.team.who(msg.get("from"))
+            if command == "/cancel" and sender and self._rejecting.pop(sender, None):
+                await self.send(thread, "Đã thôi, thẻ duyệt giữ nguyên.")
+                return
+            if command == "/accept" and sender:
+                await self._accept_command(args, sender, thread)
+                return
             if await self.team.command(command, args, msg, thread):
                 return
             if not await self.menus.command(command, thread):
@@ -546,9 +628,14 @@ class TelegramBridge:
                 self._hinted.add(sender)
                 await self.send(thread, f"<i>Bạn chưa được đăng ký (Telegram id <code>{sender}</code>): nhờ admin reply tin của bạn với /adduser Tên vai.</i>")
             return
+        owed = self._rejecting.get(who)
+        if owed and owed[1] == thread:  # the reason asked for after 👎
+            del self._rejecting[who]
+            await self._reject_gate(owed[0], text, who, thread)
+            return
         reply = msg.get("reply_to_message") or {}
         is_reply = reply and reply.get("message_id") != thread and not reply.get("forum_topic_created")
-        if is_reply and await self._answer_card(int(reply["message_id"]), text, who):
+        if is_reply and await self._answer_card(int(reply["message_id"]), text, who, thread):
             return
         conv_id = await self._conversation_of(thread)
         if conv_id is None:
@@ -564,7 +651,49 @@ class TelegramBridge:
             return
         self.office.scheduler.kick()
 
-    async def _answer_card(self, message_id: int, text: str, who: str = "user") -> bool:
+    async def _reject_gate(self, interaction_id: str, note: str, who: str, thread: int | None) -> None:
+        try:
+            item = await self.office.answer(interaction_id, {"approved": False, "note": note}, by=who)
+        except Conflict:
+            await self.send(thread, "<i>Thẻ này đã được trả lời rồi.</i>")
+            return
+        except OfficeError as exc:
+            await self.send(thread, f"<i>Không trả lại được: {fmt.esc(fmt.plain_error(exc))}</i>")
+            return
+        self.office.scheduler.kick()
+        verb = "Đã cho làm lại" if item.payload.get("phase") == "submit" else "Đã trả lại"
+        await self.send(thread, f"👎 {verb} {fmt.esc(item.payload.get('ticket'))}: <i>{fmt.esc(note[:300])}</i>")
+
+    async def _gate_reply(self, item: Any, text: str, who: str, thread: int | None) -> bool:
+        """A text reply to a stage gate card. "trả lại: …" sends the stage back; anything else is a remark or a
+        question on the ticket and leaves the card open. True: nothing more to do with the message."""
+        office = self.office
+        if item.payload.get("gate") == "knowledge" and re.search(r"\d", text):  # "bỏ 2, 5"
+            await office.answer(item.id, {"approved": False, "note": text}, by=who)
+            office.scheduler.kick()
+            return True
+        back = fmt.REJECT_RE.match(text)
+        if back:
+            await self._reject_gate(item.id, back.group(1).strip(), who, thread)
+            return True
+        ticket = await office.tickets.get(item.ticket_id)
+        held = await office.stages.waits_for_card(ticket)
+        await self.send(
+            thread,
+            f"💬 Đã ghi lời của bạn vào {fmt.esc(ticket.key)} như một bình luận; thẻ duyệt <b>chưa</b> bị trả lại"
+            + (", AI đọc bình luận sau khi thẻ được trả lời." if held else ".")
+            + " Muốn trả lại: bấm 👎 rồi ghi lý do, hoặc reply <code>trả lại: lý do</code>.",
+        )
+        conv_id = await self._conversation_of(thread)
+        conv = await office.chat.get(conv_id) if conv_id else None
+        if conv is not None and conv.ticket_id == ticket.id:
+            return False  # the ticket's own topic: the usual path posts it in the chat and on the ticket
+        name = "Owner" if who == "user" else (await office.teams.get_user(who)).name
+        await office.tickets.add_comment(ticket.id, text, author_kind="user", author_id=name)
+        office.scheduler.kick()
+        return True
+
+    async def _answer_card(self, message_id: int, text: str, who: str = "user", thread: int | None = None) -> bool:
         row = await self.office.db.fetchone(
             "SELECT interaction_id FROM telegram_cards WHERE chat_id = ? AND message_id = ?", (self.chat_id, message_id)
         )
@@ -579,14 +708,14 @@ class TelegramBridge:
                 if drop is None:
                     return False
                 await self.office.answer(item.id, {"approved": True, "drop": drop}, by=who)
-            elif item.kind.value == "approve_stage":  # a text reply to a gate card sends the stage back with that note
-                await self.office.answer(item.id, {"approved": False, "note": text}, by=who)
+            elif item.kind.value == "approve_stage":  # a remark or a question, unless it says "trả lại: …"
+                return await self._gate_reply(item, text, who, thread)
             else:
                 await self.office.answer(item.id, {"answer": text}, by=who)
         except Conflict:
             return False
         except OfficeError as exc:
-            await self.send(None, f"<i>Không trả lời được: {fmt.esc(exc)}</i>")
+            await self.send(thread, f"<i>Không trả lời được: {fmt.esc(fmt.plain_error(exc))}</i>")  # in the thread it came from
             return True
         self.office.scheduler.kick()
         return True

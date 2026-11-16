@@ -227,7 +227,7 @@ def test_metadata_holds_what_the_name_sets_held() -> None:
     assert names(activity="quiet") == {"plan_steps", "step_done"}
     assert names(effect="external") == {"jira_comment", "pr_create", "pr_reply", "repo_fetch"}
     assert names(untrusted=True) == {"source_get", "source_search"}
-    assert {t.name for t in catalog().values() if t.reads_source} == {"ticket_get", "doc_get", "jira_issue", "wiki_page"}
+    assert {t.name for t in catalog().values() if t.reads_source} == {"ticket_get", "doc_get", "jira_issue", "wiki_page", "code_read", "code_outline"}
     assert {t.name for t in catalog().values() if t.needs} == CONNECTED
     assert all(t.effect == ("read" if t.read_only else "write") for t in catalog().values() if t.effect != "external")
 

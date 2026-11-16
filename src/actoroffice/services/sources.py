@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from actoroffice.domain.errors import NotFound, OfficeError, PolicyDenied
 from actoroffice.domain.ids import utcnow
 from actoroffice.domain.sources import STATUS_LABEL, display, parse_refs
+from actoroffice.domain.stage import StageDef
 from actoroffice.domain.work import Comment, Ticket
 from actoroffice.store import Tx
 from actoroffice.tools.registry import tool_def
@@ -29,6 +30,7 @@ HEADING_BYTES = 4096
 ERROR_LIMIT = 300
 COMMENT_POSITION = 100_000  # people's comments come after the description's sources
 FILE_READ_TOOLS = {"Read", "NotebookRead"}
+DOC_READ_TOOL = "doc_get"  # what opens a document of a ticket: the basis of a pack stage is read with it
 TOKEN_SPLIT = re.compile(r"[\s'\"<>|;&()]+")
 # A shell command that prints a file's content (R4). Only one plain command counts: a chain, pipe, redirection or
 # substitution (`cat a; git add x`, `cat x > y`, `$(…)`) is not taken apart, so it never marks a file read.
@@ -233,6 +235,61 @@ class SourceService:
     async def unread_required(self, ticket: Ticket) -> list[str]:
         return [s["display"] for s in await self.list(ticket) if s["required"] and s["status"] == "unread"]
 
+    # ---- one stage attempt -------------------------------------------------------------------------------
+
+    async def stage_calls(self, stage_run_id: int) -> list[dict[str, Any]]:
+        """The fields of every finished tool call of the AI's own runs of one stage attempt, oldest first (the
+        reviewers' runs of that attempt are not the author's reading)."""
+        rows = await self.office.db.fetchall(
+            "SELECT e.activity_json FROM run_events e JOIN runs r ON r.id = e.run_id WHERE r.stage_run_id = ? AND r.purpose IS NULL "
+            "AND json_extract(e.activity_json, '$.status') = 'ok' ORDER BY e.id",
+            (stage_run_id,),
+        )
+        return [json.loads(r["activity_json"]).get("fields") or {} for r in rows]
+
+    async def basis(self, ticket: Ticket, stage: StageDef, stage_run_id: int) -> list[dict[str, Any]]:
+        """The documents a stage of a pack flow is written from, in the shape of `list()`: what the pack says its
+        outputs are based on (the ticket's own document first, else its parent's), and for a task the document of the
+        parent it was created from (the breakdown). None of them is stored as a source of the ticket: they follow from
+        the pack. One is read when the AI opened it with doc_get in a run of this stage attempt, or when the office
+        put all of it in the stage prompt."""
+        office = self.office
+        if not office.docs.applies(ticket):
+            return []
+        pack = office.docs.pack_of(ticket)
+        outputs = {o for out in stage.outputs for o in out.split("|")}
+        wanted = [base for out in sorted(outputs) if out in pack.doc_types for base in pack.doc_types[out].based_on if base not in outputs]
+        if not wanted:
+            return []
+        parent = await office.tickets.get(ticket.parent_id) if ticket.parent_id is not None else None
+        owners = [ticket] + ([parent] if parent is not None else [])
+        found: list[tuple[Ticket, Any]] = []
+        for name in dict.fromkeys(wanted):
+            for owner in owners:
+                doc = await office.tickets.get_document(owner.id, name)
+                if doc is not None:
+                    found.append((owner, doc))
+                    break
+        if parent is not None:
+            for name in [o for s in pack.flows.get(parent.stage_template or "", []) if s.spawn is not None for o in s.outputs]:
+                doc = await office.tickets.get_document(parent.id, name)
+                if doc is not None and (parent.id, name) not in {(o.id, d.key) for o, d in found}:
+                    found.append((parent, doc))
+        calls = [c for c in await self.stage_calls(stage_run_id) if c.get("tool") == DOC_READ_TOOL]
+        given = await office.doccontext.inlined(ticket, stage)
+        out = []
+        for owner, doc in found:
+            opened = any(str(c.get("key") or "") == doc.key and str(c.get("ticket") or ticket.key).upper() == owner.key.upper() for c in calls)
+            in_prompt = (owner.id, doc.key) in given
+            how = f'doc_get(key="{doc.key}")' if owner.id == ticket.id else f'doc_get(ticket="{owner.key}", key="{doc.key}")'
+            status = "read" if opened or in_prompt else "unread"
+            out.append({
+                "kind": "doc", "ref": f"{owner.key}/{doc.key}", "locator": "", "display": f"{owner.key}/{doc.key} [{how}]", "status": status,
+                "reason": "văn phòng đã đưa toàn bộ vào prompt" if in_prompt and not opened else None, "error": None, "required": True,
+                "title": None, "link": None, "label": STATUS_LABEL[status],
+            })  # fmt: skip
+        return out
+
     async def search_text(self, ticket: Ticket) -> str:
         """Words that say what the sources are about, for finding similar work: the titles of this team's tickets,
         file names and the first heading of a markdown file, URLs. Another team's ticket adds nothing."""
@@ -296,7 +353,7 @@ class SourceService:
 
 def _read(fields: dict[str, Any]) -> tuple[str, str]:
     """(kind, reference) of the document a recorded call read, as its tool says (`ToolDef.reads_source`): ("ticket",
-    "AO-3"), ("jira", "PAY-120"), ("page", "12345"). ("", "") for a call that read no such document."""
+    "AO-3"), ("jira", "PAY-120"), ("page", "12345"), ("file", "src/a.py"). ("", "") for a call that read no such document."""
     definition = tool_def(str(fields.get("tool") or ""))
     read = definition.reads_source(fields) if definition is not None and definition.reads_source is not None else None
     what, _, value = (read or "").partition(":")
@@ -318,6 +375,9 @@ def _matches(kind: str, ref: str, fields: dict[str, Any]) -> bool:
         paths: list[str] = []
         if tool in FILE_READ_TOOLS:
             paths.append(str(fields.get("path") or ""))
+        what, value = _read(fields)  # an office tool that returns the file's content or its outline (code_read, code_outline)
+        if what == "file":
+            paths.append(value)
         command = str(fields.get("command") or "")
         if FILE_READ_COMMAND.match(command) and not NOT_ONE_COMMAND.search(command):  # not `ls` / `git add` / `rm`
             paths += TOKEN_SPLIT.split(command)

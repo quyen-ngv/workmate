@@ -1,4 +1,4 @@
-"""The rules a machine can check: eight primitive types here, the concrete rules in the pack.
+"""The rules a machine can check: ten primitive types here, the concrete rules in the pack.
 
     run_rules(pack, docs, evidence=None, baseline=None, approved=None, only_docs=None) -> list[Finding]
 
@@ -17,7 +17,8 @@ A rule is skipped, not failed, when a document it needs is not in `docs`. Nothin
 Where a finding is reported: on the document a person has to edit. A `cover` finding ("REQ-2 has no AC") is reported
 on the covering document with the uncovered id as its item.
 
-`R-TRACE-VALID` is always on: an id in a `Truy vết:` / `Thay đổi:` line must exist.
+`R-TRACE-VALID` is always on: an id in a `Truy vết:` / `Thay đổi:` line must exist. A bare id of a kind the ticket's
+own documents cannot hold (a requirement cited in a task's design) is looked up in the other documents of the set.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from dataclasses import dataclass, field
 
 from .model import Approved, Baseline, Evidence, Finding, Item, MatchState, ParsedDoc, RuleDef, SourceRef, make_finding
 from .pack import StandardPack, split_selector
-from .trace import TraceGraph, doc_ticket, split_ref
+from .trace import TraceGraph, doc_ticket, holders_elsewhere, home_ticket, split_ref
 
 TRACE_VALID = "R-TRACE-VALID"
 
@@ -43,7 +44,7 @@ class Context:
     graph: TraceGraph = field(init=False)
 
     def __post_init__(self) -> None:
-        self.graph = TraceGraph(self.docs)
+        self.graph = TraceGraph(self.docs, self.pack)
 
     def keys_of(self, doctypes: set[str]) -> list[str]:
         return [key for key, doc in self.docs.items() if doc.doctype in doctypes or "*" in doctypes]
@@ -64,7 +65,7 @@ class Context:
         ticket, target = split_ref(ref)
         if ticket is None and self.docs[doc_key].item(target):
             return [(doc_key, target)]
-        ticket = doc_ticket(doc_key) if ticket is None else ticket
+        ticket = home_ticket(self.docs, self.pack, doc_key, target) if ticket is None else ticket
         return [(key, target) for key, doc in self.docs.items() if doc_ticket(key) == ticket and doc.item(target)]
 
 
@@ -115,7 +116,7 @@ def match_state(
     return MatchState.KHOP
 
 
-# --- the eight primitives --------------------------------------------------------------------------------------
+# --- the primitives --------------------------------------------------------------------------------------------
 
 
 def _template(rule_id: str, rule: RuleDef, ctx: Context) -> list[Finding]:
@@ -169,18 +170,51 @@ def _traces_to(rule_id: str, rule: RuleDef, ctx: Context) -> list[Finding]:
 
 
 def _evidence(rule_id: str, rule: RuleDef, ctx: Context) -> list[Finding]:
-    """The chosen items cite a source; every cited source (of any item) could be resolved."""
-    chosen = [(key, item) for key, doc in ctx.docs.items() for item in doc.items if item.kind in rule.kinds]
-    chosen += [pair for pair in ctx.select(rule.also) if pair[1].kind not in rule.kinds]
+    """The chosen items cite a source that can be opened; every cited source (of any item) could be resolved.
+
+    `kinds` always need one. The `also` selectors need one unless the item carries `unless_tag` (a component that does
+    not exist yet has nothing to cite). A source that is neither a path, a ticket key nor a URL ("theo trao đổi với
+    anh Nam") is not evidence: nobody can open it.
+    """
+    chosen = [(key, item, False) for key, doc in ctx.docs.items() for item in doc.items if item.kind in rule.kinds]
+    chosen += [(key, item, True) for key, item in ctx.select(rule.also) if item.kind not in rule.kinds]
     source = _kw(ctx, "source")
     findings = []
-    for key, item in chosen:
-        if item.sources or (rule.unless_tag and rule.unless_tag in item.tags):
+    for key, item, may_be_tagged in chosen:
+        exempt = bool(may_be_tagged and rule.unless_tag and rule.unless_tag in item.tags)
+        if exempt or any(s.kind != "other" for s in item.sources):
             continue
         fix = f'Thêm dòng "{source}: <đường dẫn:dòng | mã ticket | URL>" ngay dưới {item.id}'
-        if rule.unless_tag:
+        if may_be_tagged and rule.unless_tag:
             fix += f", hoặc gắn thẻ [{ctx.pack.syntax.tags[rule.unless_tag]}] nếu thành phần này chưa có"
-        findings.append(make_finding(rule_id, rule.severity, key, item.id, f"{key}: {item.id} ({_short(item.title)}) chưa trích nguồn. {fix}.", "no_source"))
+        if item.sources:
+            written = "; ".join(s.raw for s in item.sources)
+            message = (
+                f'{key}: nguồn "{_short(written)}" của {item.id} không phải đường dẫn, mã ticket hay URL nên không ai mở ra kiểm được. '
+                f"Ghi nội dung trao đổi đó vào ticket hoặc tài liệu rồi trích mã / đường dẫn của nó. {fix}."
+            )
+            findings.append(make_finding(rule_id, rule.severity, key, item.id, message, "not_openable"))
+        else:
+            findings.append(make_finding(rule_id, rule.severity, key, item.id, f"{key}: {item.id} ({_short(item.title)}) chưa trích nguồn. {fix}.", "no_source"))
+    # A source that is an item of the documents (`Nguồn: Q-2`: the BA said so in an answer) must be there, and a
+    # question must have its answer: an open question is not a source.
+    for key, doc in ctx.docs.items():
+        for item in doc.items:
+            for src in item.sources:
+                if src.kind != "item":
+                    continue
+                found = [ctx.docs[k].item(i) for k, i in ctx.targets(key, src.ref)]
+                if not found:
+                    # a bare id is of a kind this document holds, so it must be here; another ticket's may not be given
+                    why = _missing(ctx, key, src.ref) or ("" if "/" in src.ref else f"không có mục {src.ref} nào trong {key}")
+                    if not why:
+                        continue
+                elif any(t and ctx.pack.item_kinds[t.kind].blocks_gate and not t.answer for t in found):
+                    why = f'{src.ref} chưa có dòng "{_kw(ctx, "answer")}:" nên chưa phải là nguồn'
+                else:
+                    continue
+                message = f'{key}: nguồn "{src.raw}" của {item.id} không dùng được: {why}. Sửa dòng {source} cho đúng mục có thật và đã được trả lời.'
+                findings.append(make_finding(rule_id, rule.severity, key, item.id, message, f"item:{src.raw}"))
     for record in ctx.evidence or []:
         if record.error and record.doc in ctx.docs:
             message = f'{record.doc}: nguồn "{record.source}" của {record.item} không lấy được ({record.error}). Sửa dòng {source} cho đúng đường dẫn, số dòng hoặc mã có thật.'
@@ -189,15 +223,20 @@ def _evidence(rule_id: str, rule: RuleDef, ctx: Context) -> list[Finding]:
 
 
 def _fresh(rule_id: str, rule: RuleDef, ctx: Context) -> list[Finding]:
-    """What was pinned still equals what is at the source."""
+    """What was pinned still equals what is at the source.
+
+    The finding is about one change: its id carries the hash of what is at the source now, so accepting it does not
+    cover the next, different change of the same place.
+    """
     findings = []
     for record in ctx.evidence or []:
         if record.doc in ctx.docs and _stale(record, set(rule.providers)):
+            now = record.current_hash or ""
             message = (
-                f'{record.doc}: nguồn "{record.source}" của {record.item} đã đổi so với lúc trích. '
+                f'{record.doc}: nguồn "{record.source}" của {record.item} đã đổi so với lúc trích (nội dung hiện tại: {now[:8]}). '
                 f"Đọc lại đoạn đó, sửa {record.item} nếu mô tả không còn đúng, rồi lưu lại tài liệu để ghim nội dung mới."
             )
-            findings.append(make_finding(rule_id, rule.severity, record.doc, record.item, message, record.source))
+            findings.append(make_finding(rule_id, rule.severity, record.doc, record.item, message, f"{record.source}@{now}"))
     return findings
 
 
@@ -249,6 +288,46 @@ def _declared_change(rule_id: str, rule: RuleDef, ctx: Context) -> list[Finding]
     return findings
 
 
+def _min_items(rule_id: str, rule: RuleDef, ctx: Context) -> list[Finding]:
+    """A document holds at least `min` items of a kind: without it every other rule passes on a document whose items
+    the parser could not read (written in a table, as checkboxes) or that has none."""
+    wanted = [(doctype, [kind]) for doctype, kind in map(split_selector, rule.each) if kind]
+    wanted += [(doctype, list(rule.kinds)) for doctype in rule.docs if rule.kinds]
+    findings = []
+    for doctype, kinds in wanted:
+        for key in ctx.keys_of({doctype}):
+            have = sum(1 for item in ctx.docs[key].items if item.kind in kinds)
+            if have >= rule.min:
+                continue
+            names, first = "/".join(kinds), f"{kinds[0]}-1"
+            message = (
+                f"{key}: có {have} mục {names}, cần ít nhất {rule.min}. Viết mỗi mục thành một heading riêng "
+                f'("### {first}: …") hoặc một dòng danh sách ("- {first}: …"); mục nằm trong bảng hay sau ô checkbox thì máy không đọc được.'
+            )
+            findings.append(make_finding(rule_id, rule.severity, key, None, message, names))
+    return findings
+
+
+def _has_line(rule_id: str, rule: RuleDef, ctx: Context) -> list[Finding]:
+    """Items of these kinds have at least `min` lines of one sort declared in `syntax.lines` (the options of a
+    decision, who chose). `docs` narrows it to some document types."""
+    words = ctx.pack.syntax.lines.get(rule.line or "", [])
+    if not words:
+        return []
+    findings = []
+    for key in ctx.keys_of(set(rule.docs or ["*"])):
+        for item in ctx.docs[key].items:
+            have = len(item.lines.get(rule.line or "", []))
+            if item.kind not in rule.kinds or have >= rule.min:
+                continue
+            message = (
+                f'{key}: {item.id} ({_short(item.title)}) có {have} dòng "{words[0]}: …", cần ít nhất {rule.min}. '
+                f'Thêm ngay dưới {item.id}, mỗi dòng bắt đầu bằng "{words[0]}" và có dấu hai chấm.'
+            )
+            findings.append(make_finding(rule_id, rule.severity, key, item.id, message, rule.line or ""))
+    return findings
+
+
 PRIMITIVES: dict[str, Primitive] = {
     "template": _template,
     "cover": _cover,
@@ -258,6 +337,8 @@ PRIMITIVES: dict[str, Primitive] = {
     "baseline": _baseline,
     "answered": _answered,
     "declared_change": _declared_change,
+    "min_items": _min_items,
+    "has_line": _has_line,
 }
 
 
@@ -283,6 +364,16 @@ def _missing(ctx: Context, doc_key: str, ref: str) -> str | None:
         return f"bộ chuẩn không có loại mục nào mang tiền tố của {target}"
     if ctx.targets(doc_key, ref):
         return None
+    if ticket is None:
+        elsewhere = holders_elsewhere(ctx.docs, ctx.pack, doc_key, target)
+        if elsewhere is not None:  # the ticket's own documents cannot hold this kind: it is another ticket's item
+            if not elsewhere:
+                return None
+            tickets = list(dict.fromkeys(doc_ticket(key) for key in elsewhere))
+            having = [t for t in tickets if any(doc_ticket(key) == t and ctx.docs[key].item(target) for key in elsewhere)]
+            if having:
+                return f"{target} có ở nhiều ticket ({', '.join(having)}): viết rõ <mã ticket>/{target}"
+            return f"không có mục {target} nào trong {', '.join(elsewhere)} (mục của ticket khác thì viết {tickets[0]}/{target})"
     ticket = doc_ticket(doc_key) if ticket is None else ticket
     given = {doc.doctype for key, doc in ctx.docs.items() if doc_ticket(key) == ticket}
     if not given or not set(ctx.pack.doc_types_with(kind)) <= given:

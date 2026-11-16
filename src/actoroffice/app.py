@@ -42,6 +42,7 @@ from actoroffice.services.chat import ChatService
 from actoroffice.services.codeintel import CodeIntelService
 from actoroffice.services.connections import ConnectionService
 from actoroffice.services.crosscheck import CrossCheckService
+from actoroffice.services.doccontext import DocContext
 from actoroffice.services.docs import DocService
 from actoroffice.services.infra import InfraService
 from actoroffice.services.interactions import InteractionService
@@ -125,6 +126,7 @@ class Office:
         self.docs = DocService(self)  # Doc Core: documents checked against the standard pack, sources pinned
         self.teams.pack_of = self.docs.pack_of  # a ticket's flows and gates come from the pack its layers give
         self.crosscheck = CrossCheckService(self)  # the AI comparison of documents that must agree
+        self.doccontext = DocContext(self)  # what the office knows around a ticket's documents: context, impact, memory
         self.mcp_tokens = McpTokenService(self)  # personal tokens of the read-only MCP server for IDEs (web/mcp_api.py)
         self.gates: dict[str, Any] = {}  # run id → OfficeGate of a running ticket run (tools adjust it live)
         self.runtime: AgentRuntime = runtime or RuntimeRouter(

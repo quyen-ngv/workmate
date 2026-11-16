@@ -21,6 +21,14 @@ const state = {
   side: localStorage.getItem("ao.side") || "files",
   details: {}, // key → {ticket, stage, detail}
   drafts: {}, // proposal card id → the person's choices per proposed ticket (kept across re-renders)
+  cardDrafts: {}, // any other card id → what the person entered on it (note, reasons, tasks, remarks, open parts)
+  steer: {}, // ticket key → text being typed in the composer
+  tl: {}, // ticket key → "all" | "history" (what the timeline shows)
+  docAlerts: {}, // ticket key → approved documents that just stopped matching (bus event doc.state)
+  // "Tôi là …": who the web acts as. A convenience on a single shared login, NOT authentication: anyone holding the
+  // office's login may pick anyone. It makes the audit trail and the role checks honest between colleagues.
+  me: localStorage.getItem("ao.me") || "user",
+  people: [], // users of /api/people (for the picker and for names)
   acts: {}, // run id → activities
   runTicket: {}, // run id → ticket key
 };
@@ -31,7 +39,8 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, { credentials: "same-origin", headers: HEADERS, ...opts, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const headers = { ...HEADERS, "X-Office-User": encodeURIComponent(state.me || "user") };
+  const res = await fetch(path, { credentials: "same-origin", headers, ...opts, body: opts.body ? JSON.stringify(opts.body) : undefined });
   if (res.status === 401) { location.href = "/"; throw new Error("not signed in"); }
   const text = await res.text();
   const data = text && (res.headers.get("content-type") || "").includes("json") ? JSON.parse(text) : text;
@@ -69,20 +78,126 @@ function tokens(u) {
   return ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"].reduce((n, k) => n + (u[k] || 0), 0);
 }
 
-function md(text) {
-  // Small, safe markdown: headings, lists, code fences, bold, inline code, tables as text.
+const fmtTime = (ts) => (ts ? new Date(ts).toLocaleString("vi-VN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "");
+const meName = () => (state.me === "user" ? "Owner" : state.people.find((u) => u.id === state.me)?.name || state.me);
+// A server message for a person: no finding hashes ("[x1f0a9c2] ") in it.
+const plainError = (text) => String(text || "Không thực hiện được").replace(/\[[0-9a-fx]{6,}\]\s*/g, "");
+
+// ---- markdown: a small, safe renderer for the office's documents (no library) -----------------------------------------
+// Every piece of text goes through esc(); the only tags written are the ones built here. Links: http/https only.
+
+const MD_ITEM = /^\s*(?:\*\*|__)?([A-Z]{1,6}-\d+(?:\.\d+)*)(?![\w-])/; // an item id at the start of a heading or a list line
+const MD_REF = /^(?:([A-Z][A-Z0-9]*-\d+)\/)?([A-Z]{1,6}-\d+(?:\.\d+)*)$/; // "REQ-1", "AO-4/REQ-2"
+const MD_LIST = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+
+function mdInline(raw) {
+  const keep = [];
+  const stash = (html) => { keep.push(html); return `\u0000${keep.length - 1}\u0000`; };
+  let s = String(raw).replace(/`([^`]+)`/g, (_, c) => stash(`<code>${esc(c)}</code>`));
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, t, u) => stash(`<a href="${esc(u)}" target="_blank" rel="noreferrer noopener">${esc(t)}</a>`));
+  s = s.replace(/(^|[\s(])(https?:\/\/[^\s<>"')]+)/g, (_, pre, u) => pre + stash(`<a href="${esc(u)}" target="_blank" rel="noreferrer noopener">${esc(u)}</a>`));
+  s = esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/__(.+?)__/g, "<b>$1</b>")
+    .replace(/(^|[^\w*])\*([^*\s][^*]*?)\*(?!\w)/g, "$1<i>$2</i>").replace(/(^|[^\w])_([^_\s][^_]*?)_(?!\w)/g, "$1<i>$2</i>");
+  return s.replace(/\u0000(\d+)\u0000/g, (_, n) => keep[Number(n)] || "");
+}
+
+// "Truy vết: AC-1.1, AO-4/REQ-2" → links to the items; "Nguồn: repo:path:10-20" → buttons that open the source viewer.
+function mdSpecial(raw, ctx) {
+  const m = /^\s*(?:[-*]\s+)?(Truy vết|Thay đổi|Nguồn)\s*:\s*(.+)$/.exec(raw);
+  if (!m) return null;
+  const parts = m[2].split(/[,;]/).map((x) => x.trim()).filter(Boolean).map((token) => {
+    if (m[1] !== "Nguồn") {
+      const ref = MD_REF.exec(token);
+      return ref ? `<a href="#" class="idref" data-goto="${esc(ref[2])}" data-goto-ticket="${esc(ref[1] || "")}" data-goto-from="${esc(ctx.key || "")}">${esc(token)}</a>` : mdInline(token);
+    }
+    if (/^https?:\/\//.test(token) || !ctx.key || /\s/.test(token)) return mdInline(token);
+    const loc = /^(.*?)(?::(\d+)(?:-(\d+))?|#L(\d+)(?:-L?(\d+))?)?$/.exec(token);
+    const from = loc[2] || loc[4];
+    const to = loc[3] || loc[5];
+    const path = /^[\w.-]+:[^\\/]/.test(loc[1]) ? loc[1].slice(loc[1].indexOf(":") + 1) : loc[1]; // "repo:path" → path
+    if (!/[\\/.]/.test(path)) return mdInline(token); // a ticket key or a word, not a file
+    return `<a href="#" class="src-btn" data-src-file="${esc(path)}" data-src-key="${esc(ctx.key)}" data-src-loc="${from ? esc(`:${from}${to ? `-${to}` : ""}`) : ""}" title="Mở file ở đúng dòng">📄 ${esc(token)}</a>`;
+  });
+  return `<span class="md-key">${esc(m[1])}:</span> ${parts.join(", ")}`;
+}
+
+// ctx.key: the ticket the document belongs to (needed by "Nguồn" buttons and by links to items of another ticket).
+function md(text, ctx = {}) {
+  const lines = String(text || "").replace(/\u0000/g, "").split("\n");
   const out = [];
-  let code = false;
-  for (const raw of String(text || "").split("\n")) {
-    if (raw.trim().startsWith("```")) { out.push(code ? "</pre>" : "<pre>"); code = !code; continue; }
-    if (code) { out.push(esc(raw)); continue; }
-    let line = esc(raw).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
-    const h = line.match(/^(#{1,4})\s+(.*)/);
-    if (h) out.push(`<h${h[1].length}>${h[2]}</h${h[1].length}>`);
-    else if (/^\s*[-*]\s+/.test(line)) out.push(`<li>${line.replace(/^\s*[-*]\s+/, "")}</li>`);
-    else if (line.trim()) out.push(`<p>${line}</p>`);
+  const rich = (raw) => mdSpecial(raw, ctx) ?? mdInline(raw);
+  const anchor = (raw) => { const m = MD_ITEM.exec(raw); return m ? ` data-anchor="${esc(m[1])}"` : ""; };
+  const indent = (l) => l.match(/^\s*/)[0].replace(/\t/g, "    ").length;
+  const isBlock = (l) => /^\s*```/.test(l) || /^#{1,6}\s/.test(l) || /^\s*\|/.test(l) || MD_LIST.test(l);
+  let i = 0;
+
+  function list(start) {
+    const first = MD_LIST.exec(lines[start]);
+    const base = indent(lines[start]);
+    const ordered = /\d/.test(first[2]);
+    let html = ordered ? `<ol start="${parseInt(first[2], 10)}">` : "<ul>";
+    let at = start;
+    while (at < lines.length) {
+      const m = MD_LIST.exec(lines[at]);
+      if (!m || indent(lines[at]) !== base || /\d/.test(m[2]) !== ordered) break;
+      const box = /^\[( |x|X)\]\s+(.*)$/.exec(m[3]);
+      let body = box ? `${box[1] === " " ? "☐" : "☑"} ${rich(box[2])}` : rich(m[3]);
+      const mark = anchor(m[3]);
+      at++;
+      while (at < lines.length) {
+        const l = lines[at];
+        if (!l.trim()) {
+          let next = at + 1;
+          while (next < lines.length && !lines[next].trim()) next++;
+          const more = next < lines.length && (indent(lines[next]) > base || (MD_LIST.test(lines[next]) && indent(lines[next]) === base));
+          if (!more) break;
+          at = next;
+          if (indent(lines[at]) <= base) break; // the next item of this list, after a blank line
+          continue;
+        }
+        const sub = MD_LIST.exec(l);
+        if (sub && indent(l) > base) { const [inner, next] = list(at); body += inner; at = next; continue; }
+        if (sub || indent(l) <= base) break;
+        body += `<br>${rich(l.trim())}`;
+        at++;
+      }
+      html += `<li${mark}>${body}</li>`;
+    }
+    return [html + (ordered ? "</ol>" : "</ul>"), at];
   }
-  if (code) out.push("</pre>");
+
+  while (i < lines.length) {
+    const raw = lines[i];
+    if (/^\s*```/.test(raw)) {
+      const code = [];
+      for (i++; i < lines.length && !/^\s*```/.test(lines[i]); i++) code.push(lines[i]);
+      i++;
+      out.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`);
+    } else if (!raw.trim()) {
+      i++;
+    } else if (/^(#{1,6})\s+/.test(raw)) {
+      const h = /^(#{1,6})\s+(.*?)\s*#*$/.exec(raw);
+      out.push(`<h${h[1].length}${anchor(h[2])}>${mdInline(h[2])}</h${h[1].length}>`);
+      i++;
+    } else if (/^\s*\|/.test(raw)) {
+      const rows = [];
+      for (; i < lines.length && /^\s*\|/.test(lines[i]); i++) rows.push(lines[i].trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim()));
+      const head = rows.length > 1 && rows[1].every((c) => /^:?-{2,}:?$/.test(c)) ? rows[0] : null;
+      const body = head ? rows.slice(2) : rows;
+      out.push(`<table class="md">${head ? `<thead><tr>${head.map((c) => `<th>${mdInline(c)}</th>`).join("")}</tr></thead>` : ""}<tbody>${body.map((r) => `<tr>${r.map((c) => `<td>${mdInline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`);
+    } else if (MD_LIST.test(raw)) {
+      const [html, next] = list(i);
+      out.push(html);
+      i = next;
+    } else if (/^\s*(-{3,}|\*{3,})\s*$/.test(raw)) {
+      out.push("<hr>");
+      i++;
+    } else {
+      const para = [];
+      for (; i < lines.length && lines[i].trim() && !(para.length && isBlock(lines[i])); i++) para.push(rich(lines[i]));
+      out.push(`<p>${para.join("<br>")}</p>`);
+    }
+  }
   return out.join("\n");
 }
 
@@ -96,9 +211,14 @@ function save() {
 // ---- data ----------------------------------------------------------------------------------------------------
 
 async function loadBoard() {
-  state.board = await api("/api/board?viewer=user");
+  state.board = await api(`/api/board?viewer=${encodeURIComponent(state.me)}`);
   renderSidebar();
   renderTabs();
+}
+
+async function loadPeople() {
+  state.people = ((await api("/api/people")).users || []).filter((u) => u.active !== false);
+  if (state.me !== "user" && !state.people.some((u) => u.id === state.me)) { state.me = "user"; localStorage.setItem("ao.me", "user"); }
 }
 
 // One page of done/cancelled tickets (offset 0 starts over).
@@ -139,6 +259,9 @@ async function loadTicket(key) {
     return;
   }
   state.details[key] = { detail, stage };
+  // a card that was answered or is gone: what was typed on it is dropped
+  const open = new Set((detail.pending || []).map((p) => p.id));
+  for (const [id, draft] of Object.entries(state.cardDrafts)) if (draft.ticket === key && !open.has(id)) delete state.cardDrafts[id];
   const runs = (detail.runs || []).slice(0, 4).reverse();
   for (const run of runs) {
     state.runTicket[run.id] = key;
@@ -208,6 +331,8 @@ function renderSidebar() {
       ${closedSection}
     </div>
     <div class="side-foot">
+      <label class="me" title="Mọi thao tác trên web được ghi theo người này, và thẻ duyệt chỉ mở cho đúng vai. Đây là tiện ích trên một đăng nhập chung, không phải xác thực.">Tôi là
+        <select data-me aria-label="Tôi là">${[{ id: "user", name: "Owner (chủ máy)" }, ...state.people.filter((u) => u.id !== "user")].map((u) => `<option value="${esc(u.id)}" ${u.id === state.me ? "selected" : ""}>${esc(u.name)}</option>`).join("")}</select></label>
       <button data-page="inbox">Cần tôi ${needs_you ? `(${needs_you})` : ""}</button>
       <button data-page="rules">Rules</button><button data-page="kb">Kiến thức</button><button data-page="people">Người</button><button data-page="map">Bản đồ</button><button data-page="connections">Kết nối</button><button data-page="standard">Chuẩn tài liệu</button><button data-page="setup">Cài đặt</button>
     </div>`;
@@ -240,8 +365,14 @@ function paneKeys() {
 
 function renderPanes() {
   const keys = paneKeys();
-  $("#panes").innerHTML = keys.length ? keys.map((k) => `<section class="pane ${k === state.focus ? "focus" : ""}" data-pane="${esc(k)}"></section>`).join("")
-    : `<div class="welcome" id="welcome"><div class="empty">Chọn một việc bên trái, hoặc bấm + để giao việc mới cho AI.</div></div>`;
+  const have = [...document.querySelectorAll("#panes > .pane")];
+  if (keys.length && have.map((p) => p.dataset.pane).join("|") === keys.join("|")) {
+    // same panes: keep the elements, so the field being typed in keeps its focus (renderPane restores it)
+    for (const p of have) p.classList.toggle("focus", p.dataset.pane === state.focus);
+  } else {
+    $("#panes").innerHTML = keys.length ? keys.map((k) => `<section class="pane ${k === state.focus ? "focus" : ""}" data-pane="${esc(k)}"></section>`).join("")
+      : `<div class="welcome" id="welcome"><div class="empty">Chọn một việc bên trái, hoặc bấm + để giao việc mới cho AI.</div></div>`;
+  }
   if (!keys.length) act(renderWelcome);
   for (const key of keys) renderPane(key);
   renderSide();
@@ -259,8 +390,23 @@ function timeline(key) {
       else { if (a.call_id) byCall.set(a.call_id, items.length); items.push(a); }
     }
   }
-  return items;
+  // "Lịch sử": the ticket's comments (approvals, submissions, accepted differences, system notices, what people
+  // wrote) in their place in time between the AI's activity.
+  const notes = (d.detail.comments || []).map((c) => ({ kind: "comment", by: c.author_kind, author: c.author_id, title: c.body, at: c.created_at }));
+  if (state.tl[key] === "history") return notes;
+  const time = (x) => Date.parse(x.at || "") || 0;
+  const merged = [];
+  let n = 0;
+  let last = 0;
+  for (const a of items) {
+    last = time(a) || last;
+    while (n < notes.length && time(notes[n]) <= last) merged.push(notes[n++]);
+    merged.push(a);
+  }
+  return [...merged, ...notes.slice(n)];
 }
+
+const COMMENT_ICON = { system: "▪", user: "💬", steer: "🧭", change: "⚠", actor: "🤖" };
 
 function renderTimeline(items) {
   const out = [];
@@ -283,6 +429,10 @@ function renderTimeline(items) {
   return out.join("");
 
   function line(a) {
+    if (a.kind === "comment") {
+      const who = a.by === "system" ? "" : a.author === "user" ? "Owner" : a.author || "";
+      return `<div class="ev comment ${esc(a.by)}"><span class="ic">${COMMENT_ICON[a.by] || "💬"}</span><span class="tx"><span class="when">${esc(fmtTime(a.at))}${who ? ` · ${esc(who)}` : ""}</span> ${esc(a.title)}</span></div>`;
+    }
     const cls = [a.kind, a.status === "running" ? "running" : "", a.status === "error" ? "error" : ""].join(" ");
     return `<div class="ev ${cls}"><span class="ic">${a.status === "running" ? "◌" : ICON[a.kind] || "·"}</span><span class="tx">${esc(a.title)}</span></div>`;
   }
@@ -337,59 +487,180 @@ const DOC_STATE = { khop: "good", lech: "warn", cu: "warn", loi: "bad", chua_kie
 const docChip = (d) => `<span class="chip ${DOC_STATE[d.state] || ""}" title="${esc(d.key)}">${esc(d.key)}: ${esc(d.label)}</span>`;
 const findingWhere = (f) => `${esc(f.rule)} · ${esc(f.item || f.doc)}`;
 
-function docCoreBlock(p) {
-  const v = p.doc_core;
-  if (!v) return "";
-  const states = Object.entries(v.states || {}).map(([key, s]) => docChip({ key, ...s })).join(" ");
-  const open = (v.open || []).map((f) => `<li class="finding open"><b>${findingWhere(f)}</b> ${esc(f.message)}
-      <input type="text" data-accept="${esc(f.id)}" placeholder="Lý do chấp nhận (để trống = chưa chấp nhận)" aria-label="Lý do chấp nhận ${esc(f.rule)}"></li>`).join("");
-  const accepted = (v.accepted || []).map((f) => `<li class="finding"><b>${findingWhere(f)}</b> ${esc(f.message)}<div class="reply">☑ đã chấp nhận: ${esc(f.reason || "")}</div></li>`).join("");
-  const warnings = (v.warnings || []).map((f) => `<li class="finding"><b>${findingWhere(f)}</b> ${esc(f.message)}</li>`).join("");
-  const trace = (v.trace || []).map((t) => `<tr><td><code>${esc(t.doc)}</code></td><td><b>${esc(t.id)}</b> ${esc(t.title || "")}</td><td>${esc((t.traces || []).join(", "))}</td></tr>`).join("");
-  const changes = (v.declared_changes || []).map((c) => `<li><code>${esc(c.doc)}</code> <b>${esc(c.id)}</b> ${esc(c.title || "")} — đổi so với <b>${esc(c.changes)}</b>${c.old ? `<pre>${esc(c.old)}</pre>` : ""}</li>`).join("");
-  const assumptions = (v.assumptions || []).map((a) => `<li><code>${esc(a.doc)}</code> <b>${esc(a.id)}</b> ${esc(a.text)}</li>`).join("");
-  const baseline = Object.entries(v.baseline || {}).map(([doc, from]) => `<li><code>${esc(doc)}</code> viết theo ${esc(Object.entries(from).map(([k, r]) => `${k} bản ${r}`).join(", ") || "—")}</li>`).join("");
-  const part = (title, body, open_) => body ? `<details class="doc-part"${open_ ? " open" : ""}><summary>${title}</summary>${body}</details>` : "";
-  return `<div class="doc-core" data-doccore>
-    ${states ? `<div class="doc-states">${states}</div>` : ""}
-    ${part(`⚠ Điểm lệch chưa xử lý (${(v.open || []).length}): sửa, hoặc chấp nhận kèm lý do`, open ? `<ul>${open}</ul>` : "", true)}
-    ${part(`Cảnh báo (${(v.warnings || []).length})`, warnings ? `<ul>${warnings}</ul>` : "")}
-    ${part(`Đã chấp nhận (${(v.accepted || []).length})`, accepted ? `<ul>${accepted}</ul>` : "")}
-    ${part(`Thay đổi so với hiện trạng (${(v.declared_changes || []).length})`, changes ? `<ul>${changes}</ul>` : "", true)}
-    ${part(`Giả định cần xác nhận (${(v.assumptions || []).length})`, assumptions ? `<ul>${assumptions}</ul>` : "", true)}
-    ${part(`Truy vết (${(v.trace || []).length})`, trace ? `<table class="trace"><tr><th>Tài liệu</th><th>Mục</th><th>Truy vết tới</th></tr>${trace}</table>` : "")}
-    ${part("Viết dựa trên", baseline ? `<ul>${baseline}</ul>` : "")}
-    ${spawnBlock(p)}</div>`;
+// What a person entered on a card: kept here, so a re-render (any live event) changes nothing they chose. Dropped when
+// the card is answered or gone (loadTicket).
+function cardDraft(id, key) {
+  return state.cardDrafts[id] ||= { ticket: key, note: "", accept: {}, tasks: {}, comments: {}, cm: {}, open: {}, error: "" };
 }
 
+const pendingItem = (key, id) => (state.details[key]?.detail.pending || []).find((x) => x.id === id);
+
+// A small 💬 on a row: one line of feedback on that very item, sent with 👎 (or kept with 👍).
+function rowRemark(draft, doc, item, locked) {
+  if (locked) return { btn: "", box: "" };
+  const k = `${doc}|${item}`;
+  const on = draft.cm[k] || draft.comments[k];
+  return {
+    btn: `<button class="cm ${on ? "on" : ""}" data-cm="${esc(k)}" title="Góp ý riêng cho ${esc(item)}">💬</button>`,
+    box: on ? `<input type="text" class="cm-box" data-d="comment" data-di="${esc(k)}" value="${esc(draft.comments[k] || "")}" placeholder="Góp ý cho ${esc(item)}…" aria-label="Góp ý cho ${esc(item)}">` : "",
+  };
+}
+
+// opts.readonly: the author's card (submit phase) — differences are shown, the approver decides.
+// opts.locked: the person looking may not answer — nothing to type.
+function docCoreBlock(p, draft, opts) {
+  const v = p.doc_core;
+  if (!v) return "";
+  const fixed = opts.readonly || opts.locked;
+  const states = Object.entries(v.states || {}).map(([key, s]) => docChip({ key, ...s })).join(" ");
+  const open = (v.open || []).map((f) => {
+    const r = rowRemark(draft, f.doc, f.item || f.rule, fixed);
+    return `<li class="finding open"><b>${findingWhere(f)}</b> ${esc(f.message)} ${r.btn}
+      ${fixed ? "" : `<input type="text" data-d="accept" data-di="${esc(f.id)}" value="${esc(draft.accept[f.id] || "")}" placeholder="Lý do chấp nhận (để trống = chưa chấp nhận)" aria-label="Lý do chấp nhận ${esc(f.rule)}">`}${r.box}</li>`;
+  }).join("");
+  const accepted = (v.accepted || []).map((f) => `<li class="finding"><b>${findingWhere(f)}</b> ${esc(f.message)}<div class="reply">☑ đã chấp nhận: ${esc(f.reason || "")}</div></li>`).join("");
+  const warnings = (v.warnings || []).map((f) => `<li class="finding"><b>${findingWhere(f)}</b> ${esc(f.message)}</li>`).join("");
+  const trace = (v.trace || []).map((t) => {
+    const isTask = p.spawn && !opts.readonly && (v.tasks || []).some((x) => x.id === t.id); // its 💬 is on the task row below
+    const r = rowRemark(draft, t.doc, t.id, fixed || isTask);
+    return `<tr><td><code>${esc(t.doc)}</code></td><td><b>${esc(t.id)}</b> ${esc(t.title || "")}${r.box}</td><td>${esc((t.traces || []).join(", "))}</td><td>${r.btn}</td></tr>`;
+  }).join("");
+  const changes = (v.declared_changes || []).map((c) => {
+    const r = rowRemark(draft, c.doc, c.id, fixed);
+    return `<li><code>${esc(c.doc)}</code> <b>${esc(c.id)}</b> ${esc(c.title || "")} — đổi so với <b>${esc(c.changes)}</b> ${r.btn}${c.old ? `<pre>${esc(c.old)}</pre>` : ""}${r.box}</li>`;
+  }).join("");
+  const assumptions = (v.assumptions || []).map((a) => {
+    const r = rowRemark(draft, a.doc, a.id, fixed);
+    return `<li><code>${esc(a.doc)}</code> <b>${esc(a.id)}</b> ${esc(a.text)} ${r.btn}${r.box}</li>`;
+  }).join("");
+  const baseline = Object.entries(v.baseline || {}).map(([doc, from]) => `<li><code>${esc(doc)}</code> viết theo ${esc(Object.entries(from).map(([k, r]) => `${k} bản ${r}`).join(", ") || "—")}</li>`).join("");
+  const part = (name, title, body, open_) => body ? `<details class="doc-part" data-part="${name}"${draft.open[name] ?? open_ ? " open" : ""}><summary>${title}</summary>${body}</details>` : "";
+  const n = (v.open || []).length;
+  const unchecked = v.crosscheck && v.crosscheck.ran === false;
+  return `<div class="doc-core" data-doccore>
+    ${states ? `<div class="doc-states">${states}</div>` : ""}
+    ${unchecked ? `<div class="proposal-warn">⚠ CHƯA đối chiếu được bằng AI${v.crosscheck.reason ? `: ${esc(v.crosscheck.reason)}` : ""}. Chưa ai so nghĩa các tài liệu với nhau: hãy đọc kỹ hơn.</div>` : ""}
+    ${part("open", `⚠ Điểm lệch chưa xử lý (${n})${opts.readonly ? ": người duyệt sẽ quyết định" : ": sửa, hoặc chấp nhận kèm lý do"}`, open ? `<ul>${open}</ul>` : "", true)}
+    ${part("warnings", `Cảnh báo (${(v.warnings || []).length})`, warnings ? `<ul>${warnings}</ul>` : "")}
+    ${part("accepted", `Đã chấp nhận (${(v.accepted || []).length})`, accepted ? `<ul>${accepted}</ul>` : "")}
+    ${part("changes", `Thay đổi so với hiện trạng (${(v.declared_changes || []).length})`, changes ? `<ul>${changes}</ul>` : "", true)}
+    ${part("assumptions", `Giả định cần xác nhận (${(v.assumptions || []).length})`, assumptions ? `<ul>${assumptions}</ul>` : "", true)}
+    ${part("trace", `Truy vết (${(v.trace || []).length})`, trace ? `<table class="trace"><tr><th>Tài liệu</th><th>Mục</th><th>Truy vết tới</th><th></th></tr>${trace}</table>` : "")}
+    ${part("baseline", "Viết dựa trên", baseline ? `<ul>${baseline}</ul>` : "")}
+    ${spawnBlock(p, draft, opts)}</div>`;
+}
+
+const taskChoice = (p, draft, id) => ({ keep: true, flow: (p.spawn?.flows || [])[0] || "", who: "", ...draft.tasks[id] });
+
 // A breakdown: one row per task. The approver keeps or drops it, picks the flow and the person it is handed to.
-function spawnBlock(p) {
+function spawnBlock(p, draft, opts) {
   const sp = p.spawn;
   const tasks = p.doc_core?.tasks || [];
   if (!sp || !tasks.length || p.phase === "submit") return "";
+  const off = opts.locked ? " disabled" : "";
   const flowName = (f) => ({ task: "Thiết kế rồi code", "task-spec": "Chỉ thiết kế" })[f] || f;
-  const rows = tasks.map((t) => `<div class="spawn-row" data-task="${esc(t.id)}">
-      <label><input type="checkbox" data-s="keep" checked aria-label="Tạo ${esc(t.id)}"> <b>${esc(t.id)}</b> ${esc(t.title)}</label>${t.has_spec ? "" : ` <span class="chip bad">thiếu spec</span>`}
-      <select data-s="flow" aria-label="Luồng của ${esc(t.id)}">${(sp.flows || []).map((f) => `<option value="${esc(f)}">${esc(flowName(f))}</option>`).join("")}</select>
-      <select data-s="who" aria-label="Giao ${esc(t.id)} cho">${`<option value="">— chưa giao —</option>` + (sp.people || []).map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join("")}</select>
-    </div>`).join("");
-  return `<details class="doc-part" open><summary>Task sẽ tạo khi duyệt (${tasks.length})</summary>${rows}
+  const rows = tasks.map((t) => {
+    const c = taskChoice(p, draft, t.id);
+    const r = rowRemark(draft, "breakdown", t.id, opts.locked);
+    return `<div class="spawn-row ${c.keep ? "" : "off"}" data-task="${esc(t.id)}">
+      <label><input type="checkbox" data-d="task" data-di="${esc(t.id)}:keep" ${c.keep ? "checked" : ""}${off} aria-label="Tạo ${esc(t.id)}"> <b>${esc(t.id)}</b> ${esc(t.title)}</label>${t.has_spec ? "" : ` <span class="chip bad">thiếu spec</span>`}
+      <select data-d="task" data-di="${esc(t.id)}:flow"${off} aria-label="Luồng của ${esc(t.id)}">${(sp.flows || []).map((f) => `<option value="${esc(f)}" ${f === c.flow ? "selected" : ""}>${esc(flowName(f))}</option>`).join("")}</select>
+      <select data-d="task" data-di="${esc(t.id)}:who"${off} aria-label="Giao ${esc(t.id)} cho">${`<option value="">— chưa giao —</option>` + (sp.people || []).map((u) => `<option value="${esc(u.id)}" ${u.id === c.who ? "selected" : ""}>${esc(u.name)}</option>`).join("")}</select>
+      ${r.btn}${r.box}</div>`;
+  }).join("");
+  return `<details class="doc-part" data-part="tasks"${draft.open.tasks ?? true ? " open" : ""}><summary>Task sẽ tạo khi duyệt (${tasks.length})</summary>${rows}
     ${(sp.people || []).length ? "" : `<div class="proposal-warn">⚠ Team chưa có ai giữ vai ${esc((sp.assign || []).join(" / "))}: task sẽ không có người gửi duyệt.</div>`}</details>`;
 }
 
 // What the approver chose on a Doc Core card: findings accepted with a reason, tasks dropped, flows and people.
-function docCoreAnswer(c) {
+function gateAnswer(p, draft) {
   const out = {};
-  const accept = {};
-  for (const el of c.querySelectorAll("[data-accept]")) if (el.value.trim()) accept[el.dataset.accept] = el.value.trim();
+  const open = new Set((p.doc_core?.open || []).map((f) => f.id));
+  const accept = Object.fromEntries(Object.entries(draft.accept).filter(([id, why]) => open.has(id) && why.trim()).map(([id, why]) => [id, why.trim()]));
   if (Object.keys(accept).length) out.accept = accept;
-  const rows = [...c.querySelectorAll("[data-task]")];
-  if (rows.length) {
-    out.drop = rows.filter((r) => !r.querySelector('[data-s="keep"]').checked).map((r) => r.dataset.task);
-    out.flows = Object.fromEntries(rows.map((r) => [r.dataset.task, r.querySelector('[data-s="flow"]').value]));
-    out.assign = Object.fromEntries(rows.map((r) => [r.dataset.task, r.querySelector('[data-s="who"]').value]).filter(([, who]) => who));
+  const tasks = p.spawn && p.phase !== "submit" ? p.doc_core?.tasks || [] : [];
+  if (tasks.length) {
+    const pick = tasks.map((t) => [t.id, taskChoice(p, draft, t.id)]);
+    out.drop = pick.filter(([, c]) => !c.keep).map(([id]) => id);
+    out.flows = Object.fromEntries(pick.map(([id, c]) => [id, c.flow]));
+    out.assign = Object.fromEntries(pick.filter(([, c]) => c.who).map(([id, c]) => [id, c.who]));
   }
   return out;
+}
+
+const gateRemarks = (draft) => Object.entries(draft.comments).filter(([, text]) => text.trim()).map(([k, text]) => ({ doc: k.split("|")[0], item: k.split("|")[1], text: text.trim() }));
+
+// Why 👍 is not possible yet ("" = it is): every open difference needs a reason, or a fix.
+function gateBlock(p, draft) {
+  if (p.phase === "submit" || !p.doc_core) return "";
+  const left = (p.doc_core.open || []).filter((f) => !(draft.accept[f.id] || "").trim()).length;
+  return left ? `Còn ${left} điểm lệch chưa có lý do: ghi lý do chấp nhận cho từng điểm, hoặc trả lại để sửa.` : "";
+}
+
+// The 👍 button and the line next to it follow what is typed, without re-rendering the card.
+function syncCard(c, key) {
+  const item = pendingItem(key, c.dataset.card);
+  const btn = c.querySelector('[data-approve="1"]');
+  if (!item || item.kind !== "approve_stage" || !btn || btn.dataset.locked) return;
+  const why = gateBlock(item.payload || {}, cardDraft(item.id, key));
+  btn.disabled = !!why;
+  btn.title = why;
+  const line = c.querySelector("[data-why]");
+  if (line) line.textContent = why;
+}
+
+// A stage gate: the author sends it (submit phase), then the approvers approve or send it back.
+function gateCard(item, key) {
+  const p = item.payload || {};
+  const d = state.details[key] || {};
+  const draft = cardDraft(item.id, key);
+  const names = (p.approver_names || []).join(", ") || p.roles_label || "bạn";
+  const submit = p.phase === "submit";
+  const knowledge = p.gate === "knowledge";
+  const rights = d.stage?.cards?.[item.id];
+  const may = rights ? rights.may_answer : true;
+  const approvals = p.approvals || [];
+  const mine = rights?.approved || approvals.some((a) => a.by === state.me);
+  const need = Number(p.min || 1);
+  const locked = !may || mine;
+  const checks = (p.checks || []).map((c) => `<li>${c.status === "passed" ? "✅" : c.status === "failed" ? "❌" : "⏭"} ${esc(c.id)}: ${esc(c.summary)}</li>`).join("");
+  const kb = (p.kb || []).map((k) => `<li>${esc(k)}</li>`).join("");
+  const head = submit ? `✍️ ${esc(p.stage_title)} xong — ${esc(names)} xem rồi gửi ${esc(p.final_roles_label || "người duyệt")} duyệt` : `✋ ${esc(p.stage_title)} xong — cần ${esc(names)} duyệt`;
+  const back = p.last_rejection;
+  const backNote = back ? `<div class="card-back">↩ ${back.by === state.me ? "Bạn" : esc(back.by_name || back.by || "Người duyệt")} đã trả lại${back.at ? ` (${esc(fmtTime(back.at))})` : ""}: ${esc(back.note || "(không ghi chú)")}
+      ${(back.comments || []).length ? `<ul>${back.comments.map((c) => `<li><code>${esc(c.doc)}</code> <b>${esc(c.item)}</b> ${esc(c.text)}</li>`).join("")}</ul>` : ""}</div>` : "";
+  const stored = Object.fromEntries((d.detail?.documents || []).map((x) => [x.key, x]));
+  const docs = (p.docs || []).map((x) => {
+    const was = back?.revision_by_doc?.[x.key];
+    const ok = stored[x.key]?.approved_revision;
+    const diff = was && was < x.revision ? `<button class="link" data-doc-diff="${esc(x.key)}" data-from="${esc(was)}">thay đổi so với bản đã trả lại</button>`
+      : ok && ok < x.revision ? `<button class="link" data-doc-diff="${esc(x.key)}" data-from="${esc(ok)}">thay đổi so với bản đã duyệt</button>` : "";
+    return `<button class="btn small" data-doc-open="${esc(x.key)}" title="Mở tài liệu để đọc">📄 ${esc(x.key)} bản ${esc(x.revision)}</button>${diff ? ` (${diff})` : ""}`;
+  }).join(" ");
+  const sent = p.submitted_by_name || p.submitted_by ? `<div class="who">📨 ${esc(p.submitted_by_name || p.submitted_by)} gửi duyệt${p.submitted_at ? ` lúc ${esc(fmtTime(p.submitted_at))}` : ""}${p.submit_note ? `: ${esc(p.submit_note)}` : ""}
+      ${!submit && p.submitted_by && (p.submitted_by === state.me || state.me === "user") ? `<button class="btn small" data-withdraw title="Lấy lại để sửa tiếp, khi người duyệt chưa trả lời">↩ Rút lại</button>` : ""}</div>` : "";
+  const count = need > 1 ? `<div class="who">Đã duyệt ${approvals.length}/${need}${approvals.length ? `: ${esc(approvals.map((a) => a.name).join(", "))}` : ""}</div>` : "";
+  const why = locked ? "" : gateBlock(p, draft);
+  const lockNote = mine ? "Bạn đã duyệt thẻ này; còn chờ thêm người khác duyệt."
+    : !may ? `Chờ ${names}${p.roles_label && !names.includes(p.roles_label) ? ` (${p.roles_label})` : ""}. ${meName()} không giữ vai này nên không trả lời thẻ được.` : "";
+  const yes = submit ? `📨 Gửi ${esc(p.final_roles_label || "người duyệt")} duyệt` : `👍 ${knowledge ? "Xác nhận" : "Duyệt"}`;
+  const no = submit ? "✏️ Sửa tiếp" : `👎 ${knowledge ? "Bỏ (theo ghi chú)" : "Trả lại"}`;
+  const hint = knowledge ? "Bỏ mục sai: 'bỏ 2, 5'" : submit ? "Ghi chú cho người duyệt, hoặc điều cần sửa tiếp…" : "Ghi chú khi trả lại, hoặc câu hỏi (bấm ❓ Hỏi)…";
+  return `<div class="card gate ${locked ? "locked" : ""}" data-card="${esc(item.id)}"><div class="who">${head}</div>
+    ${backNote}${sent}${count}
+    <div class="q">${esc(p.summary)}</div>
+    ${docs ? `<div class="gate-docs"><span class="who">${submit ? "Gửi duyệt" : "Duyệt"}:</span> ${docs}</div>` : ""}
+    ${checks ? `<ul>${checks}</ul>` : ""}${docCoreBlock(p, draft, { readonly: submit, locked })}${reviewList(p.review)}${reviewAcList(p.review_acs)}${uiEvidenceList(p.ui_evidence, p.ticket)}${kb ? `<div class="who">Kiến thức AI ghi lại:</div><ul>${kb}</ul>` : ""}
+    ${(p.access || []).length ? `<div class="who">Duyệt kèm quyền: ${esc(p.access.join(", "))}</div>` : ""}
+    <div class="gate-foot">
+      ${draft.error ? `<div class="card-error" role="alert">⚠ ${esc(draft.error)}</div>` : ""}
+      ${lockNote ? `<div class="card-lock">${esc(lockNote)}</div>` : ""}
+      <div class="composer inline"><textarea placeholder="${esc(hint)}" data-text data-d="note">${esc(draft.note)}</textarea></div>
+      <div class="opts">${mine ? "" : `<button class="btn good" data-approve="1" ${!may ? `disabled data-locked="1" title="${esc(lockNote)}"` : why ? `disabled title="${esc(why)}"` : ""}>${yes}</button>
+        <button class="btn bad" data-approve="0" ${!may ? `disabled title="${esc(lockNote)}"` : ""}>${no}</button>`}
+        <button class="btn" data-ask title="Ghi nội dung ô trên lên ticket như một câu hỏi hay góp ý cho AI và người viết; thẻ vẫn mở, không bị trả lại">❓ Hỏi</button>
+        <span class="why" data-why>${esc(why)}</span></div>
+    </div></div>`;
 }
 
 // The documents of a ticket in a pack flow: state of each, parent epic, child tasks.
@@ -410,26 +681,16 @@ function docPanel(d, t) {
     ${kids ? `<ul class="doc-kids">${kids}</ul>` : ""}</div>`;
 }
 
-function card(item) {
+function card(item, key) {
   const p = item.payload || {};
   const who = (p.approver_names || []).join(", ") || p.roles_label || "bạn";
   if (item.kind === "question") {
     return `<div class="card" data-card="${esc(item.id)}"><div class="who">${esc(p.asked_by || "AI")} hỏi ${esc(who)}</div>
       <div class="q">${esc(p.question)}</div>${p.context ? `<div class="who">${esc(p.context)}</div>` : ""}
       <div class="opts">${(p.options || []).map((o) => `<button class="btn ${o === p.recommended ? "rec" : ""}" data-answer="${esc(o)}">${o === p.recommended ? "⭐ " : ""}${esc(o)}</button>`).join("")}</div>
-      <div class="composer inline"><textarea placeholder="Hoặc trả lời bằng chữ… (Enter để gửi)" data-text></textarea><button class="btn" data-answer-text>Trả lời</button></div></div>`;
+      <div class="composer inline"><textarea placeholder="Hoặc trả lời bằng chữ… (Enter để gửi)" data-text data-d="note">${esc(cardDraft(item.id, key).note)}</textarea><button class="btn" data-answer-text>Trả lời</button></div></div>`;
   }
-  if (item.kind === "approve_stage") {
-    const checks = (p.checks || []).map((c) => `<li>${c.status === "passed" ? "✅" : c.status === "failed" ? "❌" : "⏭"} ${esc(c.id)}: ${esc(c.summary)}</li>`).join("");
-    const kb = (p.kb || []).map((k) => `<li>${esc(k)}</li>`).join("");
-    const submit = p.phase === "submit";
-    const head = submit ? `✍️ ${esc(p.stage_title)} xong — ${esc(who)} xem rồi gửi ${esc(p.final_roles_label || "người duyệt")} duyệt` : `✋ ${esc(p.stage_title)} xong — cần ${esc(who)} duyệt`;
-    return `<div class="card" data-card="${esc(item.id)}"><div class="who">${head}</div>
-      <div class="q">${esc(p.summary)}</div>${checks ? `<ul>${checks}</ul>` : ""}${docCoreBlock(p)}${reviewList(p.review)}${reviewAcList(p.review_acs)}${uiEvidenceList(p.ui_evidence, p.ticket)}${kb ? `<div class="who">Kiến thức AI ghi lại:</div><ul>${kb}</ul>` : ""}
-      ${(p.access || []).length ? `<div class="who">Duyệt kèm quyền: ${esc(p.access.join(", "))}</div>` : ""}
-      <div class="composer inline"><textarea placeholder="${p.gate === "knowledge" ? "Bỏ mục sai: 'bỏ 2, 5'" : "Ghi chú khi trả lại…"}" data-text></textarea></div>
-      <div class="opts"><button class="btn good" data-approve="1">${submit ? "📨 Gửi duyệt" : `👍 ${p.gate === "knowledge" ? "Xác nhận" : "Duyệt"}`}</button><button class="btn bad" data-approve="0">${submit ? "✏️ Sửa tiếp" : `👎 ${p.gate === "knowledge" ? "Bỏ (theo ghi chú)" : "Trả lại"}`}</button></div></div>`;
-  }
+  if (item.kind === "approve_stage") return gateCard(item, key);
   if (item.kind === "propose_tickets") return proposalCard(item);
   if (item.kind === "env_access") {
     return `<div class="card" data-card="${esc(item.id)}"><div class="who">🔑 AI xin quyền ${esc(p.level_label)} vào ${esc(p.resource)} (${esc(p.env)}) trong ${esc(p.ttl_h)}h — cần ${esc(who)}</div>
@@ -525,6 +786,9 @@ function renderPane(key) {
   const pending = d.detail.pending || [];
   // done/cancelled: read only, the only action is "Mở lại" (stage status has no "cancelled": use the ticket's)
   const closed = ["done", "cancelled"].includes(t.status);
+  const history = state.tl[key] === "history";
+  const gateOpen = pending.some((x) => x.kind === "approve_stage");
+  const keep = { focus: focusOf(el), cards: $(".cards", el)?.scrollTop || 0 };
   el.innerHTML = `
     <div class="pane-head">
       <div class="pane-title"><span class="key">${esc(t.key)}</span><span class="title">${esc(t.title)}</span>
@@ -550,12 +814,41 @@ function renderPane(key) {
     ${steps.length ? `<div class="steps">${steps.map((s, i) => `<div class="s ${s.done ? "done" : i === cur ? "cur" : ""}">${s.done ? "☑" : i === cur ? "▶" : "☐"} ${esc(s.text)}</div>`).join("")}</div>` : ""}
     ${t.stage === "pr" || closed ? reviewList(d.stage?.review) + reviewAcList(d.stage?.review_acs) + uiEvidenceList(d.stage?.ui_evidence, t.key) : ""}
     ${docPanel(d, t)}
+    ${(state.docAlerts[key] || []).map((a, i) => `<div class="doc-alert" role="alert">⚠ Tài liệu <b>${esc(a.key)}</b> đã duyệt hiện <b>${esc(DOC_STATE_VI[a.state] || a.state)}</b>: ${esc(DOC_ACTION_VI[a.action] || DOC_ACTION_VI.notify_author)}
+      <button class="x" data-alert-x="${i}" title="Đã biết">×</button></div>`).join("")}
     ${closed ? "" : runError(d.detail.runs)}
-    <div class="timeline">${renderTimeline(timeline(key)) || `<div class="empty">Chưa có hoạt động.</div>`}</div>
-    ${pending.length ? `<div class="cards">${pending.map(card).join("")}</div>` : ""}
-    ${closed ? "" : `<div class="composer"><textarea placeholder="Chỉ dẫn cho AI… Enter để gửi, Shift+Enter xuống dòng" data-steer></textarea><button class="btn primary" data-send>Gửi</button></div>`}`;
+    <div class="tl-head"><button class="toggle ${history ? "" : "on"}" data-tl="all">Hoạt động + lịch sử</button><button class="toggle ${history ? "on" : ""}" data-tl="history" title="Ai duyệt, ai gửi, ai trả lại, điểm lệch được chấp nhận, thông báo của hệ thống, lời mọi người viết">Lịch sử (${(d.detail.comments || []).length})</button></div>
+    <div class="timeline">${renderTimeline(timeline(key)) || `<div class="empty">${history ? "Chưa có lịch sử." : "Chưa có hoạt động."}</div>`}</div>
+    ${pending.length ? `<div class="cards">${pending.map((item) => card(item, key)).join("")}</div>` : ""}
+    ${closed ? "" : `<div class="composer"><textarea placeholder="${gateOpen ? "Hỏi hoặc chỉ dẫn cho AI… (đang có thẻ duyệt: AI đọc sau khi thẻ được trả lời)" : "Chỉ dẫn cho AI… Enter để gửi, Shift+Enter xuống dòng"}" data-steer>${esc(state.steer[key] || "")}</textarea><button class="btn primary" data-send>Gửi</button></div>`}`;
   const tl = $(".timeline", el);
   tl.scrollTop = tl.scrollHeight;
+  const cards = $(".cards", el);
+  if (cards) cards.scrollTop = keep.cards;
+  refocus(el, keep.focus);
+}
+
+const DOC_STATE_VI = { khop: "khớp", lech: "lệch", cu: "cũ", loi: "lỗi", chua_kiem: "chưa kiểm" };
+const DOC_ACTION_VI = { revise: "giai đoạn viết tài liệu này được mở lại.", reopen_gate: "cổng duyệt được mở lại.", notify_author: "người viết xem lại và cập nhật nếu cần." };
+
+// What the person is typing in survives a re-render: which field has the focus and where the caret is.
+function focusOf(el) {
+  const a = document.activeElement;
+  if (!a || !el.contains(a)) return null;
+  let caret = null;
+  try { caret = [a.selectionStart, a.selectionEnd]; } catch { caret = null; } // a checkbox has no caret
+  return { card: a.closest("[data-card]")?.dataset.card, d: a.dataset.d, di: a.dataset.di || "", p: a.dataset.p, n: a.closest("[data-n]")?.dataset.n, steer: a.hasAttribute("data-steer"), caret };
+}
+
+function refocus(el, f) {
+  if (!f) return;
+  const c = f.card ? $(`[data-card="${CSS.escape(f.card)}"]`, el) : null;
+  const target = f.steer ? $("[data-steer]", el)
+    : c && f.d ? [...c.querySelectorAll("[data-d]")].find((x) => x.dataset.d === f.d && (x.dataset.di || "") === f.di)
+    : c && f.p ? [...c.querySelectorAll("[data-p]")].find((x) => x.dataset.p === f.p && x.closest("[data-n]")?.dataset.n === f.n) : null;
+  if (!target) return;
+  target.focus({ preventScroll: true });
+  try { if (f.caret && f.caret[0] != null) target.setSelectionRange(f.caret[0], f.caret[1]); } catch { /* not a text field */ }
 }
 
 // ---- side panel ----------------------------------------------------------------------------------------------
@@ -581,7 +874,8 @@ async function renderSide() {
       const docs = state.details[key]?.detail.documents || [];
       const order = ["dossier", "requirements", "plan", "handoff", "report", "document", "kb-draft"];
       docs.sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
-      body.innerHTML = docs.map((d) => `<div class="doc"><h2>${esc(d.key)} <span class="chip">rev ${d.revision}${d.approved_revision ? ` · duyệt rev ${d.approved_revision}` : ""}</span></h2>${md(d.body)}</div>`).join("<hr>") || `<div class="empty">Chưa có tài liệu.</div>`;
+      body.innerHTML = docs.map((d) => `<div class="doc"><h2>${esc(d.key)} <span class="chip">bản ${d.revision}${d.approved_revision ? ` · duyệt bản ${d.approved_revision}` : ""}</span>
+        <button class="btn small" data-doc-open="${esc(d.key)}" data-doc-key="${esc(key)}" title="Đọc rộng hơn">⤢</button></h2>${md(d.body, { key })}</div>`).join("<hr>") || `<div class="empty">Chưa có tài liệu.</div>`;
     } else if (state.side === "sources") {
       const list = await api(`/api/tickets/${key}/sources`);
       body.innerHTML = list.map((s) => sourceRow(key, s)).join("") || `<div class="empty">Ticket không nhắc nguồn nào.</div>`;
@@ -616,13 +910,64 @@ function sourceRow(key, s) {
 
 // A source file with line numbers, scrolled to the line of `:120` / `#L10-L20` (the lines are highlighted).
 async function openSourceFile(key, path, locator) {
-  const f = await api(`/api/tickets/${encodeURIComponent(key)}/sources/file?path=${encodeURIComponent(path)}`);
+  // a source of the ticket, else a file one of its documents cites on a "Nguồn:" line
+  const f = await api(`/api/tickets/${encodeURIComponent(key)}/sources/file?path=${encodeURIComponent(path)}`)
+    .catch(() => api(`/api/tickets/${encodeURIComponent(key)}/documents/source?path=${encodeURIComponent(path)}`));
   const m = /^(?::|#L)(\d+)(?:-L?(\d+))?$/.exec(locator || "");
   const from = m ? Number(m[1]) : 0;
   const to = m ? Number(m[2] || m[1]) : 0;
   const lines = f.text.split("\n").map((l, i) => `<span class="ln${i + 1 >= from && i + 1 <= to ? " hl" : ""}" data-line="${i + 1}"><i>${i + 1}</i>${esc(l) || " "}</span>`).join("\n");
   const body = sheet(`${path}${locator || ""}`, `<pre class="src-file">${lines}</pre>` + (f.truncated ? `<div class="empty">Chỉ hiện 512 KB đầu.</div>` : ""));
   if (from) $(`[data-line="${from}"]`, body)?.scrollIntoView({ block: "center" });
+}
+
+// ---- reading a document before approving it ---------------------------------------------------------------------------
+
+function flashAnchor(root, id) {
+  const el = [...root.querySelectorAll("[data-anchor]")].find((x) => x.dataset.anchor === id);
+  if (!el) return false;
+  el.scrollIntoView({ block: "center" });
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1600);
+  return true;
+}
+
+async function openDoc(key, docKey, anchor) {
+  const detail = state.details[key]?.detail || await api(`/api/tickets/${encodeURIComponent(key)}`);
+  const doc = (detail.documents || []).find((x) => x.key === docKey);
+  if (!doc) throw new Error(`${key} không có tài liệu ${docKey}`);
+  const older = doc.approved_revision && doc.approved_revision < doc.revision ? "bản đã duyệt" : doc.revision > 1 ? "bản trước" : "";
+  const body = sheet(`${key} · ${doc.key} · bản ${doc.revision}${doc.approved_revision ? ` (đã duyệt bản ${doc.approved_revision})` : " (chưa duyệt)"}`,
+    `${older ? `<div class="opts"><button class="btn small" data-doc-diff="${esc(doc.key)}" data-doc-key="${esc(key)}">Thay đổi so với ${older}</button></div>` : ""}
+    <div class="doc reading">${md(doc.body, { key })}</div>`);
+  if (anchor) flashAnchor(body, anchor);
+}
+
+// "Thay đổi so với bản đã duyệt / đã trả lại": items added, changed, removed by id, then the rest line by line.
+async function openDocDiff(key, docKey, from) {
+  const v = await api(`/api/tickets/${encodeURIComponent(key)}/documents/${encodeURIComponent(docKey)}/diff${from ? `?from=${encodeURIComponent(from)}` : ""}`);
+  const label = { added: ["good", "Thêm"], changed: ["warn", "Đổi"], removed: ["bad", "Bỏ"] };
+  const items = v.items.map((it) => `<div class="diff-item"><div class="h"><span class="chip ${label[it.change][0]}">${label[it.change][1]}</span> <b>${esc(it.id)}</b> ${esc(it.title)}</div>
+    ${it.change === "changed" ? `<div class="cols"><div><div class="rev">Bản ${esc(v.from)}</div><pre class="old">${esc(it.old)}</pre></div><div><div class="rev">Bản ${esc(v.to)}</div><pre class="new">${esc(it.new)}</pre></div></div>`
+      : `<pre class="${it.change === "added" ? "new" : "old"}">${esc(it.new || it.old)}</pre>`}</div>`).join("");
+  const rest = v.rest.length ? `<h3>Phần còn lại (theo dòng)</h3><pre class="diff">${v.rest.map((l) => `<span class="${l.startsWith("+") ? "a" : l.startsWith("-") ? "d" : l.startsWith("@@") ? "h" : ""}">${esc(l) || " "}</span>`).join("\n")}</pre>` : "";
+  sheet(`${key} · ${docKey}: bản ${v.from} → bản ${v.to} (so với ${v.basis})`,
+    `<div class="opts"><button class="btn small" data-doc-open="${esc(docKey)}" data-doc-key="${esc(key)}">📄 Đọc bản ${esc(v.to)}</button></div>
+    ${v.same ? `<div class="empty">Hai bản giống nhau.</div>` : `${items ? `<h3>Mục thay đổi (${v.items.length})</h3>${items}` : `<div class="rev">Không mục nào (REQ, AC, C…) thay đổi.</div>`}${rest}`}`);
+}
+
+// A link to an item ("Truy vết: AC-1.1", "AO-4/REQ-2"): in the document being read, else in another document of that ticket.
+async function gotoItem(link) {
+  const id = link.dataset.goto;
+  const here = link.closest(".doc") || document;
+  if (!link.dataset.gotoTicket && flashAnchor(here, id)) return;
+  const key = link.dataset.gotoTicket || link.dataset.gotoFrom;
+  if (!key) { toast(`Không thấy mục ${id} trong tài liệu này`, true); return; }
+  const detail = state.details[key]?.detail || await api(`/api/tickets/${encodeURIComponent(key)}`);
+  const at = new RegExp(`^\\s*(?:#{1,6}\\s+|[-*]\\s+)(?:\\*\\*|__)?${id.replace(/[.]/g, "\\.")}(?![\\w.-])`, "m");
+  const doc = (detail.documents || []).find((x) => at.test(x.body));
+  if (!doc) { toast(`Không thấy mục ${id} trong tài liệu của ${key}`, true); return; }
+  await openDoc(key, doc.key, id);
 }
 
 // ---- first run checklist -------------------------------------------------------------------------------------
@@ -1114,18 +1459,67 @@ document.addEventListener("click", (e) => {
     const box = $("[data-steer]", pane);
     const text = box.value.trim();
     if (!text) return;
-    return act(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: "steer", text } }); box.value = ""; toast("Đã gửi chỉ dẫn"); await refresh(key); });
+    return act(async () => {
+      const r = await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: "steer", text } });
+      box.value = "";
+      delete state.steer[key];
+      toast(r.held ? "Đã ghi lên ticket. Đang có thẻ duyệt: AI đọc sau khi thẻ được trả lời." : "Đã gửi chỉ dẫn");
+      await refresh(key);
+    });
   }
+  if (ds.tl && key) { state.tl[key] = ds.tl; renderPane(key); return; }
+  if (ds.alertX !== undefined && key) { (state.docAlerts[key] || []).splice(Number(ds.alertX), 1); renderPane(key); return; }
+  if (ds.docOpen) return act(() => openDoc(ds.docKey || key, ds.docOpen));
+  if (ds.docDiff) return act(() => openDocDiff(ds.docKey || key, ds.docDiff, ds.from));
+  if (ds.goto) { e.preventDefault(); return act(() => gotoItem(t)); }
   const c = t.closest("[data-card]");
   if (c) {
     const id = c.dataset.card;
     const note = ($("[data-text]", c)?.value || "").trim();
+    const item = pendingItem(key, id);
+    if (item?.kind === "approve_stage") {
+      const p = item.payload || {};
+      const draft = cardDraft(id, key);
+      // errors of a gate card are shown inside the card, in plain words, and stay until the next try
+      const tryIt = async (fn) => {
+        draft.error = "";
+        try { await fn(); } catch (err) { draft.error = plainError(err.message); renderPane(key); }
+      };
+      if (ds.cm) {
+        draft.cm[ds.cm] = !(draft.cm[ds.cm] || draft.comments[ds.cm]);
+        if (!draft.cm[ds.cm]) delete draft.comments[ds.cm];
+        renderPane(key);
+        [...document.querySelectorAll(`[data-card="${CSS.escape(id)}"] [data-d="comment"]`)].find((x) => x.dataset.di === ds.cm)?.focus();
+        return;
+      }
+      if (ds.ask !== undefined) return tryIt(async () => {
+        if (!note) throw new Error("Viết câu hỏi hoặc góp ý vào ô ghi chú rồi bấm ❓ Hỏi.");
+        const r = await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: "ask", text: note } });
+        draft.note = "";
+        toast(r.held ? "Đã ghi câu hỏi lên ticket, thẻ vẫn mở. AI đọc sau khi thẻ được trả lời; mọi người thấy ngay ở Lịch sử." : "Đã ghi câu hỏi lên ticket, thẻ vẫn mở.");
+        await refresh(key);
+      });
+      if (ds.withdraw !== undefined) {
+        if (!confirm(`Rút lại ${p.stage_title || "bản đã gửi"} của ${key} để sửa tiếp? Thẻ của người duyệt sẽ đóng.`)) return;
+        return tryIt(async () => { await api(`/api/tickets/${key}/control`, { method: "POST", body: { cmd: "withdraw" } }); toast("Đã rút lại"); await refresh(key); });
+      }
+      if (ds.approve !== undefined) return tryIt(async () => {
+        const ok = ds.approve === "1";
+        const comments = gateRemarks(draft);
+        if (!ok && p.gate !== "knowledge" && !note && !comments.length) throw new Error(`Cần ghi chú${p.phase === "submit" ? "" : ", hoặc ít nhất một góp ý 💬 ở từng mục,"} khi ${p.phase === "submit" ? "cho sửa tiếp" : "trả lại"}.`);
+        const why = ok ? gateBlock(p, draft) : "";
+        if (why) throw new Error(why);
+        const extra = ok && p.doc_core ? gateAnswer(p, draft) : {};
+        await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: ok, note: note || undefined, ...(comments.length ? { comments } : {}), ...extra } });
+        delete state.cardDrafts[id];
+        await refresh(key);
+      });
+    }
     if (ds.answer !== undefined) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { answer: ds.answer } }); await refresh(key); });
     if (ds.answerText !== undefined && note) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { answer: note } }); await refresh(key); });
     if (ds.remember) return act(async () => { await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: true, remember: ds.remember } }); toast("Đã ghi nhớ: lần sau không hỏi lại"); await refresh(key); });
     if (ds.approve !== undefined) return act(async () => {
-      const extra = ds.approve === "1" && c.querySelector("[data-doccore]") ? docCoreAnswer(c) : {};
-      await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: ds.approve === "1", note: note || undefined, ...extra } });
+      await api(`/api/interactions/${id}/answer`, { method: "POST", body: { approved: ds.approve === "1", note: note || undefined } });
       await refresh(key);
     });
     if (ds.proposeCreate !== undefined) return act(async () => {
@@ -1179,10 +1573,47 @@ document.addEventListener("click", (e) => {
   });
 });
 
-document.addEventListener("input", proposalInput);
+// What is typed or chosen on a card (and in the composer) goes into its draft at once.
+function draftInput(e) {
+  const el = e.target;
+  const key = el.closest?.("[data-pane]")?.dataset.pane;
+  if (!key) return;
+  if (el.hasAttribute("data-steer")) { state.steer[key] = el.value; return; }
+  const c = el.closest("[data-card]");
+  if (!c || !el.dataset.d) return;
+  const draft = cardDraft(c.dataset.card, key);
+  const di = el.dataset.di || "";
+  if (el.dataset.d === "note") draft.note = el.value;
+  else if (el.dataset.d === "accept") draft.accept[di] = el.value;
+  else if (el.dataset.d === "comment") draft.comments[di] = el.value;
+  else if (el.dataset.d === "task") {
+    const [task, field] = di.split(":");
+    (draft.tasks[task] ||= {})[field] = field === "keep" ? el.checked : el.value;
+    if (field === "keep") el.closest(".spawn-row")?.classList.toggle("off", !el.checked);
+  }
+  syncCard(c, key);
+}
+
+document.addEventListener("input", (e) => { proposalInput(e); draftInput(e); });
+
+// <details> of a card opened or closed by the person: remembered too (toggle does not bubble: capture).
+document.addEventListener("toggle", (e) => {
+  const part = e.target.dataset?.part;
+  const c = part && e.target.closest("[data-card]");
+  const key = c?.closest("[data-pane]")?.dataset.pane;
+  if (c && key) cardDraft(c.dataset.card, key).open[part] = e.target.open;
+}, true);
 
 document.addEventListener("change", (e) => {
   proposalInput(e);
+  draftInput(e);
+  if (e.target.dataset?.me !== undefined) {
+    state.me = e.target.value || "user";
+    localStorage.setItem("ao.me", state.me);
+    toast(`Bạn đang thao tác với tên ${meName()}`);
+    act(async () => { await loadBoard(); for (const k of paneKeys()) await loadTicket(k); renderPanes(); });
+    return;
+  }
   const id = e.target.dataset?.permMode;
   if (id) act(async () => { await api(`/api/projects/${id}/permissions`, { method: "POST", body: { mode: e.target.value } }); toast("Đã đổi quyền của AI cho dự án"); await pageSetup(); });
   const queue = e.target.dataset?.oneAtATime;
@@ -1248,7 +1679,13 @@ function connect() {
       soon(key);
       return;
     }
-    if (["ticket.updated", "ticket.stage", "ticket.steps", "interaction.created", "interaction.resolved", "interaction.updated", "run.finished", "access.changed", "ticket.artifact"].includes(kind)) {
+    if (kind === "doc.state" && data.ticket_id) { // an approved document stopped matching: a banner on its ticket
+      const key = keyOfTicketId(data.ticket_id);
+      if (key) (state.docAlerts[key] ||= []).push({ key: data.key, state: data.state, action: data.action });
+      soon(key);
+      return;
+    }
+    if (["ticket.updated", "ticket.stage", "ticket.steps", "ticket.comment", "ticket.document", "interaction.created", "interaction.resolved", "interaction.updated", "run.finished", "access.changed", "ticket.artifact"].includes(kind)) {
       const id = data.ticket?.id || data.ticket_id || data.interaction?.ticket_id || data.run?.ticket_id;
       soon(id ? keyOfTicketId(id) : null);
     }
@@ -1275,7 +1712,15 @@ document.addEventListener("change", (e) => {
 });
 
 (async () => {
+  await act(loadPeople);
   await act(loadBoard);
+  // a link from Telegram or a colleague: /team#AO-12 opens that ticket
+  const linked = decodeURIComponent(location.hash.slice(1));
+  if (/^[A-Za-z][A-Za-z0-9]*-\d+$/.test(linked)) {
+    if (!state.open.includes(linked)) state.open.push(linked);
+    state.focus = linked;
+    save();
+  }
   // tabs stay across reloads, closed tickets included; loadTicket drops a tab only when the ticket is gone (404)
   if (state.focus && !state.open.includes(state.focus)) state.focus = state.open[0] || null;
   renderTabs();
@@ -1288,6 +1733,11 @@ document.addEventListener("change", (e) => {
   connect();
   setInterval(() => act(loadBoard), 30000);
 })();
+
+window.addEventListener("hashchange", () => {
+  const linked = decodeURIComponent(location.hash.slice(1));
+  if (/^[A-Za-z][A-Za-z0-9]*-\d+$/.test(linked)) openTicket(linked);
+});
 
 // The service map: a service or a module opens the level inside it (an SVG group is not a button, so it has its own listener).
 document.addEventListener("click", (e) => {

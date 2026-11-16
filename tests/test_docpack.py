@@ -88,7 +88,7 @@ async def test_pack_check_command(tmp_path: Path, capsys) -> None:
         await put(office, child, "design", orphan)
 
         await cmd_pack(office, argparse.Namespace(path=None, against=None))
-        assert "Pack 'default' v1 hợp lệ" in capsys.readouterr().out
+        assert "Pack 'default' v2 hợp lệ" in capsys.readouterr().out
         await cmd_pack(office, argparse.Namespace(path=None, against=child.key))
         out = capsys.readouterr().out
         assert "0 lỗi, 1 cảnh báo" in out and "R-NO-ORPHAN" in out and "C-9" in out, "the built-in pack only warns about a change that serves no AC"

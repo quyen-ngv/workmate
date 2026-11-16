@@ -16,11 +16,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from actoroffice.doccore import Approved, Baseline, Evidence, Finding, MatchState, ParsedDoc, StandardPack, impact, match_state, parse, run_rules
-from actoroffice.doccore.model import MATCH_STATE_VI, SourceRef, make_finding
+from actoroffice.doccore.model import MATCH_STATE_VI, SourceRef, finding_id, make_finding
 from actoroffice.domain.errors import NotFound, OfficeError, PolicyDenied
 from actoroffice.domain.ids import utcnow
 from actoroffice.domain.stage import StageDef
@@ -36,6 +36,8 @@ log = logging.getLogger(__name__)
 
 EXCERPT_LIMIT = 4000
 SPEC_PER_TASK = "R-SPEC-PER-TASK"
+UPSTREAM_EDITED = "R-UPSTREAM-EDITED"
+MIN_ID_PREFIX = 8  # the length people see in a findings list
 
 
 class DocError(OfficeError):
@@ -49,10 +51,29 @@ class DocSet:
     docs: dict[str, ParsedDoc]  # core key → parsed document
     own: dict[str, Document]  # core key → the stored document of this ticket
     stored: dict[str, tuple[int, str]]  # core key → (ticket id, stored key), also for the parent's documents
+    # core key → current revision of an own document that is read here at its approved revision, because somebody
+    # rewrote it outside the stage that writes it
+    edited: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class SpawnStep:
+    """What approving a breakdown does with one of its tasks."""
+
+    item: Any  # the breakdown item (doccore Item)
+    action: str  # "create" | "resume" (a child that was created but never started) | "sync" | "drop" | "skip"
+    child: Ticket | None = None
+    flow: str = ""
+    user_id: str | None = None
 
 
 def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _is_output(stored_key: str, wanted: set[str]) -> bool:
+    """A stage writes its outputs, and a breakdown stage the spec of every task."""
+    return stored_key in wanted or ("breakdown" in wanted and stored_key.startswith("spec."))
 
 
 class DocService:
@@ -206,18 +227,27 @@ class DocService:
     # ---- what a check looks at -------------------------------------------------------------------------------
 
     async def docset(self, ticket: Ticket) -> DocSet:
-        """The ticket's own documents at their current revision, and its parent's at the approved one (the current
-        one when nothing is approved yet): what the ticket's documents are written from."""
+        """The documents the ticket's current stage writes at their current revision; its other documents and its
+        parent's at the approved one (the current one when nothing is approved yet): what the stage's documents are
+        written from. An approved document rewritten outside the stage that writes it is still read as approved, and
+        noted in `edited`."""
         office = self.office
         docs: dict[str, ParsedDoc] = {}
         own: dict[str, Document] = {}
         stored: dict[str, tuple[int, str]] = {}
+        edited: dict[str, int] = {}
         pack = self.pack_of(ticket)
+        writes = await self.stage_outputs(ticket)
         for doc in await office.tickets.list_documents(ticket.id):
             doctype = self.doctype_of(doc.key, pack)
             if doctype is None:
                 continue
             key = self.core_key(ticket, doc.key)
+            if doc.approved_revision and doc.approved_revision != doc.revision and not _is_output(doc.key, writes):
+                body = await self._body(ticket.id, doc.key, doc.approved_revision)
+                if body != doc.body:
+                    edited[key] = doc.revision
+                doc = doc.model_copy(update={"revision": doc.approved_revision, "body": body})
             docs[key] = parse(doc.body, doctype, pack)
             own[key] = doc
             stored[key] = (ticket.id, doc.key)
@@ -231,7 +261,48 @@ class DocService:
                 body = await self._body(parent.id, doc.key, doc.approved_revision) if doc.approved_revision else doc.body
                 docs[key] = parse(body, doctype, pack)
                 stored[key] = (parent.id, doc.key)
-        return DocSet(docs, own, stored)
+        return DocSet(docs, own, stored, edited)
+
+    async def stage_outputs(self, ticket: Ticket) -> set[str]:
+        """The stored keys the ticket's current stage writes (empty when it is at no stage)."""
+        tpl = await self.office.teams.template(ticket) if ticket.stage else None
+        stage = tpl.stage(ticket.stage) if tpl is not None else None
+        return {o for out in stage.outputs for o in out.split("|")} if stage is not None else set()
+
+    async def guard_put(self, ticket: Ticket, stored_key: str, body: str) -> None:
+        """Whether the AI may save this document now (`doc_put`). Refused, with what to do instead:
+        - a document of the pack that is approved and is not written by the ticket's current stage: what other
+          documents were approved against cannot be rewritten under them (saving the approved text back is allowed);
+        - a document that is on a pending approval card of the ticket: the approver must get what the card showed.
+          Refusing keeps the flow simplest: nothing is withdrawn behind the approver's back, and the AI has one way to
+          change it (reopen the stage, which withdraws the card).
+        Documents that are not of the pack (dossier, handoff…) and tickets of other workflows are not looked at."""
+        if not self.applies(ticket) or self.doctype_of(stored_key, self.pack_of(ticket)) is None:
+            return
+        office = self.office
+        doc = await office.tickets.get_document(ticket.id, stored_key)
+        if doc is None:
+            return
+        for card in await office.interactions.pending(ticket_id=ticket.id):
+            if card.kind.value == "approve_stage" and any(d.get("key") == stored_key for d in card.payload.get("docs", [])):
+                raise DocError(
+                    f"Tài liệu `{stored_key}` đang chờ duyệt (thẻ {card.payload.get('stage_title') or card.payload.get('stage')}): không sửa khi thẻ đang mở. "
+                    f"Chờ người duyệt trả lời; nếu phải sửa ngay, dùng stage_reopen về giai đoạn '{ticket.stage}' (thẻ bị rút), sửa rồi stage_complete lại."
+                )
+        if not doc.approved_revision or _is_output(stored_key, await self.stage_outputs(ticket)):
+            return
+        if body == await self._body(ticket.id, stored_key, doc.approved_revision):
+            return  # putting the approved text back
+        raise DocError(
+            f"Tài liệu `{stored_key}` đã được duyệt (bản {doc.approved_revision}) và không thuộc giai đoạn hiện tại ('{ticket.stage}'): không sửa ở đây. "
+            "Nếu nội dung phải đổi: dùng stage_reopen về giai đoạn viết tài liệu đó, hoặc hỏi người phụ trách bằng ask_user."
+        )
+
+    async def _approved_body(self, doc: Document) -> str:
+        """The text people approved (the current text when nothing is approved yet)."""
+        if doc.approved_revision and doc.approved_revision != doc.revision:
+            return await self._body(doc.ticket_id, doc.key, doc.approved_revision)
+        return doc.body
 
     async def _body(self, ticket_id: int, stored_key: str, revision: int | None) -> str:
         row = await self.office.db.fetchone(
@@ -264,8 +335,10 @@ class DocService:
     async def _baselines(self, ticket: Ticket, ds: DocSet) -> dict[str, Baseline]:
         out: dict[str, Baseline] = {}
         for key, doc in ds.own.items():
-            row = await self.office.db.fetchone("SELECT baseline_json FROM documents WHERE ticket_id = ? AND key = ?", (ticket.id, doc.key))
-            if row and row["baseline_json"]:
+            row = await self.office.db.fetchone("SELECT baseline_json, approved_baseline_json FROM documents WHERE ticket_id = ? AND key = ?", (ticket.id, doc.key))
+            if row and key in ds.edited and row["approved_baseline_json"]:  # read at its approved revision: what that one was written from
+                out[key] = Baseline.model_validate_json(row["approved_baseline_json"])
+            elif row and row["baseline_json"]:
                 out[key] = Baseline.model_validate_json(row["baseline_json"])
             else:  # saved before Doc Core, or by a path that does not capture: written from what is there now
                 captured = await self.capture_baseline(ticket, doc.key)
@@ -360,7 +433,9 @@ class DocService:
         office = self.office
         out: list[Evidence] = []
         now = utcnow()
+        pack = self.pack_of(ticket)
         for key, doc in ds.own.items():
+            earlier_items: dict[int, ParsedDoc] = {}  # revision → that revision parsed, to see whether an item was rewritten
             for item in ds.docs[key].items:
                 for src in item.sources:
                     current = await self._resolve(ticket, src)
@@ -371,13 +446,22 @@ class DocService:
                         (ticket.id, doc.key, doc.revision, item.id, src.raw),
                     )
                     if row is None or (row["error"] and not current.get("error")):
-                        # an earlier revision already pinned the same source for this item: keep that pin, so editing
-                        # another part of the document does not make changed code look fresh
+                        # an earlier revision already pinned the same source for this item: keep that pin while the item
+                        # reads the same, so editing another part of the document does not make changed code look
+                        # fresh. An item the author rewrote was written against the source as it is now.
                         earlier = await office.db.fetchone(
-                            "SELECT * FROM doc_evidence WHERE ticket_id = ? AND doc_key = ? AND item_id = ? AND source = ? AND error IS NULL ORDER BY revision DESC LIMIT 1",
-                            (ticket.id, doc.key, item.id, src.raw),
+                            "SELECT * FROM doc_evidence WHERE ticket_id = ? AND doc_key = ? AND item_id = ? AND source = ? AND error IS NULL AND revision < ? "
+                            "ORDER BY revision DESC LIMIT 1",
+                            (ticket.id, doc.key, item.id, src.raw, doc.revision),
                         )
                         pin = dict(earlier) if earlier is not None and not current.get("error") else None
+                        if pin is not None:
+                            revision = int(pin["revision"])
+                            if revision not in earlier_items:
+                                earlier_items[revision] = parse(await self._body(ticket.id, doc.key, revision), self.doctype_of(doc.key, pack) or "", pack)
+                            before = earlier_items[revision].item(item.id)
+                            if before is None or before.hash != item.hash:
+                                pin = None
                         values = (
                             current.get("provider", ""), current.get("category", ""), current.get("ref", src.ref), src.locator,
                             (pin or {}).get("version") or current.get("version", ""), (pin or {}).get("content_hash") or current.get("hash", ""),
@@ -416,19 +500,65 @@ class DocService:
 
     async def check(self, ticket: Ticket, stage: StageDef | None = None, *, keys: set[str] | None = None) -> list[Finding]:
         """Every finding on the stage's documents (or on `keys`, or on all of the ticket's), accepted ones marked."""
+        return (await self._check(ticket, stage, keys))[0]
+
+    async def _check(self, ticket: Ticket, stage: StageDef | None, keys: set[str] | None = None) -> tuple[list[Finding], dict[str, str | None]]:
+        """The findings, and for each what an acceptance of it is about (`_about`)."""
         ds = await self.docset(ticket)
         only = keys if keys is not None else (self.output_keys(ticket, stage, ds) if stage is not None else set(ds.own))
         baselines = await self._baselines(ticket, ds)
-        findings = run_rules(self.pack_of(ticket), ds.docs, await self.evidence(ticket, ds), baselines, await self._approved(ticket, ds, baselines), only_docs=only)
+        pack = self.pack_of(ticket)
+        evidence = await self.evidence(ticket, ds)
+        findings = run_rules(pack, ds.docs, evidence, baselines, await self._approved(ticket, ds, baselines), only_docs=only)
+        findings = [f for f in findings if not self._parents_cover(pack, ds, f)]
         findings += self._specs_per_task(ticket, ds, only)
+        findings += self._upstream_edited(ds)
+        about = {f.id: self._about(pack, ds, evidence, f) for f in findings}
         accepted = {
             r["finding_id"]: r for r in await self.office.db.fetchall("SELECT * FROM doc_findings WHERE ticket_id = ?", (ticket.id,))
         }
         for f in findings:
             hit = accepted.get(f.id)
-            if hit is not None:
+            # an acceptance is about the item as it read then: a rewritten item (or a source that changed again) is looked at anew
+            if hit is not None and (hit["item_hash"] is None or hit["item_hash"] == about[f.id]):
                 f.status, f.accepted_by, f.reason = "accepted", hit["accepted_by"], hit["reason"]
-        return findings
+        return findings, about
+
+    def _parents_cover(self, pack: StandardPack, ds: DocSet, f: Finding) -> bool:
+        """A cover finding that asks a document of this ticket to cover every item of a parent's document. A task
+        answers for its own part only; the whole is checked where the parent's documents are written (the epic's gate)."""
+        rule = pack.rules.get(f.rule)
+        if rule is None or rule.type != "cover" or f.doc not in ds.own:
+            return False
+        return any(f.id == finding_id(f.rule, f.doc, f.item, key) for key in ds.docs if key not in ds.own)
+
+    def _upstream_edited(self, ds: DocSet) -> list[Finding]:
+        """An approved document rewritten outside the stage that writes it: the check keeps reading the approved
+        revision, and says so until the rewrite is approved or undone."""
+        out = []
+        for key, current in sorted(ds.edited.items()):
+            approved = ds.own[key].revision
+            message = (
+                f"{key}: bản đã duyệt là {approved} nhưng tài liệu đã bị sửa thành bản {current} ngoài giai đoạn viết nó; việc kiểm vẫn dùng bản {approved}. "
+                f"Lưu lại đúng nội dung bản {approved}, hoặc mở lại giai đoạn viết tài liệu này (stage_reopen) để bản mới được duyệt."
+            )
+            out.append(make_finding(UPSTREAM_EDITED, "error", key, None, message, f"{approved}>{current}"))
+        return out
+
+    def _about(self, pack: StandardPack, ds: DocSet, evidence: list[Evidence], f: Finding) -> str | None:
+        """What an acceptance of this finding is about: the text of its item and, for a source that changed, the
+        content it changed to. None when the finding is about no item."""
+        parts: list[str] = []
+        ticket_key, _, target = (f.item or "").rpartition("/")
+        if target:
+            near = [f.doc, *(k for k in ds.docs if k != f.doc)] if not ticket_key else [k for k in ds.docs if k.rsplit("/", 1)[0] == ticket_key]
+            item = next((ds.docs[k].item(target) for k in near if k in ds.docs and ds.docs[k].item(target)), None)
+            if item is not None:
+                parts.append(item.hash)
+        rule = pack.rules.get(f.rule)
+        if rule is not None and rule.type == "fresh":
+            parts += [e.current_hash or "" for e in evidence if f.id == finding_id(f.rule, e.doc, e.item, e.source)]
+        return content_hash("|".join(parts)) if parts else None
 
     def _specs_per_task(self, ticket: Ticket, ds: DocSet, only: set[str]) -> list[Finding]:
         """Every task of a breakdown has its spec (`spec.T-n`) before the business is approved."""
@@ -474,22 +604,42 @@ class DocService:
             raise DocError("Cần lý do khi chấp nhận một điểm lệch")
         office = self.office
         stage = await office.stages.stage_def(ticket)
-        finding = next((f for f in await self.all_findings(ticket, stage) if f.id == finding_id or f.id.startswith(finding_id)), None)
-        if finding is None:
-            raise NotFound(f"Không có phát hiện {finding_id} ở giai đoạn này của {ticket.key}")
+        wanted = finding_id.strip()
+        found, about = await self._check(ticket, stage)
+        found += await office.crosscheck.findings(ticket)
+        # the exact id, or the short one people see in a list when it names one finding only
+        matches = [f for f in found if f.id == wanted] or ([f for f in found if f.id.startswith(wanted)] if len(wanted) >= MIN_ID_PREFIX else [])
+        if len(matches) > 1:
+            raise DocError(f"Mã '{wanted}' trùng {len(matches)} phát hiện của {ticket.key}: dùng mã đầy đủ")
+        if not matches:
+            raise NotFound(f"Không có phát hiện '{wanted}' ở giai đoạn này của {ticket.key} (cần mã đầy đủ hoặc ít nhất {MIN_ID_PREFIX} ký tự đầu)")
+        finding = matches[0]
         policy = await office.teams.gate_policy(ticket, stage.gate) if stage.gate else None
         roles = (policy.accept_findings or policy.roles) if policy is not None else []
-        if by != LOCAL_OWNER_ID and not await office.teams.can_act(by, ticket, roles):
+        if by != LOCAL_OWNER_ID and not await office.teams.can_act(by, ticket, roles) and not await self._asked_to_approve(ticket, by, policy):
             raise PolicyDenied(f"Cần vai {' / '.join(roles) or 'người duyệt'} để chấp nhận điểm lệch")
         await office.db.execute(
-            "INSERT INTO doc_findings(ticket_id, finding_id, rule, doc_key, item_id, message, accepted_by, reason, accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(ticket_id, finding_id) DO UPDATE SET accepted_by = excluded.accepted_by, reason = excluded.reason, accepted_at = excluded.accepted_at",
-            (ticket.id, finding.id, finding.rule, finding.doc, finding.item, finding.message, by, reason[:1000], utcnow()),
+            "INSERT INTO doc_findings(ticket_id, finding_id, rule, doc_key, item_id, message, accepted_by, reason, accepted_at, item_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(ticket_id, finding_id) DO UPDATE SET accepted_by = excluded.accepted_by, reason = excluded.reason, accepted_at = excluded.accepted_at, "
+            "item_hash = excluded.item_hash",
+            (ticket.id, finding.id, finding.rule, finding.doc, finding.item, finding.message, by, reason[:1000], utcnow(), about.get(finding.id)),
         )
         await office.audit.record("doc:finding", "accepted", ticket_id=ticket.id, target=f"{ticket.key}:{finding.rule}", detail={"by": by, "reason": reason, "item": finding.item})
         await office.tickets.add_comment(ticket.id, f"☑️ Chấp nhận điểm lệch {finding.rule} ({finding.item or finding.doc}): {reason}", author_kind="system", author_id=None)
         finding.status, finding.accepted_by, finding.reason = "accepted", by, reason
         return finding
+
+    async def _asked_to_approve(self, ticket: Ticket, by: str, policy: Any) -> bool:
+        """The person the gate card of the ticket's stage was sent to (the owner when nobody holds the role). Only
+        where accepting is the approvers' business, and never the author's card of the submit phase."""
+        if policy is None or (policy.accept_findings and set(policy.accept_findings) != set(policy.roles)):
+            return False
+        for card in await self.office.interactions.pending(ticket_id=ticket.id):
+            if card.kind.value != "approve_stage" or card.payload.get("stage") != ticket.stage or card.payload.get("phase") == "submit":
+                continue
+            if by in (card.payload.get("approver_ids") or []):
+                return True
+        return False
 
     # ---- the gate card ---------------------------------------------------------------------------------------
 
@@ -498,10 +648,9 @@ class DocService:
         assumptions, declared changes with the old code, what was accepted, what each document was written from."""
         ds = await self.docset(ticket)
         keys = self.output_keys(ticket, stage, ds)
-        findings = await self.check(ticket, stage)
+        # what the rules found and what the AI cross-check still sees: a document with an open difference is not "khớp"
+        findings = await self.check(ticket, stage) + await self.office.crosscheck.findings(ticket)
         states = await self.states(ticket, findings)
-        cross = await self.office.crosscheck.findings(ticket)
-        findings = findings + cross
         baselines = await self._baselines(ticket, ds)
         evidence = await self.evidence(ticket, ds)
         trace, assumptions, changes, tasks = [], [], [], []
@@ -512,7 +661,7 @@ class DocService:
                 if item.traces:
                     trace.append({"doc": ds.own[key].key, "id": item.id, "title": item.title, "traces": item.traces})
                 for changed in item.changes:
-                    old = next((e.excerpt[:600] for e in evidence if e.item == changed), "")
+                    old = await self._old_text(ds, evidence, changed)
                     changes.append({"doc": ds.own[key].key, "id": item.id, "title": item.title, "changes": changed, "old": old})
                 if item.kind == "T":
                     tasks.append({"id": item.id, "title": item.title, "has_spec": any(d.key == f"spec.{item.id}" for d in ds.own.values())})
@@ -527,7 +676,66 @@ class DocService:
             "open": [f.model_dump() for f in findings if f.status == "open" and f.severity == "error"],
             "baseline": {ds.own[k].key: baselines[k].docs for k in sorted(keys) if k in baselines},
             "tasks": tasks,
+            "crosscheck": await self._crosscheck_state(ticket),
         }
+
+    async def _crosscheck_state(self, ticket: Ticket) -> dict[str, Any]:
+        """Whether the AI cross-check of the ticket's stage run really read the documents, from the result the check
+        recorded on the run: a round that broke is "skipped" with the reason, and nobody compared the meaning."""
+        srun = await self.office.stages.current_run(ticket)
+        result = next((c for c in (srun.checks if srun else []) if c.get("id") == "crosscheck_clean"), None)
+        if result is None:
+            return {"ran": False, "reason": "giai đoạn này không chạy đối chiếu bằng AI"}
+        ran = result.get("status") != "skipped"
+        return {"ran": ran, "reason": "" if ran else str(result.get("summary") or "")}
+
+    async def _old_text(self, ds: DocSet, evidence: list[Evidence], ref: str) -> str:
+        """The pinned text of the item a `Thay đổi:` line names: an item of this ticket, or `EP-4/F-1` of its parent
+        (from what the parent's own check pinned)."""
+        ticket_key, _, target = ref.rpartition("/")
+        own = next((e.excerpt[:600] for e in evidence if e.item == target and (not ticket_key or e.doc.rsplit("/", 1)[0] == ticket_key)), "")
+        if own or not ticket_key:
+            return own
+        for key, (ticket_id, stored_key) in ds.stored.items():
+            if key in ds.own or key.rsplit("/", 1)[0] != ticket_key or ds.docs[key].item(target) is None:
+                continue
+            row = await self.office.db.fetchone(
+                "SELECT excerpt FROM doc_evidence WHERE ticket_id = ? AND doc_key = ? AND item_id = ? AND error IS NULL AND excerpt <> '' ORDER BY revision DESC LIMIT 1",
+                (ticket_id, stored_key, target),
+            )
+            if row is not None:
+                return str(row["excerpt"])[:600]
+        return ""
+
+    # ---- remarks on items ------------------------------------------------------------------------------------
+
+    async def add_comments(self, ticket: Ticket, raw: Any, *, by: str, interaction_id: str | None = None) -> list[dict[str, Any]]:
+        """Store what an approver wrote about single items when answering a gate card: [{doc, item, text}]."""
+        saved = []
+        for entry in raw if isinstance(raw, list) else []:
+            text = str((entry or {}).get("text") or "").strip() if isinstance(entry, dict) else ""
+            if not text:
+                continue
+            doc_key, item_id = str(entry.get("doc") or "").strip(), str(entry.get("item") or "").strip() or None
+            cur = await self.office.db.execute(
+                "INSERT INTO doc_comments(ticket_id, interaction_id, doc_key, item_id, text, by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ticket.id, interaction_id, doc_key, item_id, text[:2000], by, utcnow()),
+            )
+            saved.append({"id": int(cur.lastrowid or 0), "doc": doc_key, "item": item_id, "text": text[:2000], "by": by})
+        return saved
+
+    async def comments(self, ticket: Ticket, open_only: bool = True) -> list[dict[str, Any]]:
+        """The remarks approvers left on items of the ticket's documents (only the unresolved ones by default)."""
+        sql = "SELECT * FROM doc_comments WHERE ticket_id = ?" + (" AND resolved_at IS NULL" if open_only else "") + " ORDER BY id"
+        return [
+            {"id": r["id"], "doc": r["doc_key"], "item": r["item_id"], "text": r["text"], "by": r["by"], "at": r["created_at"],
+             "interaction_id": r["interaction_id"], "resolved_at": r["resolved_at"], "reply": r["reply"]}
+            for r in await self.office.db.fetchall(sql, (ticket.id,))
+        ]  # fmt: skip
+
+    async def resolve_comments(self, ticket: Ticket) -> None:
+        """An approved gate closes what was still open on the ticket's documents."""
+        await self.office.db.execute("UPDATE doc_comments SET resolved_at = ? WHERE ticket_id = ? AND resolved_at IS NULL", (utcnow(), ticket.id))
 
     async def panel(self, ticket: Ticket) -> dict[str, Any] | None:
         """What the ticket page shows about its documents: the state of each, what is still open, its parent epic and
@@ -587,7 +795,50 @@ class DocService:
     async def spawn(self, ticket: Ticket, response: dict[str, Any], *, by: str) -> list[Ticket]:
         """The approved breakdown of an epic: one child ticket per task, with its spec already approved, the person
         it is handed to and the flow it follows. `response`: {"drop": ["T-3"], "flows": {"T-1": "task-spec"},
-        "assign": {"T-1": "<user id or name>"}}. The epic then waits for its children."""
+        "assign": {"T-1": "<user id or name>"}, "restore": ["T-3"]}. The epic then waits for its children.
+
+        Everything in `response` is checked before anything is created (`spawn_plan`). A child is linked to its item in
+        `doc_spawned`: one that was created but never started is started here; one that exists gets the newly approved
+        text of its documents; an item dropped earlier stays dropped unless `response["restore"]` names it."""
+        office = self.office
+        spawn = self.spawn_of(ticket, ticket.stage)
+        if spawn is None:
+            return []
+        created: list[Ticket] = []
+        for step in await self.spawn_plan(ticket, response):
+            item = step.item
+            if step.action == "drop":
+                await self._link(ticket.id, item.id, None, dropped=True)
+            elif step.action == "sync" and step.child is not None:
+                await self._sync_child(ticket, step.child, item, spawn)
+            elif step.action in ("create", "resume"):
+                child = step.child
+                if child is None:
+                    child = await office.tickets.create(
+                        item.title or item.id,
+                        description=f"{item.body.strip()}\n\n_Task của epic {ticket.key} (mục {item.id} của {ticket.key})._",
+                        type="task",
+                        project_id=ticket.project_id,
+                        parent_id=ticket.id,
+                        created_by=by,
+                    )
+                await self._link(ticket.id, item.id, child.id, dropped=False)  # from here on a failure is resumed, not repeated
+                await self._give_docs(ticket, child, item, spawn)
+                if step.user_id:
+                    await office.teams.set_participant(child.id, step.user_id, list(spawn.assign) or ["dev"])
+                started = await office.stages.start(child.id, template=step.flow, by=by, team_id=ticket.team_id, owner_user_id=ticket.owner_user_id)
+                await office.tickets.add_blocker(ticket.id, child.id)
+                created.append(started)
+        if created:
+            keys = ", ".join(c.key for c in created)
+            await office.tickets.add_comment(ticket.id, f"🧩 Tạo {len(created)} task từ breakdown: {keys}", author_kind="system", author_id=None)
+        return created
+
+    async def spawn_plan(self, ticket: Ticket, response: dict[str, Any], *, revision: int | None = None) -> list[SpawnStep]:
+        """What approving the breakdown with this response will do, task by task; nothing is written. Raises a DocError
+        naming the item when the response cannot be carried out (an item the breakdown does not have, a flow that is
+        not allowed, a person who does not exist), so that an approval is refused whole instead of stopping halfway.
+        `revision`: the breakdown revision about to be approved (default: the approved one, else the current one)."""
         office = self.office
         spawn = self.spawn_of(ticket, ticket.stage)
         if spawn is None:
@@ -595,49 +846,104 @@ class DocService:
         breakdown = await office.tickets.get_document(ticket.id, "breakdown")
         if breakdown is None:
             raise DocError(f"{ticket.key} chưa có tài liệu breakdown")
-        parsed = parse(breakdown.body, "breakdown", self.pack_of(ticket))
+        if revision:
+            body = breakdown.body if revision == breakdown.revision else await self._body(ticket.id, "breakdown", revision)
+        else:
+            body = await self._approved_body(breakdown)
+        tasks = [i for i in parse(body, "breakdown", self.pack_of(ticket)).items if i.kind == "T"]
+        known = {i.id.upper() for i in tasks}
         drop = {str(d).upper() for d in response.get("drop") or []}
-        flows = {str(k).upper(): str(v) for k, v in (response.get("flows") or {}).items()}
-        assign = {str(k).upper(): str(v) for k, v in (response.get("assign") or {}).items()}
-        # a breakdown approved a second time (the epic grew) creates only the tasks that are not tickets yet
-        existing = await office.db.fetchall("SELECT description FROM tickets WHERE parent_id = ?", (ticket.id,))
-        already = {item.id for item in parsed.items for row in existing if f"(mục {item.id} của {ticket.key})" in str(row["description"])}
-        default_flow = spawn.flows[0] if spawn.flows else "task"
-        created: list[Ticket] = []
-        for item in parsed.items:
-            if item.kind != "T" or item.id.upper() in drop or item.id in already:
-                continue
-            flow = flows.get(item.id.upper(), default_flow)
+        restore = {str(d).upper() for d in response.get("restore") or []}
+        flows = {str(k).upper(): str(v) for k, v in (response.get("flows") or {}).items() if v}
+        assign = {str(k).upper(): str(v) for k, v in (response.get("assign") or {}).items() if v}
+        for field_name, ids in (("drop", drop), ("restore", restore), ("flows", flows), ("assign", assign)):
+            for item_id in sorted(set(ids) - known):
+                raise DocError(f"{item_id}: breakdown của {ticket.key} không có mục này (trong '{field_name}'). Các mục: {', '.join(sorted(known))}")
+        for item_id, flow in flows.items():
             if spawn.flows and flow not in spawn.flows:
-                raise DocError(f"{item.id}: luồng '{flow}' không được phép ở đây. Chọn: {', '.join(spawn.flows)}")
-            child = await office.tickets.create(
-                item.title or item.id,
-                description=f"{item.body.strip()}\n\n_Task của epic {ticket.key} (mục {item.id} của {ticket.key})._",
-                type="task",
-                project_id=ticket.project_id,
-                parent_id=ticket.id,
-                created_by=by,
-            )
-            for doc_key in spawn.copy_docs:
-                source = await office.tickets.get_document(ticket.id, f"{doc_key}.{item.id}")
-                if source is None:
-                    continue
-                copied = await office.tickets.put_document(child.id, doc_key, source.body, author=source.updated_by, base_revision=None)
-                await office.db.execute("UPDATE documents SET approved_revision = ? WHERE ticket_id = ? AND key = ?", (copied.revision, child.id, doc_key))
-                await self.capture_baseline(await office.tickets.get(child.id), doc_key)
-            person = assign.get(item.id.upper())
-            if person:
-                user = await office.teams.find_user(person)
-                if user is None:
-                    raise DocError(f"{item.id}: không có người dùng '{person}'")
-                await office.teams.set_participant(child.id, user.id, list(spawn.assign) or ["dev"])
-            started = await office.stages.start(child.id, template=flow, by=by, team_id=ticket.team_id, owner_user_id=ticket.owner_user_id)
-            await office.tickets.add_blocker(ticket.id, child.id)
-            created.append(started)
-        if created:
-            keys = ", ".join(c.key for c in created)
-            await office.tickets.add_comment(ticket.id, f"🧩 Tạo {len(created)} task từ breakdown: {keys}", author_kind="system", author_id=None)
-        return created
+                raise DocError(f"{item_id}: luồng '{flow}' không được phép ở đây. Chọn: {', '.join(spawn.flows)}")
+        people: dict[str, str] = {}
+        for item_id, person in assign.items():
+            user = await office.teams.find_user(person)
+            if user is None:
+                raise DocError(f"{item_id}: không có người dùng '{person}'")
+            people[item_id] = user.id
+        linked = {str(r["item_id"]): r for r in await office.db.fetchall("SELECT * FROM doc_spawned WHERE parent_id = ?", (ticket.id,))}
+        children = await office.db.fetchall("SELECT id, description FROM tickets WHERE parent_id = ?", (ticket.id,))
+        taken = {int(r["child_id"]) for r in linked.values() if r["child_id"] is not None}
+        default_flow = spawn.flows[0] if spawn.flows else "task"
+        steps: list[SpawnStep] = []
+        for item in tasks:
+            row, upper = linked.get(item.id), item.id.upper()
+            child_id = int(row["child_id"]) if row is not None and row["child_id"] is not None else None
+            if child_id is None:  # a child created before the link existed says which item it is in its description
+                child_id = next((int(c["id"]) for c in children if int(c["id"]) not in taken and f"(mục {item.id} của {ticket.key})" in str(c["description"])), None)
+            child = None
+            if child_id is not None and any(int(c["id"]) == child_id for c in children):
+                child = await office.tickets.get(child_id)
+            step = SpawnStep(item=item, action="skip", child=child, flow=flows.get(upper, default_flow), user_id=people.get(upper))
+            if child is not None:
+                waiting = not child.stage and child.status not in (TicketStatus.DONE, TicketStatus.CANCELLED)
+                step.action = "resume" if waiting else ("skip" if child.status == TicketStatus.CANCELLED else "sync")
+            elif upper in drop:
+                step.action = "drop"
+            elif row is None or not row["dropped"] or upper in restore:
+                step.action = "create"
+            steps.append(step)
+        return steps
+
+    async def _link(self, parent_id: int, item_id: str, child_id: int | None, *, dropped: bool) -> None:
+        await self.office.db.execute(
+            "INSERT INTO doc_spawned(parent_id, item_id, child_id, dropped, created_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(parent_id, item_id) DO UPDATE SET child_id = excluded.child_id, dropped = excluded.dropped",
+            (parent_id, item_id, child_id, int(dropped), utcnow()),
+        )
+
+    async def _give_docs(self, ticket: Ticket, child: Ticket, item: Any, spawn: Any) -> list[str]:
+        """The child's documents are what was approved on the epic for its item (`spec.T-2` → the child's `spec`),
+        approved. Returns the keys of the documents the child already had and that were replaced by a newer text."""
+        office = self.office
+        replaced: list[str] = []
+        for doc_key in spawn.copy_docs:
+            source = await office.tickets.get_document(ticket.id, f"{doc_key}.{item.id}")
+            if source is None:
+                continue
+            body = await self._approved_body(source)
+            mine = await office.tickets.get_document(child.id, doc_key)
+            if mine is not None and mine.approved_revision and await self._body(child.id, doc_key, mine.approved_revision) == body:
+                continue
+            revision = mine.revision if mine is not None else None
+            if mine is None or mine.body != body:
+                revision = (await office.tickets.put_document(child.id, doc_key, body, author=source.updated_by, base_revision=revision)).revision
+            await office.db.execute("UPDATE documents SET approved_revision = ? WHERE ticket_id = ? AND key = ?", (revision, child.id, doc_key))
+            await self.capture_baseline(await office.tickets.get(child.id), doc_key)
+            await office.db.execute("UPDATE documents SET approved_baseline_json = baseline_json WHERE ticket_id = ? AND key = ?", (child.id, doc_key))
+            if mine is not None and mine.approved_revision:
+                replaced.append(doc_key)
+        return replaced
+
+    async def _sync_child(self, ticket: Ticket, child: Ticket, item: Any, spawn: Any) -> None:
+        """The epic's documents for a task were approved again with another text: the task gets it as a new approved
+        revision and is told. What the task wrote from the old text is then found by the baseline rule: `react` sends
+        an approved document back (the sweep after the approval), and a card that is waiting is withdrawn here."""
+        office = self.office
+        replaced = await self._give_docs(ticket, child, item, spawn)
+        if not replaced:
+            return
+        names = ", ".join(f"`{k}`" for k in replaced)
+        await office.tickets.add_comment(
+            child.id, f"📝 {names} của task được cập nhật theo bản vừa duyệt lại ở {ticket.key} (mục {item.id}). Tài liệu viết từ bản cũ sẽ được kiểm lại.",
+            author_kind="system", author_id=None,
+        )  # fmt: skip
+        child = await office.tickets.get(child.id)
+        if not child.stage or child.status in (TicketStatus.DONE, TicketStatus.CANCELLED):
+            return
+        try:
+            if await office.stages.waits_for_card(child) and await self.blocking(child, await office.stages.stage_def(child)):
+                reason = f"{names} đổi theo bản vừa duyệt lại ở {ticket.key}: tài liệu đang chờ duyệt không còn khớp"
+                await office.stages.reopen(child.id, child.stage, reason=reason, by="office")
+        except OfficeError as exc:
+            log.warning("could not withdraw the card of %s after its documents changed: %s", child.key, exc)
 
     async def children_open(self, ticket: Ticket) -> list[str]:
         rows = await self.office.db.fetchall(
@@ -682,21 +988,30 @@ class DocService:
                 continue
             if action == "ignore":
                 continue
-            fresh = await office.db.execute(
-                "INSERT OR IGNORE INTO doc_notices(ticket_id, doc_key, kind, cause, action, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (ticket.id, doc.key, kind, cause, action, utcnow()),
+            seen = await office.db.fetchone(
+                "SELECT 1 FROM doc_notices WHERE ticket_id = ? AND doc_key = ? AND kind = ? AND cause = ?", (ticket.id, doc.key, kind, cause)
             )
-            if not fresh.rowcount:
+            if seen is not None:
                 continue  # already announced for this very cause
             label = MATCH_STATE_VI.get(state, state.value)
             stage = next((s.id for s in (tpl.stages if tpl else []) if doc.key in {o for out in s.outputs for o in out.split("|")}), None)
+            reopened = False
             if action in ("revise", "reopen_gate") and stage is not None:
-                await office.stages.reopen(ticket.id, stage, reason=f"Tài liệu `{doc.key}` đã {label}: {what}", by="office")
-            else:
+                try:
+                    await office.stages.reopen(ticket.id, stage, reason=f"Tài liệu `{doc.key}` đã {label}: {what}", by="office")
+                    reopened = True
+                except OfficeError as exc:  # the stage cannot be reopened from where the ticket is: people still hear about it
+                    log.warning("could not reopen %s at %s for %s: %s", ticket.key, stage, doc.key, exc)
+            if not reopened:
                 await office.tickets.add_comment(
                     ticket.id, f"⚠️ Tài liệu `{doc.key}` (bản {doc.revision}, đã duyệt) hiện {label}: {what}. Xem lại và cập nhật nếu cần.", author_kind="system", author_id=None
                 )
                 action = "notify_author"
+            # recorded only once the cause was acted on: an action that broke is tried again at the next sweep
+            await office.db.execute(
+                "INSERT OR IGNORE INTO doc_notices(ticket_id, doc_key, kind, cause, action, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (ticket.id, doc.key, kind, cause, action, utcnow()),
+            )
             office.bus.publish("doc.state", ticket_id=ticket.id, key=doc.key, state=state.value, action=action)
             done.append({"ticket": ticket.key, "doc": doc.key, "state": state.value, "action": action})
         return done

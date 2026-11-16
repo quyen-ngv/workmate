@@ -13,7 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Severity = Literal["error", "warn"]
-RULE_TYPES = ("template", "cover", "traces_to", "evidence", "fresh", "baseline", "answered", "declared_change")
+RULE_TYPES = ("template", "cover", "traces_to", "evidence", "fresh", "baseline", "answered", "declared_change", "min_items", "has_line")
 # What a pack may ask for when something changes after approval (spec 6.3). The core only classifies the event.
 REACTIONS = ("ignore", "notify_author", "revise", "reopen_gate", "block")
 
@@ -54,7 +54,11 @@ class Syntax(_Strict):
     source: list[str] = Field(default_factory=lambda: ["Nguồn"])
     changes: list[str] = Field(default_factory=lambda: ["Thay đổi"])
     answer: list[str] = Field(default_factory=lambda: ["Trả lời"])
+    quote: list[str] = Field(default_factory=lambda: ["Trích"])  # the exact words or code a statement rests on
     tags: dict[str, str] = Field(default_factory=dict)  # tag name used by rules → the word written in brackets
+    # Other lines a rule may ask for under an item (`has_line`): name used by rules → the words a line starts with.
+    # A short label may sit between the word and the colon (`Phương án A: …`).
+    lines: dict[str, list[str]] = Field(default_factory=dict)
     version_line: str = r"Phiên bản: \d+"
     changelog: str = "Change log"  # heading of the change table
 
@@ -72,6 +76,8 @@ class RuleDef(_Strict):
     against: list[str] = Field(default_factory=list)
     kinds: list[str] = Field(default_factory=list)
     providers: list[str] = Field(default_factory=list)
+    min: int = Field(default=1, ge=1)  # `min_items`, `has_line`: how many are needed
+    line: str | None = None  # `has_line`: a name of `syntax.lines`
     unless_section: str | None = None
     unless_tag: str | None = None
 
@@ -89,6 +95,20 @@ class Crosscheck(_Strict):
     severity: Severity = "error"
 
     @field_validator("at", mode="before")
+    @classmethod
+    def _lists(cls, value: Any) -> Any:
+        return _as_list(value)
+
+
+class DocReview(_Strict):
+    """A quality review of one document type by the AI reviewer: what a good document of that type must show."""
+
+    doc: str  # document type
+    at: list[str] = Field(default_factory=list)  # gates where the review runs
+    rubric: list[str] = Field(default_factory=list)  # short imperative criteria
+    severity: Severity = "error"
+
+    @field_validator("at", "rubric", mode="before")
     @classmethod
     def _lists(cls, value: Any) -> Any:
         return _as_list(value)
@@ -114,7 +134,13 @@ class StageConfig(_Strict):
     checks: list[str] = Field(default_factory=list)
     gate: str | None = None
     requires_steps: bool = False
-    instructions: str = ""
+    instructions: str = ""  # after the pack is built: the full text (the named blocks, then what the stage wrote itself)
+    instructions_from: list[str] = Field(default_factory=list)  # names of the pack's `instructions`, in order
+
+    @field_validator("instructions_from", mode="before")
+    @classmethod
+    def _lists(cls, value: Any) -> Any:
+        return _as_list(value)
     spawn: Spawn | None = None
 
 
@@ -137,8 +163,8 @@ class SourceRef(BaseModel):
     """One entry of a `Nguồn:` line. `kind` is only what the text looks like; which adapter serves it is not the core's call."""
 
     raw: str  # as written, the key evidence is matched on
-    kind: str  # "file" | "ticket" | "url" | "other"
-    ref: str  # "src/a.py" | "PAY-120" | "https://…"
+    kind: str  # "file" | "ticket" | "url" | "item" (an item of the documents: `Q-2`, `EP-4/Q-2`) | "other"
+    ref: str  # "src/a.py" | "PAY-120" | "https://…" | "Q-2"
     locator: str = ""  # ":40-88" | "§2.1" | "#L10-L20"
     repo: str = ""  # "repo" in `repo:src/a.py`
 
@@ -155,16 +181,18 @@ class Item(BaseModel):
     section: str
     traces: list[str] = Field(default_factory=list)  # ["AC-1.2", "EP-4/REQ-2"]
     sources: list[SourceRef] = Field(default_factory=list)
+    quotes: list[str] = Field(default_factory=list)  # `Trích:` lines: carried for whoever compares them with the source
     changes: list[str] = Field(default_factory=list)  # ["F-2"]
     answer: str = ""
     tags: list[str] = Field(default_factory=list)  # tag names from the pack's syntax ("technical"), not the written word
+    lines: dict[str, list[str]] = Field(default_factory=dict)  # name of `syntax.lines` → the values of such lines
 
 
 class Problem(BaseModel):
     """A structural fault found while parsing. The `template` rule turns it into a Finding (the parser knows neither
     the document key nor the rule's severity)."""
 
-    code: str  # "missing_section" | "no_version" | "no_changelog" | "duplicate_id" | "bad_id"
+    code: str  # "missing_section" | "no_version" | "no_changelog" | "duplicate_id" | "bad_id" | "unparsed_id"
     item: str | None = None
     detail: str = ""  # tells two problems of the same code apart (the section name)
     message: str

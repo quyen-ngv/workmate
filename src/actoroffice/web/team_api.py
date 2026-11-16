@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import difflib
 import re
+import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from actoroffice.app import Office
-from actoroffice.domain.errors import NotFound
+from actoroffice.domain.errors import NotFound, OfficeError
 from actoroffice.domain.stage import TEMPLATE_TITLES, default_templates
 from actoroffice.domain.team import LOCAL_OWNER_ID, TeamSettings
 from actoroffice.domain.work import TicketStatus
@@ -73,8 +77,96 @@ class ParticipantBody(BaseModel):
     roles: list[str]
 
 
+USER_HEADER = "x-office-user"
+DOCS_TTL_S = 5.0  # how long the documents panel of a ticket is reused when nothing it is made from changed
+
+
+async def acting_user(request: Request, office: Office) -> str:
+    """Who a web request acts as: the person picked in the sidebar ("Tôi là …", header X-Office-User) when the id names
+    an active user, else the local owner. A convenience on a single shared login, NOT authentication: whoever holds
+    the office's login cookie may pick anyone. It makes the audit trail and the role checks honest between
+    colleagues who share one office; it does not protect against a colleague who lies."""
+    raw = unquote(request.headers.get(USER_HEADER) or "").strip()
+    if not raw or raw == LOCAL_OWNER_ID:
+        return LOCAL_OWNER_ID
+    try:
+        user = await office.teams.get_user(raw)
+    except OfficeError:
+        return LOCAL_OWNER_ID
+    return user.id if getattr(user, "active", True) else LOCAL_OWNER_ID
+
+
+def _rest_lines(body: str, items: list[Any]) -> list[str]:
+    """The lines of a document that belong to no item (headings of sections, free text, tables)."""
+    ids = {i.id for i in items}
+    inside = Counter(line.strip() for i in items for line in i.body.splitlines()[1:] if line.strip())
+    out = []
+    for line in body.splitlines():
+        head = re.match(r"\s*(?:#{1,6}\s+|[-*]\s+)?(?:\*\*|__)?([A-Za-z]+-[A-Za-z0-9.]+)", line)
+        if head and head.group(1).rstrip(".") in ids:
+            continue
+        key = line.strip()
+        if key and inside[key] > 0:
+            inside[key] -= 1
+            continue
+        out.append(line)
+    return out
+
+
+def doc_diff(old_body: str, new_body: str, doctype: str | None, pack: Any) -> dict[str, Any]:
+    """What changed between two revisions of a document: items added / changed / removed by id with both texts
+    (Doc Core's parser tells which), and a line diff of everything that is not an item."""
+    from actoroffice.doccore import impact, parse
+
+    items: list[dict[str, Any]] = []
+    old_rest, new_rest = old_body.splitlines(), new_body.splitlines()
+    if doctype is not None:
+        old, new = parse(old_body, doctype, pack), parse(new_body, doctype, pack)
+        before, after = {i.id: i for i in old.items}, {i.id: i for i in new.items}
+        changed = impact(old, new)
+        for item_id in [i for i in after if i in changed] + [i for i in before if i in changed and i not in after]:
+            a, b = before.get(item_id), after.get(item_id)
+            ref = b or a
+            items.append({
+                "id": item_id, "kind": ref.kind, "title": ref.title, "change": "added" if a is None else "removed" if b is None else "changed",
+                "old": a.body if a else "", "new": b.body if b else "",
+            })  # fmt: skip
+        old_rest, new_rest = _rest_lines(old_body, old.items), _rest_lines(new_body, new.items)
+    rest = [line for line in difflib.unified_diff(old_rest, new_rest, lineterm="", n=2) if not line.startswith(("---", "+++"))]
+    return {"items": items, "rest": rest, "same": not items and not rest}
+
+
 def register(app: FastAPI, office: Office) -> None:
     teams = office.teams
+    docs_cache: dict[int, tuple[float, tuple[Any, ...], Any]] = {}
+
+    @app.middleware("http")
+    async def drop_docs_cache(request: Request, call_next: Any) -> Any:
+        # anything a person does on the web (an answer, an accepted difference, a control) shows at once
+        if request.method not in ("GET", "HEAD"):
+            docs_cache.clear()
+        return await call_next(request)
+
+    async def docs_panel(ticket: Any) -> Any:
+        """`office.docs.panel` re-reads and re-checks every document of the ticket and of its tasks; the page asks for
+        it on every live event. Reused for a few seconds while the ticket, its documents and its tasks are unchanged."""
+        row = await office.db.fetchone(
+            "SELECT (SELECT COALESCE(SUM(revision), 0) || ':' || COALESCE(SUM(approved_revision), 0) || ':' || COUNT(*) || ':' || COALESCE(MAX(updated_at), '')"
+            " FROM documents WHERE ticket_id = ? OR ticket_id = ? OR ticket_id IN (SELECT id FROM tickets WHERE parent_id = ?)) AS docs,"
+            " (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM tickets WHERE parent_id = ?) AS kids",
+            (ticket.id, ticket.parent_id or 0, ticket.id, ticket.id),
+        )
+        sig = (ticket.updated_at, ticket.stage, ticket.status.value, row["docs"] if row else "", row["kids"] if row else "")
+        hit = docs_cache.get(ticket.id)
+        now = time.monotonic()
+        if hit and hit[1] == sig and now - hit[0] < DOCS_TTL_S:
+            return hit[2]
+        panel = await office.docs.panel(ticket)
+        docs_cache[ticket.id] = (now, sig, panel)
+        if len(docs_cache) > 200:
+            for old in sorted(docs_cache, key=lambda k: docs_cache[k][0])[:100]:
+                docs_cache.pop(old, None)
+        return panel
 
     # ---- people & teams ---------------------------------------------------------------------------------
 
@@ -190,7 +282,7 @@ def register(app: FastAPI, office: Office) -> None:
     # ---- stages ----------------------------------------------------------------------------------------------
 
     @app.post("/api/tasks")
-    async def new_task(body: TaskBody) -> dict[str, Any]:
+    async def new_task(body: TaskBody, request: Request) -> dict[str, Any]:
         """Create a ticket and start it on a stage template in one step (what /task does on Telegram)."""
         title = body.title.strip()
         if not title:
@@ -199,28 +291,37 @@ def register(app: FastAPI, office: Office) -> None:
             title[:200], description=body.description or title, project_id=body.project_id or office.chat.default_project_id, created_by="user"
         )
         ticket = await office.stages.start(
-            ticket.id, template=body.template, by=LOCAL_OWNER_ID, team_id=body.team_id, owner_user_id=body.owner_user_id, mode=body.mode
+            ticket.id, template=body.template, by=await acting_user(request, office), team_id=body.team_id, owner_user_id=body.owner_user_id, mode=body.mode
         )
         office.scheduler.kick()
         return ticket.model_dump()
 
     @app.post("/api/tickets/{key}/stages/start")
-    async def start_stages(key: str, body: StartBody) -> dict[str, Any]:
+    async def start_stages(key: str, body: StartBody, request: Request) -> dict[str, Any]:
         ticket = await office.stages.start(
-            key, template=body.template, by=LOCAL_OWNER_ID, team_id=body.team_id, owner_user_id=body.owner_user_id, mode=body.mode
+            key, template=body.template, by=await acting_user(request, office), team_id=body.team_id, owner_user_id=body.owner_user_id, mode=body.mode
         )
         office.scheduler.kick()
         return ticket.model_dump()
 
     @app.post("/api/tickets/{key}/backlog/start")
-    async def start_backlog(key: str) -> dict[str, Any]:
+    async def start_backlog(key: str, request: Request) -> dict[str, Any]:
         """The "Bắt đầu" button of the sidebar's Backlog list (SI-24): run the ticket's suggested workflow."""
-        ticket = await office.proposals.start_backlog(key, by=LOCAL_OWNER_ID)
+        ticket = await office.proposals.start_backlog(key, by=await acting_user(request, office))
         office.scheduler.kick()
         return ticket.model_dump()
 
+    async def card_rights(ticket: Any, viewer: str) -> dict[str, Any]:
+        """Per pending card of the ticket: may the person looking answer it (the same role check the answer runs)."""
+        out: dict[str, Any] = {}
+        for item in await office.interactions.pending(ticket_id=ticket.id):
+            roles = [str(r) for r in item.payload.get("roles") or []]
+            may = viewer == LOCAL_OWNER_ID or await teams.can_act(viewer, ticket, roles)
+            out[item.id] = {"may_answer": may, "approved": any(a.get("by") == viewer for a in item.payload.get("approvals") or [])}
+        return out
+
     @app.get("/api/tickets/{key}/stage")
-    async def stage(key: str) -> dict[str, Any]:
+    async def stage(key: str, request: Request) -> dict[str, Any]:
         ticket = await office.tickets.get(key)
         if not ticket.stage:
             raise HTTPException(404, f"{ticket.key} không chạy theo quy trình giai đoạn")
@@ -228,8 +329,11 @@ def register(app: FastAPI, office: Office) -> None:
         shape = template.model_dump()
         for s in shape["stages"]:
             s["title"] = s["title"] or stage_title(s["id"])  # the reopen sheet shows names, sends ids
+        viewer = await acting_user(request, office)
         return {
-            "status": await office.stages.status(ticket, viewer=LOCAL_OWNER_ID),
+            "status": await office.stages.status(ticket, viewer=viewer),
+            "viewer": viewer,
+            "cards": await card_rights(ticket, viewer),
             "template": shape,
             "stage_runs": [r.model_dump() for r in await office.stages.runs(ticket.id)],
             "participants": [m.model_dump() for m in await teams.participants(ticket.id)],
@@ -237,13 +341,74 @@ def register(app: FastAPI, office: Office) -> None:
             "review_acs": await office.stages.review_acs(ticket.id),
             "ui_evidence": await office.stages.ui_evidence(ticket.id),
             "merge": await office.merges.panel(ticket.key) if ticket.stage == "pr" else {"available": False},
-            "docs": await office.docs.panel(ticket),
+            "docs": await docs_panel(ticket),
         }
 
+    @app.get("/api/tickets/{key}/documents/{doc}/diff")
+    async def document_diff(key: str, doc: str, to: int | None = None, since: str = "", start: int | None = Query(None, alias="from")) -> dict[str, Any]:
+        """Two revisions of a document side by side for the approver: `from` → `to` (default: the current one).
+        Without `from`: the revision that existed at `since` (the moment it was sent back), else the approved
+        revision, else the one before."""
+        ticket = await office.tickets.get(key)
+        current = await office.tickets.get_document(ticket.id, doc)
+        if current is None:
+            raise NotFound(f"{ticket.key} không có tài liệu {doc}")
+        to = to or current.revision
+        basis = "bản bạn chọn"
+        if start is None and since:
+            row = await office.db.fetchone(
+                "SELECT MAX(revision) AS r FROM document_revisions WHERE ticket_id = ? AND key = ? AND created_at <= ? AND revision < ?", (ticket.id, doc, since, to)
+            )
+            start, basis = (row or {}).get("r"), "bản lúc bị trả lại"
+        if start is None and current.approved_revision and current.approved_revision < to:
+            start, basis = current.approved_revision, "bản đã duyệt"
+        if start is None:
+            start, basis = to - 1, "bản trước"
+        if start < 1 or start >= to:
+            raise NotFound(f"Chưa có bản nào trước bản {to} của {doc} để so")
+        bodies = {}
+        for revision in (start, to):
+            row = await office.db.fetchone("SELECT body FROM document_revisions WHERE ticket_id = ? AND key = ? AND revision = ?", (ticket.id, doc, revision))
+            if row is None:
+                raise NotFound(f"{ticket.key} không còn bản {revision} của {doc}")
+            bodies[revision] = str(row["body"] or "")
+        pack = office.docs.pack_of(ticket)
+        doctype = office.docs.doctype_of(doc, pack) if office.docs.applies(ticket) else None
+        return {"doc": doc, "from": start, "to": to, "basis": basis, **doc_diff(bodies[start], bodies[to], doctype, pack)}
+
+    @app.get("/api/tickets/{key}/documents/source")
+    async def document_source(key: str, path: str) -> dict[str, Any]:
+        """A file a document of the ticket (or of its epic) cites on a `Nguồn:` line, for the reader of that document.
+        Only a path written in one of those documents, only inside the ticket's workspace or its project folder."""
+        ticket = await office.tickets.get(key)
+        wanted = path.strip().replace("\\", "/").removeprefix("./")
+        owners = [ticket.id] + ([ticket.parent_id] if ticket.parent_id else [])
+        cited = False
+        for owner in owners:
+            cited = cited or any(wanted in d.body for d in await office.tickets.list_documents(owner))
+        from actoroffice.codeintel.index import SECRET_NAMES
+
+        if not wanted or not cited or SECRET_NAMES.search(wanted.rsplit("/", 1)[-1]):  # never a key or an .env file, cited or not
+            raise NotFound(f"Không tài liệu nào của {ticket.key} dẫn nguồn {path}")
+        root = await office.tickets.root_of(ticket.id)
+        bases = [(office.settings.workspaces_dir / root.key).resolve()]
+        if ticket.project_id:
+            project = await office.projects.get(ticket.project_id)
+            if project.path:
+                bases.append(Path(project.path).resolve())
+        secrets_dir = (office.settings.data_dir / "secrets").resolve()
+        for base in bases:
+            file = (base / wanted).resolve()
+            if file.is_relative_to(base) and not file.is_relative_to(secrets_dir) and file.is_file():
+                raw = file.read_bytes()
+                limit = 512 * 1024
+                return {"path": wanted, "text": office.redact(raw[:limit].decode("utf-8", errors="replace")), "truncated": len(raw) > limit}
+        raise NotFound(f"Không thấy file {path} trong thư mục code của {ticket.key}")
+
     @app.post("/api/tickets/{key}/merge/start")
-    async def merge_start(key: str) -> dict[str, Any]:
+    async def merge_start(key: str, request: Request) -> dict[str, Any]:
         """The "Merge into <main>" button (repos without a code host): merges, tests and passes the gate in the background."""
-        return await office.merges.start(key, by=LOCAL_OWNER_ID)
+        return await office.merges.start(key, by=await acting_user(request, office))
 
     @app.get("/api/tickets/{key}/changes")
     async def ticket_changes(key: str) -> dict[str, Any]:
@@ -298,10 +463,11 @@ def register(app: FastAPI, office: Office) -> None:
         return {"participants": [m.model_dump() for m in await teams.participants(ticket.id)]}
 
     @app.post("/api/tickets/{key}/control")
-    async def control(key: str, body: ControlBody) -> dict[str, Any]:
+    async def control(key: str, body: ControlBody, request: Request) -> dict[str, Any]:
         stages = office.stages
-        by = LOCAL_OWNER_ID
+        by = await acting_user(request, office)
         cmd = body.cmd.strip().lower()
+        held = False  # the AI reads a comment or a direction only after the open gate card is answered
         if cmd == "pause":
             ticket = await stages.pause(key, by=by)
         elif cmd == "resume":
@@ -312,6 +478,21 @@ def register(app: FastAPI, office: Office) -> None:
             ticket = await stages.stop(key, by=by, reason=body.text)
         elif cmd == "steer":
             ticket = await stages.steer(key, body.text, by=by)
+            held = bool(ticket.stage) and await stages.waits_for_card(ticket)
+        elif cmd == "ask":  # a question or a remark for the AI / the author that does not answer the card
+            text = body.text.strip()
+            if not text:
+                raise HTTPException(422, "Câu hỏi trống")
+            ticket = await office.tickets.get(key)
+            name = "Owner" if by == LOCAL_OWNER_ID else (await teams.get_user(by)).name
+            await office.tickets.add_comment(ticket.id, f"❓ {text}", author_kind="user", author_id=name)
+            held = bool(ticket.stage) and await stages.waits_for_card(ticket)
+        elif cmd == "withdraw":  # the person who sent a stage for approval takes it back
+            withdraw = getattr(stages, "withdraw_submission", None)
+            if withdraw is None:
+                raise HTTPException(501, "Phiên bản này chưa hỗ trợ rút lại bản đã gửi duyệt")
+            await withdraw(key, by=by)
+            ticket = await office.tickets.get(key)
         elif cmd == "merged":
             ticket = await stages.external_passed(key, "merge", by=by, note=body.text or "PR đã merge")
         elif cmd in ("quick", "full"):
@@ -337,7 +518,7 @@ def register(app: FastAPI, office: Office) -> None:
         else:
             raise HTTPException(422, f"không rõ lệnh {body.cmd}")
         office.scheduler.kick()
-        return {"ticket": ticket.model_dump(), "status": await stages.status(ticket, viewer=by)}
+        return {"ticket": ticket.model_dump(), "status": await stages.status(ticket, viewer=by), "held": held}
 
     # ---- run activity ---------------------------------------------------------------------------------------
 

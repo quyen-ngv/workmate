@@ -3,6 +3,10 @@
 A pack is checked when it is loaded, all of it at once: a pack that names a kind, a document type, a role or a rule
 type that does not exist is refused with every problem and where it is, so a bad pack never reaches a running stage.
 `extends: <pack>` lets a unit write only what differs: dicts merge key by key, anything else is replaced.
+
+Instructions the AI gets at a stage are written once: `instructions: {<name>: <text>}` at the top of the pack, and a
+stage names the blocks it is made of (`instructions_from: [design, common]`). Building the pack puts the full text in
+`StageConfig.instructions`, so whoever reads a stage never has to know about the blocks.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
-from .model import REACTIONS, RULE_TYPES, Crosscheck, DocType, GateConfig, ItemKind, OnChange, RuleDef, StageConfig, Syntax
+from .model import REACTIONS, RULE_TYPES, Crosscheck, DocReview, DocType, GateConfig, ItemKind, OnChange, RuleDef, StageConfig, Syntax
 
 PACK_FILE = "pack.yaml"
 DEFAULT_DIR = Path(__file__).resolve().parent.parent / "templates" / "packs" / "default"
@@ -31,6 +35,8 @@ REQUIRED = {
     "baseline": ("docs",),
     "answered": ("kinds",),
     "declared_change": ("each", "against"),
+    "min_items": (),
+    "has_line": ("kinds", "line"),
 }
 
 
@@ -55,6 +61,8 @@ class StandardPack(BaseModel):
     doc_types: dict[str, DocType] = Field(default_factory=dict)
     rules: dict[str, RuleDef] = Field(default_factory=dict)
     crosschecks: dict[str, Crosscheck] = Field(default_factory=dict)
+    reviews: dict[str, DocReview] = Field(default_factory=dict)  # AI quality review of one document, by rubric
+    instructions: dict[str, str] = Field(default_factory=dict)  # named blocks a stage builds its instructions from
     on_change: OnChange = Field(default_factory=OnChange)
     flows: dict[str, list[StageConfig]] = Field(default_factory=dict)
     gates: dict[str, GateConfig] = Field(default_factory=dict)
@@ -116,6 +124,12 @@ def build_pack(data: dict[str, Any], roots: list[Path] | None = None, source: st
     problems = _check(pack)
     if problems:
         raise PackError(problems, source)
+    for stages in pack.flows.values():
+        for stage in stages:
+            if stage.instructions_from:  # done once: a pack dumped and built again gives the same text
+                parts = [pack.instructions[name].strip() for name in stage.instructions_from] + [stage.instructions.strip()]
+                stage.instructions = "\n".join(part for part in parts if part) + "\n"
+                stage.instructions_from = []
     return pack
 
 
@@ -186,9 +200,12 @@ def _check(pack: StandardPack) -> list[str]:
                 problems.append(f"{where}: vai trò '{name}' không có trong roles ({', '.join(pack.roles) or 'trống'})")
 
     regex("syntax.version_line", pack.syntax.version_line)
-    for field in ("trace", "source", "changes", "answer"):
+    for field in ("trace", "source", "changes", "answer", "quote"):
         if not [w for w in getattr(pack.syntax, field) if w.strip()]:
             problems.append(f"syntax.{field}: cần ít nhất một từ khoá")
+    for name, words in pack.syntax.lines.items():
+        if not [w for w in words if w.strip()]:
+            problems.append(f"syntax.lines.{name}: cần ít nhất một từ khoá")
 
     for name, kind in kinds.items():
         if not KIND_RE.fullmatch(name):
@@ -218,6 +235,10 @@ def _check(pack: StandardPack) -> list[str]:
                 problems.append(f"{where}.{param}: luật kiểu '{rule.type}' bắt buộc có tham số này")
         if rule.type == "evidence" and not (rule.kinds or rule.also):
             problems.append(f"{where}: luật kiểu 'evidence' cần 'kinds' hoặc 'also'")
+        if rule.type == "min_items" and not (rule.each or (rule.docs and rule.kinds)):
+            problems.append(f"{where}: luật kiểu 'min_items' cần 'each' (ví dụ spec.AC) hoặc cả 'docs' và 'kinds'")
+        if rule.line and rule.line not in pack.syntax.lines:
+            problems.append(f"{where}.line: loại dòng '{rule.line}' không có trong syntax.lines ({', '.join(pack.syntax.lines) or 'trống'})")
         for param in ("each", "by", "to", "also", "against"):
             for value in getattr(rule, param):
                 selector(f"{where}.{param}", value)
@@ -234,6 +255,12 @@ def _check(pack: StandardPack) -> list[str]:
         selector(f"crosschecks.{check_id}.left", check.left, bare=True)
         selector(f"crosschecks.{check_id}.right", check.right, extra=("evidence",), bare=True)
 
+    for review_id, review in pack.reviews.items():
+        if review.doc not in doctypes:
+            problems.append(f"reviews.{review_id}.doc: loại tài liệu '{review.doc}' không có trong doc_types")
+        if not [line for line in review.rubric if line.strip()]:
+            problems.append(f"reviews.{review_id}.rubric: cần ít nhất một tiêu chí")
+
     for event in ("upstream_changed", "evidence_stale"):
         for when, reaction in getattr(pack.on_change, event).items():
             if reaction not in REACTIONS:
@@ -247,6 +274,9 @@ def _check(pack: StandardPack) -> list[str]:
             if stage.id in seen:
                 problems.append(f"{where}.id: stage '{stage.id}' bị lặp trong luồng '{flow}'")
             seen.add(stage.id)
+            for block in stage.instructions_from:
+                if block not in pack.instructions:
+                    problems.append(f"{where}.instructions_from: khối '{block}' không có trong instructions ({', '.join(pack.instructions) or 'trống'})")
             if stage.spawn:
                 for target in stage.spawn.flows:
                     if target not in pack.flows:

@@ -27,6 +27,30 @@ class TurnCtx:
         bound = next(t for t in self.spec.internal_tools if t.name == name)
         return await bound.call(args)
 
+    async def call(self, name: str, args: dict[str, Any]) -> str:
+        """An office tool call the way a real runtime reports it: the call and its result are events of the run, so
+        what the office reads from the activity (which documents were opened, whether the code graph was asked) sees it."""
+        self._calls = getattr(self, "_calls", 0) + 1
+        call_id = f"call-{self._calls}"
+        await self.sink("tool_use", {"tool": f"mcp__office__{name}", "input": args, "id": call_id})
+        try:
+            out = await self.office(name, args)
+        except Exception as exc:
+            await self.sink("tool_result", {"id": call_id, "text": str(exc), "error": True})
+            raise
+        await self.sink("tool_result", {"id": call_id, "text": out, "error": False})
+        return out
+
+
+async def study(ctx: TurnCtx, epic_key: str, *, docs: tuple[str, ...] = ("analysis",), targets: tuple[str, ...] = ("src/shop/limits.py:3",)) -> None:
+    """What a run of a pack stage does before it writes, and the office checks from the activity (`sources_read`,
+    `impact_covered`): it opens the epic's documents its own document is written from, and asks the code graph what
+    its change reaches."""
+    for key in docs:
+        await ctx.call("doc_get", {"ticket": epic_key, "key": key})
+    if targets:
+        await ctx.call("code_impact", {"targets": list(targets)})
+
 
 Script = Callable[[TurnCtx], Awaitable[TurnResult | None]]
 

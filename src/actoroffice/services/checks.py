@@ -29,6 +29,8 @@ from actoroffice.domain.stage import StageDef, StageRun
 from actoroffice.domain.work import Project, Ticket
 from actoroffice.proctree import kill_tree
 
+from .doccontext import CHANGE_KIND, IMPACT_TOOLS, KIND_VI
+
 if TYPE_CHECKING:
     from actoroffice.app import Office
 
@@ -80,6 +82,8 @@ class CheckContext:
     docs: dict[str, str] = field(default_factory=dict)
     # time.time() when repo:test started in this round: coverage_changed_lines ignores a report older than it
     test_started: float | None = None
+    # the results of the checks that ran before this one in the same pass (crosscheck_clean spends no round after a failure)
+    results: list[CheckResult] = field(default_factory=list)
 
 
 class CheckRunner:
@@ -97,8 +101,9 @@ class CheckRunner:
         docs = {d.key: d.body for d in await office.tickets.list_documents(ticket.id)}
         ctx = CheckContext(office, ticket, stage, stage_run, workspace, project, run_id, docs)
         results: list[CheckResult] = []
+        ctx.results = results
         not_synced = False
-        for check_id in only if only is not None else stage.checks:
+        for check_id in self._derived(ticket, stage, list(only if only is not None else stage.checks)):
             if not_synced and (check_id.startswith("repo:") or check_id == "coverage_changed_lines"):
                 # The branch lacks main's new commits: building or testing it now would test old code (SI-21);
                 # coverage reads the report of the repo:test that did not run, so it would score an old one (SI-37)
@@ -113,6 +118,19 @@ class CheckRunner:
             if run_id:
                 await office.runs.event(run_id, "check", result.model_dump())
         return results
+
+    def _derived(self, ticket: Ticket, stage: StageDef, check_ids: list[str]) -> list[str]:
+        """The checks of a pass with the ones that follow from the pack, so no pack has to list them: a stage whose
+        documents are checked against the standard (`doc_rules`) also gets `grounded` (what an item says is in what
+        it cites), and `impact_covered` when its documents may hold changes to the code (items of kind C). Both run
+        right after the rules."""
+        if "doc_rules" not in check_ids or not self.office.docs.applies(ticket):
+            return check_ids
+        doc_types = self.office.docs.pack_of(ticket).doc_types
+        changes = any(CHANGE_KIND in doc_types[o].items for out in stage.outputs for o in out.split("|") if o in doc_types)
+        extra = [c for c in ("grounded", *(["impact_covered"] if changes else [])) if c not in check_ids]
+        at = check_ids.index("doc_rules") + 1
+        return check_ids[:at] + extra + check_ids[at:]
 
     async def _one(self, check_id: str, ctx: CheckContext) -> CheckResult:
         if check_id.startswith("repo:"):
@@ -917,7 +935,8 @@ async def check_kb_noted(ctx: CheckContext) -> CheckResult:
     return CheckResult(id="kb_noted", status="failed", summary="chưa ghi kiến thức nào (kb_note), hoặc ghi 'none' trong kb-draft nếu thật sự không có")
 
 
-SOURCE_STAGES = ("understand", "scope", "analyze")
+IMPACT_LIMIT = 15  # things a design does not deal with that one failure lists
+GROUNDED_LIMIT = 15
 
 
 async def check_doc_rules(ctx: CheckContext) -> CheckResult:
@@ -940,10 +959,10 @@ async def check_crosscheck_clean(ctx: CheckContext) -> CheckResult:
 
 async def check_sources_read(ctx: CheckContext) -> CheckResult:
     """Every source the ticket names that the AI must read was read (run activity), skipped with a reason, or
-    could not be read (SI-39). External URLs and other teams' tickets are not required."""
-    if ctx.stage.id not in SOURCE_STAGES:
-        return CheckResult(id="sources_read", status="skipped", summary="chỉ kiểm ở bước Tìm hiểu / Chốt cách sửa / Phân tích")
-    sources = await ctx.office.sources.list(ctx.ticket)
+    could not be read (SI-39). External URLs and other teams' tickets are not required. It runs in every stage that
+    lists it. In a pack flow the documents the stage is written from count too (the task's spec, the epic's analysis
+    and breakdown): each must have been opened in this stage attempt."""
+    sources = await ctx.office.sources.list(ctx.ticket) + await ctx.office.sources.basis(ctx.ticket, ctx.stage, ctx.stage_run.id)
     if not sources:
         return CheckResult(id="sources_read", status="skipped", summary="ticket không nhắc nguồn nào")
     unread = [s["display"] for s in sources if s["required"] and s["status"] == "unread"]
@@ -958,10 +977,81 @@ async def check_sources_read(ctx: CheckContext) -> CheckResult:
     return CheckResult(id="sources_read", status="passed", summary=f"{len(sources)} nguồn đã xử lý", data=data)
 
 
+async def check_grounded(ctx: CheckContext) -> CheckResult:
+    """What the items of the stage's documents say is in what they cite (no model is asked): names written in
+    backticks, numbers with a unit or a comparison, quoted lines. See DocContext.grounding. What could not be looked
+    up is said in the summary; a pass means it was looked up."""
+    cid = "grounded"
+    found = await ctx.office.doccontext.grounding(ctx.ticket, ctx.stage)
+    notes = (" Không kiểm được: " + "; ".join(found.notes) + ".") if found.notes else ""
+    data = {"findings": ctx.office.docs.dump(found.findings), "checked": found.checked, "notes": found.notes}
+    if not found.checked:
+        return CheckResult(id=cid, status="skipped", summary="không mục nào của tài liệu có nguồn ghim để đối chiếu." + notes, data=data)
+    errors = [f for f in found.findings if f.severity == "error"]
+    warnings = [f for f in found.findings if f.severity != "error"]
+    listed = "\n".join(f"- {f.rule} · {f.doc} · {f.item}: {f.message}" for f in (errors + warnings)[:GROUNDED_LIMIT])
+    more = f"\n- … (còn {len(found.findings) - GROUNDED_LIMIT} mục)" if len(found.findings) > GROUNDED_LIMIT else ""
+    if errors:
+        return CheckResult(
+            id=cid, status="failed", summary=f"{len(errors)} điều tài liệu viết không có trong nguồn ({len(warnings)} cảnh báo):\n{listed}{more}{notes}", data=data
+        )
+    head = f"{found.checked} mục có nguồn: tên, con số và dòng trích đều có trong nguồn"
+    if warnings:
+        head = f"{len(warnings)} con số cần xem lại (không chặn):\n{listed}{more}"
+    return CheckResult(id=cid, status="passed", summary=head + notes, data=data)
+
+
+async def check_impact_covered(ctx: CheckContext) -> CheckResult:
+    """A document that changes code deals with what depends on that code. For every place its `C` items cite, the code
+    graph is asked who calls it and which endpoints, topics and tables are reached from there; each of them must be
+    named somewhere in the document (changed too, or said to be unaffected). The AI must also have asked the graph
+    itself (code_impact / code_refs) in this stage attempt. Skipped, with the reason, when there is nothing to look
+    up or the graph cannot be read: never passed without having looked."""
+    cid = "impact_covered"
+    office, ticket = ctx.office, ctx.ticket
+    ds = await office.docs.docset(ticket)
+    keys = office.docs.output_keys(ticket, ctx.stage, ds)
+    changes = [k for k in sorted(keys) if any(i.kind == CHANGE_KIND for i in ds.docs[k].items)]
+    if not changes:
+        return CheckResult(id=cid, status="skipped", summary=f"tài liệu của giai đoạn chưa có mục {CHANGE_KIND} nào")
+    cited = [
+        e for e in await office.docs.evidence(ticket, ds)
+        if e.doc in changes and e.category == "code" and not e.error and getattr(ds.docs[e.doc].item(e.item), "kind", "") == CHANGE_KIND
+    ]  # fmt: skip
+    if not cited:
+        return CheckResult(id=cid, status="skipped", summary=f"không mục {CHANGE_KIND} nào trích code đang có (mọi thay đổi đều là phần mới), nên không có gì để dò ảnh hưởng")
+    asked = [c for c in await office.sources.stage_calls(ctx.stage_run.id) if c.get("tool") in IMPACT_TOOLS]
+    if not asked:
+        places = ", ".join(sorted({f"{e.ref.split(':', 1)[-1]}{e.locator}" for e in cited})[:8])
+        return CheckResult(
+            id=cid, status="failed",
+            summary=f"design sửa code đang có ({places}) nhưng lượt này chưa lần nào hỏi đồ thị code: gọi code_impact(targets=[các chỗ design sửa]) "
+            "(hoặc code_refs cho từng hàm), rồi ghi vào design mọi nơi gọi, endpoint, topic, bảng bị ảnh hưởng.",
+        )  # fmt: skip
+    reach = await office.doccontext.reach(ticket, cited)
+    if reach.skipped:
+        return CheckResult(id=cid, status="skipped", summary=f"không dò được ảnh hưởng: {reach.skipped}")
+    text = "\n".join(ds.own[k].body for k in changes)
+    missing = [r for r in reach.found if not r.mentioned_in(text)]
+    unknown = f" Không dò được (không có ký hiệu trong chỉ mục): {', '.join(reach.unknown[:6])}." if reach.unknown else ""
+    data = {"targets": reach.targets, "unknown": reach.unknown, "reached": len(reach.found), "missing": [r.line() for r in missing]}
+    if not missing:
+        return CheckResult(id=cid, status="passed", summary=f"design đã nhắc tới cả {len(reach.found)} nơi phụ thuộc vào chỗ nó sửa ({len(reach.targets)} chỗ).{unknown}", data=data)
+    lines = [
+        f"- {KIND_VI.get(r.kind, r.kind)} {r.qualified or r.name} ({r.cite}) dùng tới chỗ design sửa nhưng design không nhắc tới: thêm vào mục Ảnh hưởng "
+        f"(xử lý bởi {'/'.join(r.items) or 'C-n'}, hoặc ghi rõ không ảnh hưởng vì sao)"
+        for r in missing[:IMPACT_LIMIT]
+    ]
+    more = f"\n- … và {len(missing) - IMPACT_LIMIT} nơi nữa (code_impact liệt kê đủ)" if len(missing) > IMPACT_LIMIT else ""
+    return CheckResult(id=cid, status="failed", summary=f"{len(missing)} nơi phụ thuộc chưa được design nhắc tới:\n" + "\n".join(lines) + more + unknown, data=data)
+
+
 BUILTIN.update(
     {
         "sources_read": check_sources_read,
         "doc_rules": check_doc_rules,
+        "grounded": check_grounded,
+        "impact_covered": check_impact_covered,
         "crosscheck_clean": check_crosscheck_clean,
         "kb_noted": check_kb_noted,
         "ac_coverage": check_ac_coverage,

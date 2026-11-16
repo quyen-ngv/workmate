@@ -25,6 +25,7 @@ from actoroffice.doccore import (
     parse_sources,
     run_rules,
 )
+from actoroffice.doccore.model import RULE_TYPES
 from actoroffice.doccore.pack import DEFAULT_DIR
 
 PACK = load_default()
@@ -36,14 +37,18 @@ Phiên bản: 2 · Cập nhật: 2026-11-13
 ## 1. Phạm vi
 - Trong phạm vi: hạn mức chuyển tiền.
 
+## Thuật ngữ
 ## 2. Yêu cầu
 ### REQ-1: Hạn mức theo ngày
 Khách không chuyển quá hạn mức ngày.
+Nguồn: EP-4
 
 ### REQ-2: Báo cáo vượt hạn mức
+Nguồn: Q-1
 
 ### Ngoài phạm vi
 - REQ-3: Xuất PDF — lý do: để đợt sau
+  Nguồn: EP-4
 
 ## 3. Hiện trạng
 ### F-1: Hạn mức đang tính theo tháng
@@ -66,6 +71,7 @@ SPEC = """\
 Phiên bản: 1
 
 ## Mục tiêu
+## Thuật ngữ
 ## User stories
 ### US-1: Chặn giao dịch vượt hạn mức
 Là khách, tôi muốn biết khi vượt hạn mức.
@@ -82,7 +88,9 @@ Thay đổi: EP-4/F-1
 Nguồn: src/pay/limit.py:50-60
 
 ## Thay đổi so với hiện trạng
+## Ngoài phạm vi
 ## Phụ thuộc
+## Câu hỏi mở
 ## Giả định
 ## Change log
 | Phiên bản | Ngày | Thay đổi | Người |
@@ -105,16 +113,24 @@ Truy vết: AC-1.2
 ### C-3 [kỹ thuật]: tách module vì file quá dài
 Nguồn: repo:src/pay/old.py:1-30
 
+## Ảnh hưởng
 ## 3. Mô hình dữ liệu
 ## 4. Giao diện
 ## 5. Quyết định kỹ thuật
 ### D-1: Giữ bảng cũ
+- Phương án A: giữ bảng cũ, thêm cột
+- Phương án B: bảng mới
+Chọn: A — ít rủi ro
+Chọn bởi: Minh
+## Phi chức năng
 ## 6. Kiểm thử
+## Triển khai & rollback
 ## 7. Rủi ro
 ## 8. Truy vết
 | AC / BR | C |
 ## 9. Các bước làm
 1. Sửa limit.py (C-1)
+## Câu hỏi mở
 ## 10. Change log
 | Phiên bản | Ngày | Thay đổi | Người |
 """
@@ -139,7 +155,7 @@ def test_default_pack_loads():
     assert PACK.name == "default"
     assert {"analysis", "spec", "design", "breakdown"} <= set(PACK.doc_types)
     assert PACK.doc_types["design"].based_on == ["spec", "analysis"]
-    assert {r.type for r in PACK.rules.values()} == {"template", "cover", "traces_to", "evidence", "fresh", "baseline", "answered", "declared_change"}
+    assert {r.type for r in PACK.rules.values()} == set(RULE_TYPES)
     assert PACK.rules["R-COVER-AC"].each == ["spec.AC", "spec.BR"]
     assert PACK.rules["R-COVER-AC"].by == ["design.C"]
     assert PACK.rules["R-TEMPLATE"].docs == ["*"]

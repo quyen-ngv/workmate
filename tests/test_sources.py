@@ -452,3 +452,25 @@ async def test_ac12_similar_search_uses_source_titles(office: Office) -> None:
     assert item.id not in [i.id for i in await office.knowledge.search(f"{ticket.title} {ticket.description[:400]}", team_id=None)]
     found = await office.knowledge.for_ticket(await office.tickets.get(ticket.id))
     assert item.id in [i.id for i in found]
+
+
+# ---- a file read through the code index is read; looking for it is not ------------------------------------------------
+
+
+@pytest.mark.parametrize("tool", ["code_read", "code_outline"])
+async def test_a_file_source_read_through_the_code_index_counts(office: Office, tool: str) -> None:
+    ticket = await staged(office, "Hoàn tiền", "Theo src/shop/limits.py")
+    await tool_call(office, ticket.id, "code_search", {"query": "limits", "path": "src/shop/limits.py"})
+    await tool_call(office, ticket.id, tool, {"path": "src/shop/refund.py"})
+    assert [s["status"] for s in await sources(office, ticket)] == ["unread"], "a search, or another file, reads nothing of it"
+    await tool_call(office, ticket.id, tool, {"path": "src/shop/limits.py", "repo": "shop"})
+    assert [s["status"] for s in await sources(office, ticket)] == ["read"]
+    assert (await run_check(office, ticket)).status == "passed"
+
+
+async def test_the_check_runs_in_every_stage_that_lists_it(office: Office) -> None:
+    ticket = await staged(office, "Hoàn tiền", "Theo docs/x.md")
+    stage = (await office.stages.stage_def(ticket)).model_copy(update={"id": "design"})  # not one of the three stages it was tied to
+    srun = await office.stages.ensure_run(ticket)
+    [result] = await office.stages.checks.run(ticket, stage, srun, workspace=None, run_id=None, only=["sources_read"])
+    assert result.status == "failed" and "docs/x.md" in result.summary

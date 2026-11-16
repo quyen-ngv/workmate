@@ -54,8 +54,39 @@ WAITING_KINDS = (
 )
 
 
+SPAWN_CHOICES = ("drop", "restore", "flows", "assign")  # what an approver chooses for the tasks of a breakdown
+
+
 class StageError(OfficeError):
     code = 422
+
+
+def _merged_choices(approvals: list[dict[str, Any]]) -> dict[str, Any]:
+    """The task choices of every approver of a card as one response: lists are joined, and for one task the choice
+    of the approver who answered later wins."""
+    out: dict[str, Any] = {}
+    for approval in approvals:
+        for key, value in (approval.get("choices") or {}).items():
+            if isinstance(value, dict):
+                out[key] = {**out.get(key, {}), **value}
+            else:
+                out[key] = [*out.get(key, []), *(v for v in value if v not in out.get(key, []))]
+    return out
+
+
+def _remarks_text(remarks: list[dict[str, Any]]) -> str:
+    """Remarks on single items as lines under a note."""
+    return "".join(f"\n- {r['doc']}{' · ' + r['item'] if r.get('item') else ''}: {r['text']}" for r in remarks)
+
+
+def _rules_of(payload: dict[str, Any]) -> list[Any]:
+    """The gate rules a card was opened with, as far as the next card of the same stage needs them (extra approvers)."""
+    from types import SimpleNamespace
+
+    return [
+        SimpleNamespace(id=r.get("id"), title=r.get("title"), spec={"roles": r.get("roles") or [], "min": r.get("min")})
+        for r in payload.get("rules") or []
+    ]
 
 
 def stage_title(stage_id: str | None) -> str:
@@ -380,9 +411,10 @@ class StageService:
         run_id: str | None,
         extra: list[Any] | None = None,
         submit: list[Any] | None = None,
+        submitted: dict[str, Any] | None = None,
     ) -> Interaction:
         """`submit`: the people who hand the stage over first ("dev gửi, lead duyệt"). The card then goes to them, and
-        to the approvers only after one of them sends it."""
+        to the approvers only after one of them sends it. `submitted`: who sent it and when, for the approvers' card."""
         office = self.office
         from actoroffice.domain.stage import GatePolicy
 
@@ -428,7 +460,7 @@ class StageService:
                 if i.kind == InteractionKind.ENV_ACCESS
             ],
             "approvals": [],
-            "rules": [{"id": r.id, "title": r.title, "roles": r.spec.get("roles")} for r in extra or []],
+            "rules": [{"id": r.id, "title": r.title, "roles": r.spec.get("roles"), "min": r.spec.get("min")} for r in extra or []],
             "review": gate_items(next((r.data for r in results if r.id == "review_clean"), None)),
             "review_acs": await self.review_acs(ticket.id) if stage.id in ("build", "pr") else [],
             "ui_evidence": await self.ui_evidence(ticket.id) if stage.id in ("build", "pr") else [],
@@ -437,6 +469,11 @@ class StageService:
             payload["phase"] = "submit"
             payload["final_roles"] = final_roles
             payload["final_roles_label"] = " / ".join(ROLE_VI.get(r, r) for r in final_roles)  # type: ignore[call-overload]
+        if submitted:
+            payload.update(submitted)
+        rejection = await self._last_rejection(ticket, stage.id)
+        if rejection is not None:
+            payload["last_rejection"] = rejection
         if "doc_rules" in stage.checks:
             payload["doc_core"] = await office.docs.approval_view(ticket, stage)
             spawn = office.docs.spawn_of(ticket, stage.id)
@@ -461,13 +498,29 @@ class StageService:
             await office.interactions.cancel(item.id)
             raise Conflict(f"{ticket.key} đã sang giai đoạn khác")
         roles = list(item.payload.get("roles") or [])
-        if not await self._may_answer(by, ticket, roles):
+        if not await self._may_answer(by, ticket, roles, item):
             raise PolicyDenied(f"Cần vai {item.payload.get('roles_label') or ', '.join(roles)} để duyệt")
         approved = bool(response.get("approved"))
         note = str(response.get("note") or "").strip()
         name = await self._name(by)
         if item.payload.get("phase") == "submit":
-            return await self._answer_submit(item, ticket, approved, note, by=by, name=name)
+            return await self._answer_submit(item, ticket, approved, note, by=by, name=name, response=response)
+        doc_gate = "doc_core" in item.payload
+        if doc_gate and not approved and not note:
+            raise StageError("Cần ghi chú khi trả lại")
+        if doc_gate and approved:
+            # The approver decides on what the card showed: a document saved after the card was opened was seen by
+            # nobody, so the card is withdrawn and the stage is finished again for a new one.
+            moved = []
+            for doc in item.payload.get("docs", []):
+                current = await office.tickets.get_document(ticket.id, doc["key"])
+                if current is None or current.revision != doc["revision"]:
+                    moved.append(f"`{doc['key']}` (thẻ: bản {doc['revision']}, hiện: {current.revision if current else 'đã xoá'})")
+            if moved:
+                reason = f"tài liệu đã đổi sau khi thẻ được mở: {', '.join(moved)} — thẻ bị rút, AI phải hoàn tất lại giai đoạn"
+                await office.tickets.add_comment(ticket.id, f"⚠️ Chưa duyệt được {stage_title(ticket.stage)}: {reason}.", author_kind="system", author_id=None)
+                await self._redo(ticket, reason=reason, by=by)
+                raise StageError(f"Chưa duyệt: {reason}.")
         if item.payload.get("gate") == "knowledge":
             # Knowledge is confirmed, not redone: "bỏ 2, 5" keeps the rest; a plain rejection drops everything.
             partial = not approved and bool(re.search(r"\d", note))
@@ -481,7 +534,7 @@ class StageService:
 
             asyncio.get_running_loop().create_task(safe_publish(office, ticket.id))
             return resolved
-        if approved and "doc_core" in item.payload:
+        if approved and doc_gate:
             # A difference between documents is fixed or owned by an approver: accept (with a reason) or send back.
             for finding_id, reason in (response.get("accept") or {}).items():
                 await office.docs.accept(ticket, str(finding_id), by=by, reason=str(reason))
@@ -489,33 +542,55 @@ class StageService:
             if left:
                 listed = "; ".join(f"[{f.id[:8]}] {f.rule} {f.item or f.doc}" for f in left[:6])
                 raise StageError(f"Còn {len(left)} điểm lệch chưa xử lý ({listed}). Chấp nhận từng điểm kèm lý do, hoặc từ chối để làm lại.")
+            # everything the approver chose for the tasks is checked before the card is resolved or anything is created
+            revision = next((d["revision"] for d in item.payload.get("docs", []) if d["key"] == "breakdown"), None)
+            await office.docs.spawn_plan(ticket, response, revision=revision)
         if approved:
-            approvals = [a for a in item.payload.get("approvals", []) if a.get("by") != by] + [{"by": by, "name": name, "at": utcnow()}]
+            choices = {k: response[k] for k in SPAWN_CHOICES if response.get(k)}
+            approvals = await self._add_approval(item, {"by": by, "name": name, "at": utcnow(), "note": note, **({"choices": choices} if choices else {})})
             if len(approvals) < int(item.payload.get("min") or 1):
-                await office.db.execute(
-                    "UPDATE interactions SET payload_json = json_set(payload_json, '$.approvals', json(?)) WHERE id = ?",
-                    (json.dumps(approvals, ensure_ascii=False), item.id),
-                )
+                if doc_gate:
+                    await office.docs.add_comments(ticket, response.get("comments"), by=by, interaction_id=item.id)
                 refreshed = await office.interactions.get(item.id)
                 office.bus.publish("interaction.updated", interaction=refreshed.model_dump())
                 return refreshed
+            response = {**response, **_merged_choices(approvals)}  # what every approver chose; a later choice wins
+            if doc_gate:
+                await office.docs.spawn_plan(ticket, response, revision=revision)
         resolved = await office.interactions.resolve(item.id, {"approved": approved, "note": note, "by_name": name}, by=by)
         await office.audit.record(
             "stage:gate", "approved" if approved else "rejected", ticket_id=ticket.id, target=f"{ticket.key}:{item.payload.get('gate')}", detail={"by": by, "note": note}
         )
+        remarks = await office.docs.add_comments(ticket, response.get("comments"), by=by, interaction_id=item.id) if doc_gate else []
         if approved:
+            if doc_gate:
+                await office.docs.resolve_comments(ticket)  # remarks made with an approval are kept, and ask for nothing
             for doc in item.payload.get("docs", []):
                 await office.db.execute(
                     "UPDATE documents SET approved_revision = ? WHERE ticket_id = ? AND key = ?", (doc["revision"], ticket.id, doc["key"])
                 )
-            comment = f"👍 {name} duyệt giai đoạn {stage_title(ticket.stage)}" + (f": {note}" if note else "")
+            comment = f"👍 {name} duyệt giai đoạn {stage_title(ticket.stage)}" + (f": {note}" if note else "") + _remarks_text(remarks)
             await office.tickets.add_comment(ticket.id, comment, author_kind="system", author_id=None)
             if item.payload.get("gate") == "requirement" and ticket.jira_key:
                 await office.jira.requirements_approved(ticket.id, name)
             created: list[Ticket] = []
-            if "doc_core" in item.payload:
+            if doc_gate:
                 await office.docs.on_approved(ticket, item)
-                created = await office.docs.spawn(ticket, response, by=by)
+                hook = getattr(getattr(office, "doccontext", None), "on_approved", None)
+                if hook is not None:  # approved decisions and terms go to the team's knowledge; never in the way of an approval
+                    try:
+                        await hook(ticket, item)
+                    except Exception:
+                        log.exception("doccontext.on_approved failed for %s", ticket.key)
+                try:
+                    created = await office.docs.spawn(ticket, response, by=by)
+                except OfficeError as exc:
+                    # Checked beforehand, so this is not expected. What was created is linked and is picked up at the
+                    # next approval: the stage is finished again for a new card instead of leaving the epic stuck.
+                    reason = f"đã duyệt nhưng tạo task con bị lỗi ({exc}); duyệt lại để tạo tiếp các task còn thiếu"
+                    await office.tickets.add_comment(ticket.id, f"⚠️ {stage_title(ticket.stage)}: {reason}.", author_kind="system", author_id=None)
+                    await self._redo(ticket, reason=reason, by=by)
+                    raise
             if item.payload.get("gate") == "plan":
                 granted = await office.access.approve_with_plan(ticket.id, by=by)
                 if granted:
@@ -527,10 +602,80 @@ class StageService:
                 await self._set_status(ticket.id, S.BLOCKED, run_id=None, comment=f"Chờ {len(created)} task con: {', '.join(c.key for c in created)}.")
                 await self._publish(ticket.id)
         else:
-            comment = f"👎 {name} chưa duyệt {stage_title(ticket.stage)}" + (f": {note}" if note else "")
+            comment = f"👎 {name} chưa duyệt {stage_title(ticket.stage)}" + (f": {note}" if note else "") + _remarks_text(remarks)
             await office.tickets.add_comment(ticket.id, comment, author_kind="system", author_id=None)
-            await self._redo(ticket, reason=note or "người duyệt yêu cầu làm lại", by=by)
+            open_remarks = await office.docs.comments(ticket) if doc_gate else []
+            await self._redo(ticket, reason=(note or "người duyệt yêu cầu làm lại") + _remarks_text(open_remarks), by=by, comments=open_remarks)
         return resolved
+
+    async def _add_approval(self, item: Interaction, entry: dict[str, Any]) -> list[dict[str, Any]]:
+        """Record one approver's answer on the card, in one transaction: two approvers answering at the same moment
+        both count. An approver who answers again replaces their earlier answer."""
+        async with self.office.db.tx() as tx:
+            row = await tx.fetchone("SELECT payload_json FROM interactions WHERE id = ? AND status = 'pending'", (item.id,))
+            if row is None:
+                raise Conflict("Thẻ này đã được trả lời")
+            payload = json.loads(row["payload_json"])
+            approvals = [a for a in payload.get("approvals", []) if a.get("by") != entry["by"]] + [entry]
+            payload["approvals"] = approvals
+            await tx.execute("UPDATE interactions SET payload_json = ? WHERE id = ?", (json.dumps(payload, ensure_ascii=False), item.id))
+        return approvals
+
+    async def _last_rejection(self, ticket: Ticket, stage_id: str) -> dict[str, Any] | None:
+        """What the approvers sent back the last time they answered this stage's card (None when they approved it, or
+        never answered): who, the note, the revisions that were rejected and the remarks on items still open."""
+        rows = await self.office.db.fetchall(
+            "SELECT payload_json, response_json, resolved_by, resolved_at FROM interactions WHERE ticket_id = ? AND kind = ? AND status = 'answered' "
+            "ORDER BY resolved_at DESC, created_at DESC",
+            (ticket.id, InteractionKind.APPROVE_STAGE.value),
+        )
+        for row in rows:
+            payload, response = json.loads(row["payload_json"]), json.loads(row["response_json"] or "{}")
+            if payload.get("stage") != stage_id or payload.get("phase") == "submit":
+                continue
+            if response.get("approved"):
+                return None
+            return {
+                "by": row["resolved_by"], "by_name": response.get("by_name") or await self._name(str(row["resolved_by"])), "note": response.get("note") or "",
+                "at": row["resolved_at"], "revision_by_doc": {d["key"]: d["revision"] for d in payload.get("docs", [])},
+                "comments": await self.office.docs.comments(ticket),
+            }  # fmt: skip
+        return None
+
+    async def withdraw_submission(self, ref: int | str, by: str) -> Interaction:
+        """The author takes back a stage they sent, while the approvers have not answered: the approvers' card is
+        withdrawn and the author's card ("send / keep working") is open again. For the person who sent it or anybody
+        who could have."""
+        office = self.office
+        ticket = await office.tickets.get(ref)
+        card = next(
+            (i for i in await office.interactions.pending(ticket_id=ticket.id)
+             if i.kind == InteractionKind.APPROVE_STAGE and i.payload.get("stage") == ticket.stage and i.payload.get("submitted_by")),
+            None,
+        )  # fmt: skip
+        if card is None:
+            raise StageError(f"{ticket.key} không có bản gửi nào đang chờ duyệt để rút lại")
+        if card.payload.get("approvals"):
+            raise StageError("Đã có người duyệt thẻ này: không rút lại được nữa")
+        stage = await self.stage_def(ticket)
+        gate = str(card.payload.get("gate"))
+        submitters = await self._submitters(ticket, await office.teams.gate_policy(ticket, gate))
+        if by != LOCAL_OWNER_ID and by != card.payload["submitted_by"] and by not in [u.id for u in submitters]:
+            raise PolicyDenied("Chỉ người đã gửi (hoặc người được giao task) mới rút lại được")
+        if not submitters:
+            raise StageError(f"{ticket.key} không còn ai giữ vai gửi duyệt: không mở lại được thẻ gửi")
+        if await office.interactions.cancel(card.id) is None:
+            raise Conflict("Thẻ này vừa được trả lời")
+        name = await self._name(by)
+        await office.tickets.add_comment(ticket.id, f"↩️ {name} rút lại {stage_title(ticket.stage)} đã gửi duyệt để sửa tiếp", author_kind="system", author_id=None)
+        srun = await self.current_run(ticket)
+        results = [CheckResult.model_validate(c) for c in (srun.checks if srun else [])]
+        opened = await self._open_gate(
+            ticket, stage, gate, str(card.payload.get("summary") or ""), results, run_id=None, extra=_rules_of(card.payload), submit=submitters
+        )
+        await office.audit.record("stage:gate", "withdrawn", ticket_id=ticket.id, target=f"{ticket.key}:{gate}", detail={"by": by})
+        await self._publish(ticket.id)
+        return opened
 
     async def _submitters(self, ticket: Ticket, policy: Any) -> list[Any]:
         """The people who must hand the stage over before its approvers see it: the ticket's participants holding a
@@ -545,9 +690,16 @@ class StageService:
             )
         return people
 
-    async def _answer_submit(self, item: Interaction, ticket: Ticket, approved: bool, note: str, *, by: str, name: str) -> Interaction:
-        """The author's card: send the stage to the approvers, or keep working on it."""
+    async def _answer_submit(
+        self, item: Interaction, ticket: Ticket, approved: bool, note: str, *, by: str, name: str, response: dict[str, Any] | None = None
+    ) -> Interaction:
+        """The author's card: send the stage to the approvers, or keep working on it. The author cannot accept a
+        difference (that is the approvers'), and may send with differences still open: the approvers see how many."""
         office = self.office
+        if (response or {}).get("accept"):
+            raise StageError(
+                "Người gửi không chấp nhận điểm lệch được: việc đó thuộc người duyệt. Bỏ phần chấp nhận rồi gửi lại, hoặc sửa tài liệu."
+            )
         resolved = await office.interactions.resolve(item.id, {"approved": approved, "note": note, "by_name": name}, by=by)
         stage = await self.stage_def(ticket)
         if not approved:
@@ -555,15 +707,25 @@ class StageService:
             await self._redo(ticket, reason=note or "người viết muốn sửa tiếp trước khi gửi duyệt", by=by)
             return resolved
         label = item.payload.get("final_roles_label") or "người duyệt"
-        await office.tickets.add_comment(ticket.id, f"📨 {name} gửi {stage_title(ticket.stage)} cho {label} duyệt" + (f": {note}" if note else ""), author_kind="system", author_id=None)
+        open_count = len(await office.docs.blocking(ticket, stage)) if "doc_core" in item.payload else 0
+        still = f" (còn {open_count} điểm lệch chưa xử lý)" if open_count else ""
+        await office.tickets.add_comment(
+            ticket.id, f"📨 {name} gửi {stage_title(ticket.stage)} cho {label} duyệt{still}" + (f": {note}" if note else ""), author_kind="system", author_id=None
+        )
         srun = await self.current_run(ticket)
         results = [CheckResult.model_validate(c) for c in (srun.checks if srun else [])]
-        await self._open_gate(ticket, stage, str(item.payload.get("gate")), str(item.payload.get("summary") or ""), results, run_id=None)
+        submitted = {"submitted_by": by, "submitted_by_name": name, "submitted_at": utcnow(), "submit_note": note, "open_count": open_count}
+        await self._open_gate(
+            ticket, stage, str(item.payload.get("gate")), str(item.payload.get("summary") or ""), results, run_id=None,
+            extra=_rules_of(item.payload), submitted=submitted,
+        )  # fmt: skip
         await self._publish(ticket.id)
         return resolved
 
-    async def _may_answer(self, by: str, ticket: Ticket, roles: list[str]) -> bool:
-        if by == LOCAL_OWNER_ID:
+    async def _may_answer(self, by: str, ticket: Ticket, roles: list[str], item: Interaction | None = None) -> bool:
+        """The local owner, anybody holding one of the gate's roles, and the people the card was sent to (the ticket's
+        owner when nobody holds the role: they were asked, so they can answer)."""
+        if by == LOCAL_OWNER_ID or (item is not None and by in (item.payload.get("approver_ids") or [])):
             return True
         return await self.office.teams.can_act(by, ticket, roles)
 
@@ -635,7 +797,8 @@ class StageService:
         office.scheduler.kick()
         return await self._publish(ticket.id)
 
-    async def _redo(self, ticket: Ticket, *, reason: str, by: str) -> None:
+    async def _redo(self, ticket: Ticket, *, reason: str, by: str, comments: list[dict[str, Any]] | None = None) -> None:
+        """`comments`: the approvers' open remarks on single items, for the prompt of the redo."""
         office = self.office
         current = await self.current_run(ticket)
         if current is not None and current.finished_at and current.outcome == StageOutcome.COMPLETED.value:
@@ -645,8 +808,9 @@ class StageService:
         await self._set_status(ticket.id, S.TODO, run_id=None, comment=None)
         if ticket.assignee_actor_id:
             await office.wakes.enqueue(
-                ticket.assignee_actor_id, WakeSource.MANUAL, ticket_id=ticket.id, payload={"stage": ticket.stage, "redo": reason, "by": by}
-            )
+                ticket.assignee_actor_id, WakeSource.MANUAL, ticket_id=ticket.id,
+                payload={"stage": ticket.stage, "redo": reason, "by": by, **({"comments": comments} if comments else {})},
+            )  # fmt: skip
         office.scheduler.kick()
         await self._publish(ticket.id)
 

@@ -119,7 +119,7 @@ async def test_task_command_opens_a_ticket_topic_and_gate_reply_sends_it_back(of
     await tg.handle_update(msg("/status", LAN, thread))
     assert any("Giai đoạn" in p["text"] and ticket.key in p["text"] for p in bot.sent())
 
-    # a gate card; a text reply to it sends the stage back with the note
+    # a gate card; a plain reply is a remark on the ticket, "trả lại: …" sends the stage back with the note
     await office.tickets.put_document(ticket.id, "requirements", "AC-1: Given a When b Then c", author="Copilot", base_revision=None)
     await office.tickets.put_document(ticket.id, "dossier", "# Dossier", author="Copilot", base_revision=None)
     stage = await office.stages.stage_def(await office.tickets.get(ticket.id))
@@ -131,8 +131,45 @@ async def test_task_command_opens_a_ticket_topic_and_gate_reply_sends_it_back(of
             break
         await asyncio.sleep(0.02)
     assert card, "the gate card was posted in the ticket topic"
-    await tg.handle_update(msg("Thiếu tiêu chí về phí quốc tế", LAN, thread, reply_to={"message_id": card["message_id"]}))
+    card_text = next(p["text"] for p in bot.sent() if "cần Lan duyệt" in p["text"])
+    assert "Reply tin này để hỏi hoặc góp ý (không trả lại)" in card_text and "requirements bản 1" in card_text
+
+    await tg.handle_update(msg("AC-1 có tính phí quốc tế không?", LAN, thread, reply_to={"message_id": card["message_id"]}))
+    assert (await office.interactions.get(gate.id)).status.value == "pending"  # a question does not send the stage back
+    comments = await office.tickets.comments(ticket.id, limit=50)
+    assert any(c.body == "AC-1 có tính phí quốc tế không?" and c.author_id == "Lan" for c in comments)
+    hint = bot.sent()[-1]
+    assert "chưa" in hint["text"] and "trả lại: lý do" in hint["text"] and hint["message_thread_id"] == thread
+
+    await tg.handle_update(msg("Trả lại: Thiếu tiêu chí về phí quốc tế", LAN, thread, reply_to={"message_id": card["message_id"]}))
     resolved = await office.interactions.get(gate.id)
-    assert resolved.response["approved"] is False and "phí quốc tế" in resolved.response["note"]
+    assert resolved.response["approved"] is False and resolved.response["note"] == "Thiếu tiêu chí về phí quốc tế"
     runs = await office.stages.runs(ticket.id)
     assert runs[-1].attempt == 2 and runs[-1].stage == "understand"
+
+
+async def test_reject_button_asks_for_the_reason_first(office: Office, bot: FakeBot) -> None:
+    team = await office.teams.create_team("Billing")
+    tg = office.telegram
+    await tg.handle_update(msg("/adduser Lan ba", LAN))
+    await office.teams.add_member(team.id, (await office.teams.user_by_telegram(LAN)).id, ["ba", "owner"])
+    await tg.handle_update(msg("/task research So sánh 3 cổng thanh toán", LAN))
+    ticket = (await office.tickets.list(limit=1))[0]
+    thread = await tg.topic_for(ticket.origin_conversation_id)
+    await office.tickets.put_document(ticket.id, "requirements", "AC-1: Given a When b Then c", author="Copilot", base_revision=None)
+    await office.tickets.put_document(ticket.id, "dossier", "# Dossier", author="Copilot", base_revision=None)
+    stage = await office.stages.stage_def(await office.tickets.get(ticket.id))
+    gate = await office.stages._open_gate(await office.tickets.get(ticket.id), stage, "requirement", "xong", [], run_id=None)
+
+    await tg.handle_update(press(f"i:{gate.id}:n", LAN, thread))
+    assert (await office.interactions.get(gate.id)).status.value == "pending"  # nothing is sent back without a reason
+    assert "ghi lý do trả lại" in bot.sent()[-1]["text"] and bot.sent()[-1]["message_thread_id"] == thread
+    await tg.handle_update(msg("/cancel", LAN, thread))
+    await tg.handle_update(msg("chưa có gì", LAN, thread))
+    assert (await office.interactions.get(gate.id)).status.value == "pending"  # cancelled: the next message is a plain comment
+
+    await tg.handle_update(press(f"i:{gate.id}:n", LAN, thread))
+    await tg.handle_update(msg("Thiếu AC về phí quốc tế", LAN, thread))
+    resolved = await office.interactions.get(gate.id)
+    assert resolved.status.value == "answered" and resolved.response["approved"] is False and resolved.response["note"] == "Thiếu AC về phí quốc tế"
+    assert "Đã trả lại" in bot.sent()[-1]["text"]

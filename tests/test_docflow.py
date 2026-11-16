@@ -16,7 +16,7 @@ from actoroffice.domain.run import TurnResult, TurnStatus, Usage
 from actoroffice.domain.work import InteractionKind, ProjectAccess, Ticket, TicketStatus
 from actoroffice.services.docflow import pack_gates, pack_templates
 
-from .fakes import FakeRuntime, TurnCtx
+from .fakes import FakeRuntime, TurnCtx, study
 from .seed import IDENT, build_repo, git, seed_db
 from .test_codeintel import PY_REPO
 
@@ -31,15 +31,21 @@ Phiên bản: 1 · Cập nhật: 2026-11-13 · Người viết: Lan
 ## 1. Phạm vi
 - Nâng hạn mức hoàn tiền mỗi ngày.
 
+## Thuật ngữ
+Không có từ mới.
+
 ## 2. Yêu cầu
 ### REQ-1: Hạn mức hoàn tiền mỗi ngày là 9
 Lấy từ mô tả epic.
+Nguồn: {key}
 
 ### REQ-2: Từ chối phải kèm lý do
 Lấy từ mô tả epic.
+Nguồn: {key}
 
 ### Ngoài phạm vi
 - REQ-3: Báo cáo tuần — lý do: để đợt sau.
+  Nguồn: {key}
 
 ## 3. Hiện trạng
 ### F-1: Hạn mức hiện là 5 lần mỗi ngày
@@ -90,6 +96,9 @@ Phiên bản: 1 · Cập nhật: 2026-11-13 · Người viết: Lan
 ## 1. Mục tiêu
 - Đáp ứng yêu cầu của epic {epic}.
 
+## Thuật ngữ
+Không có từ mới.
+
 ## 2. User stories
 ### US-1: Hoàn tiền trong hạn mức
 Là khách hàng, tôi muốn hoàn tiền nhiều lần hơn, để không phải chờ sang ngày.
@@ -110,7 +119,13 @@ Thay đổi: {epic}/F-1
 |---|---|---|
 | BR-1 | 5 lần | 9 lần |
 
+## Ngoài phạm vi
+Không có.
+
 ## 5. Phụ thuộc
+Không có.
+
+## Câu hỏi mở
 Không có.
 
 ## 6. Giả định
@@ -133,6 +148,9 @@ Truy vết: AC-1.1, BR-1
 Nguồn: {source}
 Thay đổi: {epic}/F-1
 {second}
+## Ảnh hưởng
+Không nơi nào khác dùng hằng số này.
+
 ## 3. Mô hình dữ liệu
 Không đổi.
 
@@ -141,10 +159,19 @@ Không đổi.
 
 ## 5. Quyết định kỹ thuật
 ### D-1: Giữ hạn mức là hằng số trong code
-- Phương án: đưa vào cấu hình, hoặc giữ hằng số. Chọn giữ hằng số.
+- Phương án A: đưa vào cấu hình
+- Phương án B: giữ hằng số
+Chọn: B — chưa ai cần đổi lúc chạy
+Chọn bởi: Minh
+
+## Phi chức năng
+Không áp dụng vì chỉ đổi một hằng số.
 
 ## 6. Kiểm thử
 Unit cho AC-1.1 và AC-1.2.
+
+## Triển khai & rollback
+Không áp dụng vì không đổi dữ liệu.
 
 ## 7. Rủi ro
 Không có.
@@ -156,6 +183,9 @@ Không có.
 
 ## 9. Các bước làm
 1. Sửa hằng số (C-1)
+
+## Câu hỏi mở
+Không có.
 {LOG.format(n=10)}"""
 
 
@@ -226,7 +256,7 @@ async def test_epic_to_approved_design(office: Office, runtime: FakeRuntime, set
 
     async def analyze(ctx: TurnCtx) -> TurnResult:
         assert "Current stage: analyze" in ctx.spec.system_prompt and "code_pack" in ctx.spec.system_prompt
-        assert "## 3. Hiện trạng" in await ctx.office("doc_template", {"type": "analysis"})
+        assert "## 4. Hiện trạng" in await ctx.office("doc_template", {"type": "analysis"})
         await ctx.office("doc_put", {"key": "analysis", "body": analysis(E, source="src/shop/nope.py:3", answer=False), "base_revision": None})
         report = await ctx.office("doc_check", {})
         assert "R-EVIDENCE" in report and "nope.py" in report and "R-OPEN-Q" in report and "Q-1" in report
@@ -262,6 +292,7 @@ async def test_epic_to_approved_design(office: Office, runtime: FakeRuntime, set
         return done(ctx)
 
     async def design_task(ctx: TurnCtx) -> TurnResult:
+        await study(ctx, E, docs=("analysis", "breakdown"))  # what the office checks a design run did before it wrote
         info = json.loads(await ctx.office("stage_info", {}))
         key = info["ticket"]
         assert info["template"] == "task-spec" and "Current stage: design" in ctx.spec.system_prompt
@@ -333,6 +364,7 @@ async def test_author_can_take_the_design_back_instead_of_sending(office: Office
     await office.teams.set_participant(child.id, minh.id, ["dev"])
 
     async def design_once(ctx: TurnCtx) -> TurnResult:
+        await study(ctx, epic.key)
         current = await office.tickets.get_document(child.id, "design")
         await ctx.office("doc_put", {"key": "design", "body": design(child.key, epic.key), "base_revision": current.revision if current else None})
         await ctx.office("stage_complete", {"summary": "Design"})
@@ -395,8 +427,9 @@ async def test_code_changed_under_a_pinned_source_makes_the_design_stale(office:
     assert open_errors(findings) == ["R-FRESH:C-1"]
     assert (await office.docs.states(child, findings))["design"].value == "cu"
 
-    # a new revision that still cites the same lines does not hide the change: the pin stays with the item
-    await put(office, child, "design", design(child.key, epic.key).replace("Từ 5 lên 9.", "Từ 5 lên 9 (đã xem lại)."))
+    # a new revision that leaves the item as it was does not hide the change: the pin stays with the item
+    # (an item the author rewrites is pinned anew: tests/test_docgate.py)
+    await put(office, child, "design", design(child.key, epic.key).replace("Unit cho AC-1.1 và AC-1.2.", "Unit cho AC-1.1, AC-1.2 (đã xem lại)."))
     assert open_errors(await office.docs.check(child)) == ["R-FRESH:C-1"]
 
 

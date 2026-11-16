@@ -29,22 +29,68 @@ STATUS_TEXT = {
 KIND_TEXT = {"lesson": "bài học", "fact": "thông tin", "preference": "sở thích", "decision": "quyết định"}
 
 
+REMIND_AFTER_S = 4 * 3600  # a gate card waiting longer than this gets one reminder for its approvers
+REMIND_EVERY_S = 300  # how often waiting cards are looked at
+
+
 class ChatNotifier:
     def __init__(self, office: Office) -> None:
         self.office = office
+        self._reminded: set[str] = set()  # gate cards already reminded about (once per card, per office start)
 
     async def run(self, ready: asyncio.Event | None = None) -> None:
-        async with self.office.bus.subscribe() as queue:
-            if ready:
-                ready.set()
-            while True:
-                event = await queue.get()
-                try:
-                    await self.handle(event.kind, event.data)
-                except OfficeError:
-                    log.exception("could not mirror %s into chat", event.kind)
-                except Exception:
-                    log.exception("notifier failed on %s", event.kind)
+        reminders = asyncio.create_task(self._remind_forever(), name="gate-reminders")
+        try:
+            async with self.office.bus.subscribe() as queue:
+                if ready:
+                    ready.set()
+                while True:
+                    event = await queue.get()
+                    try:
+                        await self.handle(event.kind, event.data)
+                    except OfficeError:
+                        log.exception("could not mirror %s into chat", event.kind)
+                    except Exception:
+                        log.exception("notifier failed on %s", event.kind)
+        finally:
+            reminders.cancel()
+
+    async def _remind_forever(self) -> None:
+        while True:
+            await asyncio.sleep(REMIND_EVERY_S)
+            try:
+                await self.remind()
+            except Exception:
+                log.exception("gate reminders failed")
+
+    async def remind(self, *, after_s: float = REMIND_AFTER_S) -> list[str]:
+        """One reminder, in the ticket's chat and on the ticket, for every gate card that has waited longer than
+        `after_s`. Returns the cards reminded about."""
+        from datetime import UTC, datetime
+
+        office = self.office
+        now = datetime.now(UTC)
+        done: list[str] = []
+        for item in await office.interactions.pending():
+            if item.kind.value != "approve_stage" or item.id in self._reminded or not item.ticket_id:
+                continue
+            try:
+                created = datetime.fromisoformat(item.created_at)
+            except ValueError:
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=UTC)
+            if (now - created).total_seconds() < after_s:
+                continue
+            self._reminded.add(item.id)
+            text = reminder_text(item.model_dump(), after_s / 3600)
+            ticket = await office.tickets.get(item.ticket_id)
+            await office.tickets.add_comment(ticket.id, text, author_kind="system", author_id=None)
+            conv_id = await self._ticket_conv(ticket.model_dump())
+            if conv_id:
+                await office.chat.post_system(conv_id, text, meta={"ticket_key": ticket.key, "reminder": item.id})
+            done.append(item.id)
+        return done
 
     async def handle(self, kind: str, data: dict[str, Any]) -> None:
         if kind == "ticket.updated" and data.get("previous") and data["previous"] != data["ticket"]["status"]:
@@ -243,4 +289,23 @@ def _summary(item: dict[str, Any]) -> str:
     if kind == "propose_tickets":
         titles = "; ".join(str(i.get("title")) for i in p.get("items") or [])
         return f"{p.get('proposed_by')} đề xuất {len(p.get('items') or [])} ticket: {titles}"
-    return kind
+    if kind == "approve_stage":
+        names = ", ".join(p.get("approver_names") or []) or str(p.get("roles_label") or "người duyệt")
+        what = f"{p.get('ticket')} · {p.get('stage_title') or p.get('stage')}"
+        if p.get("phase") == "submit":
+            return f"{what} đã xong: {names} xem rồi gửi {p.get('final_roles_label') or 'người duyệt'} duyệt"
+        if p.get("gate") == "knowledge":
+            return f"{what}: {names} xác nhận kiến thức AI ghi lại"
+        sent = f" ({p['submitted_by_name']} gửi)" if p.get("submitted_by_name") else ""
+        return f"{what} đã xong{sent}: chờ {names} duyệt"
+    if kind == "env_access":
+        return f"{p.get('ticket')}: AI xin quyền {p.get('level_label')} vào {p.get('resource')}: {p.get('reason')}"
+    return "Có một việc đang chờ bạn quyết định"
+
+
+def reminder_text(item: dict[str, Any], hours: float) -> str:
+    """One line for the people a gate card has been waiting for."""
+    p = item["payload"]
+    names = ", ".join(p.get("approver_names") or []) or str(p.get("roles_label") or "người duyệt")
+    verb = "gửi duyệt" if p.get("phase") == "submit" else "duyệt"
+    return f"⏰ {p.get('ticket')} · {p.get('stage_title') or p.get('stage')} đã chờ {names} {verb} hơn {hours:g} giờ."

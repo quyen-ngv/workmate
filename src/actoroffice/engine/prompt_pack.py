@@ -227,13 +227,39 @@ MAIN_SYNC = (
 )
 SOURCES_RULE = (
     "- Sources of this ticket (listed below, found in its description and people's comments): read every one that is\n"
-    "  required (ticket_get / doc_get for a ticket, Read for a file, source_get for an issue or a wiki page), or call\n"
-    "  source_skip(ref, reason) when it does not bear on the ticket. Reading is recorded from your activity; the check\n"
-    "  sources_read fails while a required source is unread. External URLs and other teams' tickets are not required.\n"
+    "  required (ticket_get / doc_get for a ticket; code_read, code_outline or Read for a file; source_get for an issue\n"
+    "  or a wiki page), or call source_skip(ref, reason) when it does not bear on the ticket. Reading is recorded from\n"
+    "  your activity; the check sources_read fails while a required source is unread. External URLs and other teams'\n"
+    "  tickets are not required.\n"
+    "- Lines marked [doc] are the documents this stage is written from. Open each with the doc_get call shown on its\n"
+    "  line, in this stage attempt (a reading from an earlier attempt does not count; one the office put in full in\n"
+    "  this prompt is already read). They cannot be skipped.\n"
     "- Write every source in dossier section links: đã đọc / không liên quan (lý do) / không đọc được (lỗi).\n"
-    "- When two sources contradict each other, the document you write (requirements, or the plan in a quick ticket)\n"
-    "  says which one you follow and why: by default the newer one; when unsure, ask people."
+    "- When two sources contradict each other, the document you write says which one you follow and why: by default\n"
+    "  the newer one; when unsure, ask people."
 )
+# What the generic base says that is wrong for a stage that writes documents of a standard pack: how to look at the
+# code, how much to write, and environments such a stage never touches. `_base` swaps them.
+LOOKUP = (
+    "2. Look things up yourself first: the code (Read/Grep/Glob), ticket documents, earlier tickets (history_search),\n"
+    "   what the team knows (memory_search). Ask people only what you cannot find."
+)
+LOOKUP_PACK = (
+    "2. Look things up yourself first: the code through the code index (code_pack to start, then code_search,\n"
+    "   code_outline, code_refs, code_read, code_impact; Read/Grep/Glob only for what the index does not hold), ticket\n"
+    "   documents, earlier tickets (history_search), what the team knows (memory_search). Ask people only what you\n"
+    "   cannot find."
+)
+PROPORTION = (
+    "Size the work and the documents to the task, like a senior engineer: a small change gets a few lines and one\n"
+    "approval, not a template. Read a skill only when the stage needs the full document it describes."
+)
+PROPORTION_PACK = (
+    "The documents of this workflow follow the team's standard. The template of each one comes only from\n"
+    "doc_template(<type>): keep every heading, in order, and never take a template from a skill or from memory. Size\n"
+    "what you write under each heading to the task: a section with nothing to say gets one line saying so."
+)
+ENVIRONMENTS_FROM, ENVIRONMENTS_TO = "## Shared environments\n", "## Work in proportion\n"
 OFFICE_RUNS_TESTS = {
     "Run the project's build/test/lint if it has them.": (
         "Run the build/lint if it has them, but only the tests for what you changed (their test file, or -k), not the\n"
@@ -278,14 +304,18 @@ def build(
     changes: list[Comment],
     office_runs_tests: bool = False,
     sources: list[dict[str, Any]] | None = None,
+    context: str = "",
+    redo: str = "",
 ) -> StagePrompt:
+    """`context`: the Context block the office built for a ticket in a pack flow (services/doccontext.py);
+    `redo`: what a run after a rejection is told besides the reviewer's note."""
     parts: dict[str, str] = {}
     team = f" of team {team_name}" if team_name else ""
     parts["base"] = "\n\n".join(
         [
             f"You are {actor.name}, AI Engineer{team}.",
             f"Use {language} for everything people read: questions, comments, documents, the dossier.",
-            BASE,
+            _base(stage),
         ]
     )
     rules = "\n".join(f"- {g}" for g in guidelines)
@@ -333,8 +363,11 @@ def build(
             *people_lines,
             "",
             _sources_block(sources) if sources and "sources_read" in stage.checks else "",
+            "",
+            context.strip(),
         ]
     ).strip()
+    parts["context"] = context.strip()
     body = dossier.strip()
     if len(body) > DOSSIER_LIMIT:
         body = body[:DOSSIER_LIMIT] + "\n…(truncated: read the full dossier with doc_get)"
@@ -343,6 +376,7 @@ def build(
 
     delta = [f"Now: {describe_now()}."]
     reasons = wake.payload.get("reasons", [])
+    redo_told = False
     if not resumed:
         delta += [
             f"You start stage {stage.id} of {ticket.key} in a fresh session.",
@@ -353,6 +387,9 @@ def build(
     for reason in reasons:
         if reason.get("redo"):
             delta += ["", f"The gate sent this stage back. Reviewer's note: {reason['redo']}"]
+            if redo.strip() and not redo_told:
+                delta.append(redo.strip())
+                redo_told = True
         if reason.get("switched"):
             delta += [
                 "",
@@ -383,9 +420,25 @@ def build(
     return StagePrompt(system=system, turn="\n".join(delta), parts=parts)
 
 
+def pack_stage(stage: StageDef) -> bool:
+    """A stage that writes documents of a standard pack: it brings its own instructions and is checked by doc_rules."""
+    return bool(stage.instructions.strip()) and "doc_rules" in stage.checks
+
+
+def _base(stage: StageDef) -> str:
+    """How the AI works. A stage that writes pack documents reads code through the index and writes from the pack's
+    templates (the generic text says Read/Grep and "not a template"), and is not told about environments it does not
+    use."""
+    if not pack_stage(stage):
+        return BASE
+    text = BASE.replace(LOOKUP, LOOKUP_PACK).replace(PROPORTION, PROPORTION_PACK)
+    start, end = text.find(ENVIRONMENTS_FROM), text.find(ENVIRONMENTS_TO)
+    return text[:start] + text[end:] if 0 <= start < end else text
+
+
 def _instructions(template: StageTemplate, stage: StageDef, office_runs_tests: bool) -> str:
     text = STAGE_INSTRUCTIONS.get(f"{template.name}:{stage.id}")
-    if text is None and stage.instructions.strip() and "doc_rules" in stage.checks:
+    if text is None and pack_stage(stage):
         text = "Do what the stage instructions below require, then stage_complete."  # a pack stage brings its own
     if text is None:
         text = STAGE_INSTRUCTIONS.get(stage.id, "Do what the stage requires, then stage_complete.")

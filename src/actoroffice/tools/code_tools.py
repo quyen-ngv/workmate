@@ -14,7 +14,7 @@ from actoroffice.domain.errors import OfficeError
 from actoroffice.ports.intel import IndexState, Subgraph
 from actoroffice.services.codeintel import Repo
 
-from .registry import ToolCtx, ToolDef, ToolError, schema
+from .registry import ToolCtx, ToolDef, ToolError, schema, source_ref
 
 NOT_INDEXED = "Project này chưa có nguồn code để lập chỉ mục. Gắn một thư mục cục bộ cho project, hoặc kết nối Bitbucket / GitHub trong Cài đặt › Kết nối."
 
@@ -233,6 +233,7 @@ CODE_TOOLS: list[ToolDef] = [
         code_outline,
         read_only=True,
         activity="read",
+        reads_source=source_ref("file", "path"),  # a file the ticket names as a source counts as read through the index too
     ),
     ToolDef(
         "code_symbol",
@@ -263,6 +264,7 @@ CODE_TOOLS: list[ToolDef] = [
         code_read,
         read_only=True,
         activity="read",
+        reads_source=source_ref("file", "path"),
     ),
     ToolDef(
         "code_impact",

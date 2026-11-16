@@ -92,6 +92,7 @@ class Answer(BaseModel):
     flows: dict[str, str] | None = None  # a breakdown: the flow of each task ("T-1": "task-spec")
     assign: dict[str, str] | None = None  # a breakdown: who each task is handed to ("T-1": user id)
     accept: dict[str, str] | None = None  # a document gate: findings accepted as they are (finding id → reason)
+    comments: list[dict[str, Any]] | None = None  # a document gate: remarks on single items ({doc, item, text})
 
 
 class NewTicket(BaseModel):
@@ -384,11 +385,12 @@ def create_app(office: Office, token: str) -> FastAPI:
         return (await office.interactions.get(interaction_id)).model_dump()
 
     @app.post("/api/interactions/{interaction_id}/answer")
-    async def answer(interaction_id: str, body: Answer) -> dict[str, Any]:
+    async def answer(interaction_id: str, body: Answer, request: Request) -> dict[str, Any]:
         response = body.model_dump(exclude_none=True)
         if not response:
             raise HTTPException(422, "empty answer")
-        resolved = await office.answer(interaction_id, response, by="user")
+        # the person picked in the sidebar ("Tôi là …"): a convenience on one shared login, not authentication
+        resolved = await office.answer(interaction_id, response, by=await team_api.acting_user(request, office))
         office.scheduler.kick()
         return resolved.model_dump()
 

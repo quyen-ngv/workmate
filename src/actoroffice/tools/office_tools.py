@@ -290,13 +290,16 @@ async def doc_get(args: dict[str, Any], ctx: ToolCtx) -> str:
     doc = await ctx.office.tickets.get_document(ticket_id, args["key"])
     if doc is None:
         return f"No document '{args['key']}' yet (use base_revision null to create it)."
-    return json.dumps({"key": doc.key, "revision": doc.revision, "updated_by": doc.updated_by, "body": doc.body}, ensure_ascii=False)
+    out = {"key": doc.key, "revision": doc.revision, "approved_revision": doc.approved_revision, "updated_by": doc.updated_by, "body": doc.body}
+    return json.dumps(out, ensure_ascii=False)
 
 
 async def doc_put(args: dict[str, Any], ctx: ToolCtx) -> str:
     ticket_id = await _ticket_ref(args, ctx)
     base = args.get("base_revision")
     try:
+        # an approved document outside its stage, or one on an open approval card, is not rewritten (DocService.guard_put)
+        await ctx.office.docs.guard_put(await ctx.office.tickets.get(ticket_id), args["key"], args["body"])
         doc = await ctx.office.tickets.put_document(
             ticket_id, args["key"], args["body"], author=ctx.actor.name, base_revision=int(base) if base is not None else None
         )

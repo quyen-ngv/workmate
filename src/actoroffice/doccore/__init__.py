@@ -4,7 +4,7 @@ Pure: only the standard library, pydantic and yaml. Nothing here imports the res
 (tests/test_doccore.py). The office reaches the outside world through adapters and hands the results in as data.
 """
 
-from .model import Approved, Baseline, DocType, Evidence, Finding, Item, ItemKind, MatchState, ParsedDoc, Problem, RuleDef, SourceRef
+from .model import Approved, Baseline, DocReview, DocType, Evidence, Finding, Item, ItemKind, MatchState, ParsedDoc, Problem, RuleDef, SourceRef
 from .pack import PackError, StandardPack, build_pack, load_default, load_pack
 from .parse import parse, parse_sources
 from .rules import PRIMITIVES, TRACE_VALID, match_state, run_rules
@@ -15,6 +15,7 @@ __all__ = [
     "TRACE_VALID",
     "Approved",
     "Baseline",
+    "DocReview",
     "DocType",
     "Evidence",
     "Finding",

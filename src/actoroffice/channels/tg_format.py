@@ -186,8 +186,68 @@ def fit_lines(lines: list[str], budget: int, hidden: int = 0, unit: str = "mục
     return "\n".join(kept + ([more(dropped)] if dropped else []))
 
 
-def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
-    """HTML text and inline keyboard for a pending decision. Callback data: "i:<interaction id>:<choice>"."""
+class WebOnly(ValueError):
+    """The card needs choices Telegram cannot give: the 👍 button points at the web instead of approving with defaults."""
+
+
+REJECT_RE = re.compile(r"^\s*(?:trả lại|tra lai|từ chối|tu choi|reject)\s*[:：]\s*(.+)$", re.IGNORECASE | re.DOTALL)
+STATE_VI = {"khop": "khớp", "lech": "lệch", "cu": "cũ", "loi": "lỗi", "chua_kiem": "chưa kiểm"}
+
+
+def plain_error(text: Any) -> str:
+    """A server message for a person: no finding hashes ("[x1f0a9c2] ") in it."""
+    return re.sub(r"\[[0-9a-fx]{6,}\]\s*", "", str(text))
+
+
+def web_only_reason(p: dict[str, Any], open_count: int | None = None) -> str:
+    """Why a gate card cannot be approved from Telegram ("" = it can). `open_count`: the differences still open
+    right now, when the caller knows (the card's own list is from the moment it was made)."""
+    if p.get("phase") == "submit" or p.get("gate") == "knowledge":
+        return ""
+    core = p.get("doc_core") or {}
+    if p.get("spawn") and core.get("tasks"):
+        return f"cần chọn giữ hay bỏ {len(core['tasks'])} task, luồng và người nhận từng task"
+    left = len(core.get("open") or []) if open_count is None else open_count
+    if core and left:
+        return f"còn {left} điểm lệch: mỗi điểm phải được sửa hoặc chấp nhận kèm lý do"
+    return ""
+
+
+def doc_core_lines(p: dict[str, Any]) -> str:
+    """The Doc Core part of a gate card: each document with revision and state, what is still open, whether the AI
+    cross-check really ran. Details stay on the web."""
+    core = p.get("doc_core") or {}
+    states = core.get("states") or {}
+    ticket = str(p.get("ticket") or "")
+    lines = []
+    docs = []
+    for d in p.get("docs") or []:
+        state = states.get(d["key"]) or states.get(f"{ticket}/{d['key']}") or {}
+        label = state.get("label") or STATE_VI.get(str(state.get("state") or ""), "")
+        docs.append(f"{esc(d['key'])} bản {esc(d['revision'])}" + (f" ({esc(label)})" if label else ""))
+    if docs:
+        lines.append("<b>Tài liệu:</b> " + ", ".join(docs))
+    if core:
+        found = core.get("open") or []
+        lines.append(f"<b>Điểm lệch chưa xử lý:</b> {len(found)} · <b>Cảnh báo:</b> {len(core.get('warnings') or [])}")
+        for f in found[:5]:
+            lines.append(f"• <code>{esc(str(f.get('id') or '')[:6])}</code> {esc(f.get('item') or f.get('doc'))}: {esc(str(f.get('message') or '')[:160])}")
+        if len(found) > 5:
+            lines.append(f"<i>+{len(found) - 5} điểm khác (xem trên web)</i>")
+        check = core.get("crosscheck")
+        if isinstance(check, dict) and not check.get("ran"):
+            lines.append("⚠️ <b>CHƯA đối chiếu được bằng AI</b>" + (f": {esc(str(check.get('reason') or '')[:200])}" if check.get("reason") else ""))
+    if p.get("submitted_by_name"):
+        lines.append(f"📨 {esc(p['submitted_by_name'])} gửi duyệt" + (f": <i>{esc(str(p.get('submit_note') or '')[:300])}</i>" if p.get("submit_note") else ""))
+    back = p.get("last_rejection")
+    if isinstance(back, dict):
+        lines.append(f"↩️ Lần trước {esc(back.get('by_name') or back.get('by'))} trả lại: <i>{esc(str(back.get('note') or '')[:300])}</i>")
+    return "\n".join(lines)
+
+
+def card(item: dict[str, Any], web: str = "") -> tuple[str, list[list[Button]]]:
+    """HTML text and inline keyboard for a pending decision. Callback data: "i:<interaction id>:<choice>".
+    `web`: the address of the ticket page, named on cards Telegram cannot answer in full."""
     p = item.get("payload") or {}
     iid = item["id"]
 
@@ -230,22 +290,25 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
         names = ", ".join(p.get("approver_names") or []) or str(p.get("roles_label") or "")
         icons = {"passed": "✅", "failed": "❌", "skipped": "⏭"}
         check_rows = [f"{icons.get(c.get('status'), '•')} {esc(c.get('id'))}: {esc(str(c.get('summary', ''))[:120])}" for c in p.get("checks") or []]
-        docs = ", ".join(f"{esc(d['key'])} (rev {d['revision']})" for d in p.get("docs") or [])
+        docs = doc_core_lines(p)
         items = p.get("review") or []
         approvals = p.get("approvals") or []
         need = int(p.get("min") or 1)
-        head = (
-            f"✋ <b>{esc(p.get('ticket'))} · {esc(p.get('stage_title'))} xong — cần {esc(names)} duyệt</b>\n"
-            f"<b>{esc(p.get('title'))}</b>\n{md_to_html(str(p.get('summary') or '')[:1500])}"
-            + (f"\n\n<b>Tài liệu:</b> {docs}" if docs else "")
+        submit = p.get("phase") == "submit"
+        final = str(p.get("final_roles_label") or "người duyệt")
+        title = (
+            f"✍️ <b>{esc(p.get('ticket'))} · {esc(p.get('stage_title'))} xong — {esc(names)} xem rồi gửi {esc(final)} duyệt</b>"
+            if submit
+            else f"✋ <b>{esc(p.get('ticket'))} · {esc(p.get('stage_title'))} xong — cần {esc(names)} duyệt</b>"
         )
+        head = f"{title}\n<b>{esc(p.get('title'))}</b>\n{md_to_html(str(p.get('summary') or '')[:1500])}" + (f"\n\n{docs}" if docs else "")
         tail = (f"\n<b>Duyệt kèm quyền môi trường:</b> {esc(', '.join(p.get('access') or []))}" if p.get("access") else "") + (
             f"\n<i>Đã duyệt {len(approvals)}/{need}: {esc(', '.join(a.get('name', '') for a in approvals))}</i>" if need > 1 else ""
         )
         # Checks, review findings and AC [review] share what is left of the message: each block gets an equal part
         # of the room still free when its turn comes, so all of them show something when they are long.
         acs = p.get("review_acs") or []
-        room = max(0, LIMIT - len(head) - len(tail) - 250)
+        room = max(0, LIMIT - len(head) - len(tail) - 500)
         parts = 1 + bool(items) + bool(acs)
         checks = fit_lines(check_rows, room // parts, unit="check")
         room -= len(checks)
@@ -263,7 +326,15 @@ def card(item: dict[str, Any]) -> tuple[str, list[list[Button]]]:
             text += f"\n\n<b>Kiến thức AI ghi lại:</b>\n{items}"
             hint = "↩️ Reply 'bỏ 2, 5' để bỏ các mục sai, giữ phần còn lại."
             return text + f"\n\n<i>{hint}</i>", [[btn("👍 Đúng hết", "y"), btn("👎 Bỏ hết", "n")]]
-        return text + "\n\n<i>↩️ Reply tin này để trả lại kèm ghi chú.</i>", [[btn("👍 Duyệt", "y"), btn("👎 Trả lại", "n")]]
+        hint = "💬 Reply tin này để hỏi hoặc góp ý (không trả lại). Trả lại: bấm nút rồi ghi lý do, hoặc reply 'trả lại: lý do'."
+        if submit:
+            return text + f"\n\n<i>{hint}</i>", [[btn(f"📨 Gửi {final} duyệt"[:60], "y"), btn("↩️ Làm lại", "n")]]
+        reason = web_only_reason(p)
+        if reason:
+            where = f" <code>{esc(web)}</code>" if web else ""
+            text += f"\n\n🌐 <b>Duyệt thẻ này trên web</b>{where}: {esc(reason)}."
+            return text + f"\n<i>{hint}</i>", [[btn("👍 Duyệt (mở trên web)", "y"), btn("👎 Trả lại", "n")]]
+        return text + f"\n\n<i>{hint}</i>", [[btn("👍 Duyệt", "y"), btn("👎 Trả lại", "n")]]
     if kind == "confirm_ticket":
         desc = str(p.get("description") or "")
         text = (
@@ -362,6 +433,10 @@ def verdict(item: dict[str, Any]) -> str:
         return f"✅ Đã cấp quyền đến {str(r.get('expires_at') or '')[:16].replace('T', ' ')} UTC"
     if kind == "approve_stage":
         who = r.get("by_name") or "Bạn"
+        if (item.get("payload") or {}).get("phase") == "submit":
+            if r.get("approved"):
+                return f"📨 {who} đã gửi duyệt" + (f": {r['note']}" if r.get("note") else "")
+            return f"↩️ {who} cho làm lại" + (f": {r['note']}" if r.get("note") else "")
         if r.get("approved"):
             return f"👍 {who} đã duyệt"
         return f"👎 {who} trả lại" + (f": {r['note']}" if r.get("note") else "")

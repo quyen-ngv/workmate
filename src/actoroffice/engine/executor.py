@@ -320,6 +320,11 @@ class Executor:
         known = await office.stages.known(ticket, actor)
         if stage.id == "understand" and stage_run.attempt == 1 and not resumed and not await self._ran_before(stage_run.id, wake):
             await office.stages.post_known(ticket, known)
+        # A ticket in a pack flow: what the office already knows around its documents, and what a redo starts from.
+        doc_context = await office.doccontext.context_block(ticket, stage, kb=known["kb"])
+        reasons = [r for r in wake.payload.get("reasons", []) if r.get("redo")]
+        redo = await office.doccontext.redo_block(ticket, stage, stage_run, reasons) if reasons else ""
+        sources = await office.sources.list(ticket) + await office.sources.basis(ticket, stage, stage_run.id) if "sources_read" in stage.checks else None
         return prompt_pack.build(
             actor=actor,
             ticket=ticket,
@@ -334,7 +339,7 @@ class Executor:
             guidelines=guidelines,
             memories=known["memories"],
             similar=known["similar"],
-            kb=known["kb"],
+            kb=known["kb"] if not doc_context else [],  # the Context block lists them, with how far to trust each
             approved=[
                 f"{d.key} rev {d.approved_revision}" for d in await office.tickets.list_documents(ticket.id) if d.approved_revision
             ],
@@ -345,7 +350,9 @@ class Executor:
             new_comments=new_comments,
             changes=changes,
             office_runs_tests=bool(command_list((project.profile if project else None) or {}, "test")),
-            sources=await office.sources.list(ticket) if "sources_read" in stage.checks else None,
+            sources=sources,
+            context=doc_context,
+            redo=redo,
         )
 
     async def _drop_seen(self, actor_id: str, ticket_id: int, gate: OfficeGate, status: RunStatus) -> None:

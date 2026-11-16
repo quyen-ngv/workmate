@@ -5,14 +5,19 @@ one of them, so fixing a typo in an item nobody uses calls nobody back.
 
 How a reference resolves: `EP-4/REQ-2` is REQ-2 of ticket EP-4. A bare `AC-1.2` is the item of the same document if it
 has one with that id (an assumption `A-1` exists per document), otherwise the item of another document of the same
-ticket.
+ticket. When the graph knows the pack, a bare id of a kind that no document of the ticket can hold (`REQ-1` written in
+a task's design, where requirements live on the epic) is the item of the one other ticket in the set that has it.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .model import ParsedDoc
+
+if TYPE_CHECKING:
+    from .pack import StandardPack
 
 
 def impact(old: ParsedDoc | None, new: ParsedDoc) -> set[str]:
@@ -33,6 +38,26 @@ def split_ref(ref: str) -> tuple[str | None, str]:
     return (ticket if sep else None), item
 
 
+def holders_elsewhere(docs: dict[str, ParsedDoc], pack: StandardPack | None, doc_key: str, target: str) -> list[str] | None:
+    """Where a bare id written in `doc_key` has to be looked for when its own ticket cannot hold it: the documents of
+    other tickets whose type holds that kind. None when the ticket's own documents are the place to look (the kind
+    is theirs, the pack is unknown, or the id is of no kind)."""
+    kind = pack.kind_of(target) if pack else None
+    if kind is None:
+        return None
+    own, types = doc_ticket(doc_key), set(pack.doc_types_with(kind))
+    if any(doc_ticket(key) == own and doc.doctype in types for key, doc in docs.items()):
+        return None
+    return [key for key, doc in docs.items() if doc.doctype in types and doc_ticket(key) != own]
+
+
+def home_ticket(docs: dict[str, ParsedDoc], pack: StandardPack | None, doc_key: str, target: str) -> str:
+    """The ticket a bare id written in `doc_key` points into: its own, unless exactly one other ticket holds the item."""
+    elsewhere = holders_elsewhere(docs, pack, doc_key, target)
+    tickets = {doc_ticket(key) for key in elsewhere or [] if docs[key].item(target)}
+    return tickets.pop() if len(tickets) == 1 else doc_ticket(doc_key)
+
+
 @dataclass(frozen=True)
 class Link:
     doc: str  # document the line is written in
@@ -45,7 +70,7 @@ class Link:
 
 
 class TraceGraph:
-    def __init__(self, docs: dict[str, ParsedDoc]) -> None:
+    def __init__(self, docs: dict[str, ParsedDoc], pack: StandardPack | None = None) -> None:
         self.docs = docs
         self.links: list[Link] = []
         for key, doc in docs.items():
@@ -54,7 +79,10 @@ class TraceGraph:
                 for relation, refs in (("trace", item.traces), ("changes", item.changes)):
                     for ref in refs:
                         ticket, target = split_ref(ref)
-                        self.links.append(Link(key, item.id, relation, ref, doc_ticket(key) if ticket is None else ticket, target, ticket is None and target in own))
+                        local = ticket is None and target in own
+                        if ticket is None:
+                            ticket = doc_ticket(key) if local else home_ticket(docs, pack, key, target)
+                        self.links.append(Link(key, item.id, relation, ref, ticket, target, local))
 
     def links_to(self, doc_key: str, item_id: str, relations: tuple[str, ...] = ("trace", "changes")) -> list[Link]:
         """Links that land on `item_id` of `doc_key`. The item need not exist (it may have been removed)."""

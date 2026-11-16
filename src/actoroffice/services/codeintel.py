@@ -79,8 +79,14 @@ class CodeIntelService:
     # ---- which repositories ----------------------------------------------------------------------------------
 
     def _repo_of(self, project: Project) -> Repo | None:
-        if project.kind not in ("code", "reference") or not project.path:
+        if project.kind not in ("code", "reference"):
             return None
+        if not project.path:
+            if not (project.code_connection and project.repo_url):
+                return None
+            # no folder on this machine: the repository on the project's code host, mirrored or read through the API
+            remote = RepoRef(connection=project.code_connection, slug=project.repo_url, default_branch=project.main_branch)
+            return Repo(slug_of(f"{project.code_connection}/{project.repo_url}"), project.id, project.team_id, None, project.main_branch, remote)
         path = Path(project.path)
         if not path.is_dir():
             return None
@@ -164,6 +170,12 @@ class CodeIntelService:
             if found is None:
                 return None
             spec, host = found
+        resolve = getattr(host, "repo_ref", None)
+        if resolve is not None:  # a slug or a full link, brought to the host's canonical slug
+            ref = resolve(slug)
+            if ref is None:
+                raise ConnectorError("invalid", f"«{slug.strip()[:160]}» không phải một repo của kết nối {spec.id}: nhập dạng PROJECT/tên-repo hoặc dán link repo trên code host đó")
+            slug = ref.slug
         slug = slug.strip().strip("/")
         if not branch:
             try:

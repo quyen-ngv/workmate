@@ -1263,6 +1263,9 @@ async function pageSetup() {
   const c = s.connections;
   const status = (ok, text) => `<span class="chip ${ok ? "working" : ""}">${ok ? "✓ " : ""}${esc(text)}</span>`;
   const teamOpts = (sel) => `<option value="">—</option>${s.teams.map((t) => `<option value="${esc(t.id)}" ${t.id === sel ? "selected" : ""}>${esc(t.name)}</option>`).join("")}`;
+  // connections that read code: the code host a project's repository is on
+  const codeConns = (await api("/api/connections")).filter((a) => (a.capabilities || []).includes("code_read")).flatMap((a) => (a.connections || []).filter((x) => x.enabled).map((x) => [x.id, `${x.id} (${a.title || a.name})`]));
+  teamOpts.conn = (sel) => `<option value="">— không gắn —</option>${codeConns.concat(sel && !codeConns.some(([v]) => v === sel) ? [[sel, `${sel} (không còn)`]] : []).map(([v, l]) => `<option value="${esc(v)}" ${v === sel ? "selected" : ""}>${esc(l)}</option>`).join("")}`;
   const models = MODELS.some(([v]) => v === s.ai.model) ? MODELS : [[s.ai.model, s.ai.model], ...MODELS];
   sheet("Cài đặt", `
     <h3>AI</h3>
@@ -1272,9 +1275,9 @@ async function pageSetup() {
     </div>
 
     <h3>Repo / dự án</h3>
-    <p class="hint">Thư mục repo trên máy này. AI làm trên git worktree riêng cho mỗi việc, không sửa thẳng nhánh của bạn. Lệnh test/build để AI tự kiểm tra (để trống nếu chưa có).</p>
+    <p class="hint">Thư mục repo trên máy này (để trống nếu repo chỉ nằm trên code host: office đọc qua kết nối). AI làm trên git worktree riêng cho mỗi việc, không sửa thẳng nhánh của bạn. Lệnh test/build để AI tự kiểm tra (để trống nếu chưa có).</p>
     ${s.projects.map((p) => projectForm(p, teamOpts)).join("")}
-    ${projectForm({ id: "", name: "", path: "", team_id: "", repo_url: "", test: "", build: "", lint: "", ui_seed: "", ui_start: "", ui_url: "", ui_paths: "" }, teamOpts)}
+    ${projectForm({ id: "", name: "", path: "", team_id: "", repo_url: "", code_connection: "", main_branch: "", test: "", build: "", lint: "", ui_seed: "", ui_start: "", ui_url: "", ui_paths: "" }, teamOpts)}
 
     <h3>Kết nối</h3>
     <p class="hint">Token được lưu trên máy chủ (thư mục secrets), không hiện lại và AI không bao giờ thấy.</p>
@@ -1303,6 +1306,22 @@ const PERM_MODES = [
   ["full", "Tin tưởng hoàn toàn", "Không hỏi gì, trừ các lệnh nguy hiểm luôn bị chặn và luật của team. Chỉ dùng với repo thử nghiệm."],
 ];
 
+// "KEY=VALUE" per line ↔ an object (the build's timeouts and variables in the project form)
+function kvLines(map) {
+  return Object.entries(map || {}).map(([name, value]) => `${name}=${value}`).join("\n");
+}
+
+function kvParse(text) {
+  const map = {};
+  for (const line of text.split("\n")) {
+    const at = line.indexOf("=");
+    if (!line.trim()) continue;
+    if (at < 1) throw new Error(`Cần dạng TÊN=GIÁ TRỊ, mỗi dòng một cặp: "${line.trim()}"`);
+    map[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+  }
+  return map;
+}
+
 function projectForm(p, teamOpts) {
   const k = esc(p.id || "new");
   return `<div class="rule" data-proj="${k}"><div class="h"><b>${p.id ? esc(p.name) : "Thêm repo mới"}</b>${p.path ? `<span class="chip">${esc(p.path)}</span>` : ""}</div>
@@ -1310,10 +1329,15 @@ function projectForm(p, teamOpts) {
       <label>Tên<input data-pf="name" value="${esc(p.name)}" placeholder="vd. billing"></label>
       <label>Thư mục repo<input data-pf="path" value="${esc(p.path || "")}" placeholder="vd. F:/code/billing"></label>
       <label>Team<select data-pf="team_id">${teamOpts(p.team_id)}</select></label>
-      <label>Repo trên Bitbucket<input data-pf="repo_url" value="${esc(p.repo_url || "")}" placeholder="vd. acme/billing"></label>
-      <label>Lệnh test<input data-pf="test" value="${esc(p.test)}" placeholder="vd. mvn -q test"></label>
-      <label>Lệnh build<input data-pf="build" value="${esc(p.build)}" placeholder="vd. mvn -q package -DskipTests"></label>
-      <label>Lệnh lint<input data-pf="lint" value="${esc(p.lint)}"></label>
+      <label>Kết nối code<select data-pf="code_connection" title="Code host chứa repo này: push, pull request và webhook đi qua kết nối này">${teamOpts.conn ? teamOpts.conn(p.code_connection || "") : ""}</select></label>
+      <label>Repo trên code host<input data-pf="repo_url" value="${esc(p.repo_url || "")}" placeholder="ICONNECT/tcbs-bond-trading hoặc dán link"></label>
+      <label>Nhánh chính<input data-pf="main_branch" value="${esc(p.main_branch || "")}" placeholder="vd. master, develop"></label>
+      <label>Lệnh test<textarea data-pf="test" rows="1" placeholder="vd. mvn -q test" title="Nhiều lệnh: mỗi dòng một lệnh">${esc(p.test)}</textarea></label>
+      <label>Lệnh build<textarea data-pf="build" rows="1" placeholder="vd. mvn -q package -DskipTests" title="Nhiều lệnh: mỗi dòng một lệnh">${esc(p.build)}</textarea></label>
+      <label>Lệnh lint<textarea data-pf="lint" rows="1" title="Nhiều lệnh: mỗi dòng một lệnh">${esc(p.lint)}</textarea></label>
+      <label>Lệnh setup<textarea data-pf="setup" rows="1" placeholder="vd. npm ci" title="Chạy trước lệnh build (tải thư viện). Nhiều lệnh: mỗi dòng một lệnh">${esc(p.setup || "")}</textarea></label>
+      <label>Timeout (giây) từng lệnh<textarea data-pf="timeouts" rows="1" placeholder="vd. test=1800" title="Mỗi dòng: LỆNH=SỐ GIÂY (setup, build, test, lint). Mặc định 900">${esc(kvLines((p.profile || {}).timeouts))}</textarea></label>
+      <label>Biến môi trường build (không bí mật)<textarea data-pf="env" rows="1" placeholder="vd. MAVEN_OPTS=-Xmx2g" title="Mỗi dòng: TÊN=GIÁ TRỊ. Token, mật khẩu: đặt trong môi trường của máy hoặc dùng kết nối">${esc(kvLines((p.profile || {}).env))}</textarea></label>
       <label>Giao diện: lệnh seed<input data-pf="ui_seed" value="${esc(p.ui_seed)}" placeholder="vd. uv run python scripts/ui_seed.py" title="Chạy trước lệnh start, nhận AO_UI_PORT, AO_UI_DATA, AO_UI_TOKEN"></label>
       <label>Giao diện: lệnh start<input data-pf="ui_start" value="${esc(p.ui_start)}" placeholder="vd. npm run dev -- --port {port}" title="Chỉ nghe 127.0.0.1; {port} và {data} được thay; token ở biến AO_UI_TOKEN"></label>
       <label>Giao diện: URL<input data-pf="ui_url" value="${esc(p.ui_url)}" placeholder="vd. http://127.0.0.1:{port}/login?t={token}"></label>
@@ -1396,9 +1420,13 @@ document.addEventListener("click", (e) => {
   if (ds.saveProject) return act(async () => {
     const box = t.closest("[data-proj]");
     const v = (n) => ($(`[data-pf="${n}"]`, box).value || "").trim();
-    const r = await api("/api/setup/project", { method: "POST", body: { id: ds.saveProject === "new" ? null : ds.saveProject, name: v("name"), path: v("path"), team_id: v("team_id") || null, repo_url: v("repo_url") || null, test: v("test"), build: v("build"), lint: v("lint"), ui_seed: v("ui_seed"), ui_start: v("ui_start"), ui_url: v("ui_url"), ui_paths: v("ui_paths") } });
+    const timeouts = Object.fromEntries(Object.entries(kvParse(v("timeouts"))).map(([name, s]) => [name, Number(s)]));
+    if (Object.values(timeouts).some((s) => !Number.isInteger(s) || s <= 0)) throw new Error("Timeout: mỗi dòng LỆNH=SỐ GIÂY, vd. test=1800");
+    const build = { setup: v("setup"), timeouts, env: kvParse(v("env")) };
+    const r = await api("/api/setup/project", { method: "POST", body: { id: ds.saveProject === "new" ? null : ds.saveProject, name: v("name"), path: v("path"), team_id: v("team_id") || null, repo_url: v("repo_url") || null, code_connection: v("code_connection"), main_branch: v("main_branch"), test: v("test"), build: v("build"), lint: v("lint"), ui_seed: v("ui_seed"), ui_start: v("ui_start"), ui_url: v("ui_url"), ui_paths: v("ui_paths"), ...build } });
     toast(r.imported_rules.length ? `Đã lưu · nhập ${r.imported_rules.length} quy ước từ repo` : "Đã lưu");
     await pageSetup();
+    for (const w of r.warnings || []) toast(`Lưu ý: ${w}`, true);
   });
   const conn = (n) => ($(`[data-c="${n}"]`)?.value || "").trim();
   if (ds.saveTelegram !== undefined) return act(async () => { const r = await api("/api/setup/telegram", { method: "POST", body: { token: conn("tg_token") } }); toast(`Đã nối bot @${r.bot}. ${r.next}`); if (r.warning) toast(r.warning, true); await pageSetup(); });

@@ -77,6 +77,15 @@ class CodeHost(Protocol):
 
     async def clone_auth(self, repo: RepoRef) -> CloneAuth | None: ...  # None: cloning is not allowed
 
+    # Where git reaches the repository and with which credential, whatever the `clone` switch says. `write=True` on a
+    # read-only connection raises ConnectorError("forbidden"). None: the connection has no credential yet.
+    async def git_auth(self, repo: RepoRef, *, write: bool) -> CloneAuth | None: ...
+
+    # The canonical reference of a repository named by its slug, its web link or a clone link (https, ssh, git@host:…).
+    # None: the text is not a repository of this connection (another host, another context path, another owner).
+    # No request is made and no allow-list is checked.
+    def repo_ref(self, text: str) -> RepoRef | None: ...
+
     # ---- pull requests (create and reply need write)
     async def pr_create(self, repo: RepoRef, source: str, destination: str, title: str, body: str) -> PullRequest: ...
 

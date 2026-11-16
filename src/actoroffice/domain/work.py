@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import shlex
+import sys
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 from .org import WorkspaceKind
+
+
+def split_command(text: str) -> list[str]:
+    """One command line as an argv list, quotes respected. On Windows a backslash is part of a path, never an
+    escape (`C:\\tools\\mvn.cmd -q "clean test"`). An unclosed quote raises ValueError."""
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=False)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    if sys.platform == "win32":
+        lexer.escape = ""
+    return list(lexer)
 
 
 class ProjectAccess(StrEnum):
@@ -27,7 +40,9 @@ class Project(BaseModel):
     is_default: bool = False
     team_id: str | None = None
     kind: str = "code"  # code | reference | automation
+    # The repository: with `code_connection` its canonical slug on that code host ("PAY/ledger-api"); without, free text.
     repo_url: str | None = None
+    code_connection: str | None = None  # id of the code-host connection the repository is on
     # How to set up, build, test, lint and run the project (argv lists, see doc/plans design §9.2).
     profile: dict[str, Any] = Field(default_factory=dict)
     # How much the AI may do without a click (security/policy.py): read_only | workspace | full.
@@ -35,6 +50,19 @@ class Project(BaseModel):
     allow_rules: list[str] = Field(default_factory=list)  # "always allow" rules chosen on approval cards
     # "Chạy từng ticket một" (SI-31): None = the default, on for code projects people work in (worktree/direct).
     one_at_a_time: bool | None = None
+
+    @model_validator(mode="after")
+    def _test_command_is_the_profile_test(self) -> Project:
+        """`test_command` is the old single field: when the profile declares no test, it is the profile's test, so
+        the repo check, the merge and "commands that run without asking" all read one place (the profile)."""
+        if self.test_command and self.test_command.strip() and not self.profile.get("test"):
+            try:
+                argv = split_command(self.test_command)
+            except ValueError:  # an unclosed quote: as before, split on spaces
+                argv = self.test_command.split()
+            if argv:
+                self.profile = {**self.profile, "test": argv}
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property

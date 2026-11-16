@@ -23,7 +23,8 @@ from actoroffice.domain.stage import StageOutcome
 from actoroffice.domain.work import Project, ProjectAccess, Ticket
 from actoroffice.engine.workspace import branch_name
 from actoroffice.proctree import kill_tree
-from actoroffice.services.checks import IDENTITY, command_list, merge_failure, run_argv, test_env
+from actoroffice.services.atlassian import has_code_host
+from actoroffice.services.checks import IDENTITY, command_list, merge_failure, project_env, run_argv
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -78,7 +79,9 @@ class MergeService:
         project = await office.projects.get(root.project_id) if root.project_id else None
         if not project or project.access != ProjectAccess.WORKTREE or not project.path:
             return {"available": False}
-        if office.atlassian.code_host() is not None or ticket.id != root.id or ticket.pr_url or ticket.stage != "pr":
+        if ticket.id != root.id or ticket.pr_url or ticket.stage != "pr":
+            return {"available": False}
+        if await has_code_host(office, office.sourcehub.scope(root)):  # reviewed and merged there, as a pull request
             return {"available": False}
         if (await office.stages.stage_def(ticket)).gate != "merge":
             return {"available": False}
@@ -289,24 +292,20 @@ class MergeService:
         return {"merged": True, "commit": sha[:7], "sha": sha, "branch": branch, "main": main, "tested": tested}
 
     async def _test(self, project: Project, cwd: Path) -> str | None:
-        """Run the project's test command on the merge result: profile "test" first, then test_command.
-        Returns the command that passed, None when the project has none; a failure raises with the log's tail."""
+        """Run the project's test command on the merge result: profile "test" (the old `test_command` is read as
+        it when the profile has none, see Project). Returns the command that passed, None when the project has
+        none; a failure raises with the log's tail."""
         profile = project.profile or {}
         timeouts = profile.get("timeouts")
         timeout = float(timeouts.get("test", 900)) if isinstance(timeouts, dict) else 900.0
-        env = test_env(self.office)
+        env = project_env(self.office, project)
         argv_list = command_list(profile, "test")
         for argv in argv_list:
             code, out, _secs = await run_argv(argv, cwd, timeout=timeout, env=env)
             if code != 0:
-                raise MergeError(f"Test lỗi trên kết quả merge (`{' '.join(argv)}` → exit {code}):\n{out[-LOG_TAIL:]}")
+                raise MergeError(self.office.redact(f"Test lỗi trên kết quả merge (`{' '.join(argv)}` → exit {code}):\n{out[-LOG_TAIL:]}"))
         if argv_list:
             return " && ".join(" ".join(argv) for argv in argv_list)
-        if project.test_command:
-            code, out = await _shell(project.test_command, cwd, timeout=timeout, env=env)
-            if code != 0:
-                raise MergeError(f"Test lỗi trên kết quả merge (`{project.test_command}` → exit {code}):\n{out[-LOG_TAIL:]}")
-            return project.test_command
         return None
 
     async def _name(self, user_id: str) -> str:
@@ -335,21 +334,6 @@ async def _git(cwd: Path, *args: str, timeout: float = 120) -> tuple[int, str]:
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
     except (TimeoutError, asyncio.CancelledError):
-        kill_tree(proc.pid)
-        raise
-    return proc.returncode or 0, out.decode("utf-8", "replace")
-
-
-async def _shell(command: str, cwd: Path, *, timeout: float = 900, env: dict[str, str] | None = None) -> tuple[int, str]:
-    proc = await asyncio.create_subprocess_shell(
-        command, cwd=str(cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env or _env(cwd)
-    )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
-    except TimeoutError:
-        kill_tree(proc.pid)  # the shell and the test runner it started
-        return 124, "timeout"
-    except asyncio.CancelledError:
         kill_tree(proc.pid)
         raise
     return proc.returncode or 0, out.decode("utf-8", "replace")

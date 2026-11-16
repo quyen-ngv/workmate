@@ -181,7 +181,13 @@ async def test_without_a_code_host_the_committed_branch_is_the_review(tmp_path) 
     repo = copy_repo(tmp_path / "repo", message="base")  # an empty commit on main
     git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@x", "-c", "commit.gpgsign=false"]
     subprocess.run([*git, "switch", "-q", "-c", "t/si-1-fix"], check=True)
-    office = SimpleNamespace(atlassian=SimpleNamespace(code_host=lambda: None))
+    async def no_connections(*_args):
+        return []
+
+    # no code host at all: no connection in the ticket's scope and no old Bitbucket configuration
+    office = SimpleNamespace(
+        atlassian=SimpleNamespace(code_host=lambda: None), sourcehub=SimpleNamespace(scope=lambda _ticket: None), connections=SimpleNamespace(candidates=no_connections)
+    )
     ctx = SimpleNamespace(office=office, ticket=SimpleNamespace(pr_url=None), workspace=repo, project=SimpleNamespace(main_branch="main"))
 
     assert (await check_pr_linked(ctx)).status == "failed"  # nothing committed yet

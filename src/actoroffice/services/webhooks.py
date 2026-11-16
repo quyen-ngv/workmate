@@ -41,6 +41,14 @@ def _same_repo(repo_url: str | None, slug: str) -> bool:
     return tail.endswith("/" + slug.lower().strip("/"))
 
 
+def _is_project_repo(project: Any, connection_id: str, slug: str) -> bool:
+    """Is the repository an event of `connection_id` names the project's? A project bound to a connection says so
+    exactly (that connection, that canonical slug); only a project without one is matched by reading its address."""
+    if project.code_connection:
+        return bool(slug) and project.code_connection == connection_id and (project.repo_url or "").lower() == slug.lower()
+    return _same_repo(project.repo_url, slug)
+
+
 class WebhookService:
     def __init__(self, office: Office) -> None:
         self.office = office
@@ -96,7 +104,7 @@ class WebhookService:
         for repo in await office.codeintel.all_repos():
             project = await office.projects.get(repo.project_id) if repo.project_id else None
             mine = (repo.remote is not None and repo.remote.connection == connection_id and repo.remote.slug.lower() == event.repo.lower()) or (
-                project is not None and _same_repo(project.repo_url, event.repo)
+                project is not None and _is_project_repo(project, connection_id, event.repo)
             )
             if not mine or (event.ref and event.ref != repo.branch):
                 continue

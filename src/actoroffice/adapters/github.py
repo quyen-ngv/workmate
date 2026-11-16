@@ -13,7 +13,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
-from actoroffice.adapters._http import TIMEOUT_S, Http, host_of, now_iso, tls
+from actoroffice.adapters._http import TIMEOUT_S, Http, host_of, now_iso, owner_repo, tls
 from actoroffice.ports.code import ChangedFile, CloneAuth, PrComment, PullRequest, RepoRef, TreeEntry, WebhookEvent
 from actoroffice.ports.connection import Capability, ConnectorError, Health
 
@@ -196,7 +196,17 @@ class GitHub:
             out.append(ChangedFile(path=str(item.get("filename") or ""), status=status, old_path=str(previous) if status == "renamed" and previous else None))
         return out
 
+    def repo_ref(self, text: str) -> RepoRef | None:
+        """`org/name`, `https://<web host>/org/name[.git]`, `git@<web host>:org/name.git`: a repository of this organisation."""
+        name = owner_repo(text, self.web_host, self.config.org)
+        return RepoRef(slug=f"{self.config.org}/{name}", url=self._web(name)) if name else None
+
     async def clone_auth(self, repo: RepoRef) -> CloneAuth | None:
+        return await self.git_auth(repo, write=False)
+
+    async def git_auth(self, repo: RepoRef, *, write: bool) -> CloneAuth | None:
+        if write:
+            self._require_write("push nhánh")
         if self.http.blocked is not None:
             return None
         return CloneAuth(url=self._web(self._name(repo)) + ".git", username=GIT_USERNAME, password=self._token)

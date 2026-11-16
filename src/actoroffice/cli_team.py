@@ -197,9 +197,16 @@ async def cmd_project(office: Office, args: argparse.Namespace) -> None:
                 profile.pop(key, None)
             else:
                 profile[key] = value
+        from actoroffice.services.checks import check_profile
+
+        check_profile(profile)  # env names that look like secrets, bad timeouts
+    warnings: list[str] = []
     project = await office.projects.configure(
-        project.id, team_id=team.id if team else None, kind=args.kind, repo_url=args.repo_url, profile=profile
-    )
+        project.id, team_id=team.id if team else None, kind=args.kind, repo_url=args.repo_url, profile=profile,
+        code_connection=getattr(args, "connection", None), main_branch=getattr(args, "main_branch", None), warnings=warnings,
+    )  # fmt: skip
+    for warning in warnings:
+        out(f"Lưu ý: {warning}")
     out(f"{project.name}: team={project.team_id or '-'} kind={project.kind} repo={project.repo_url or '-'} profile={list(project.profile) or '-'}")
 
 
@@ -382,7 +389,7 @@ def register(sub: Any) -> None:
 
     p = sub.add_parser(
         "project",
-        help='project add <name> --path <repo> | list | set <name> --team T --kind code|reference --repo-url ws/slug '
+        help='project add <name> --path <repo> | list | set <name> --team T --kind code|reference --connection <id> --repo-url PROJECT/repo --main-branch master '
         "--profile '{\"test\": [\"mvn\",\"-q\",\"test\"]}'",
     )
     p.add_argument("action", choices=["add", "set", "list"])
@@ -391,7 +398,9 @@ def register(sub: Any) -> None:
     p.add_argument("--access", default="worktree", choices=["worktree", "read_only", "direct"])
     p.add_argument("--team")
     p.add_argument("--kind", choices=["code", "reference", "automation"])
-    p.add_argument("--repo-url")
+    p.add_argument("--repo-url", help="the repository: PROJECT/repo, owner/name, or its link (with --connection: saved as the canonical slug)")
+    p.add_argument("--connection", help='id of the code-host connection the repository is on ("" unbinds)')
+    p.add_argument("--main-branch", help="the branch tickets start from and merge to, e.g. master")
     p.add_argument("--profile", help="JSON merged into the profile by top-level key (null removes a key): setup/build/test/lint/run argv lists, test_glob, coverage, os overrides")
     p.set_defaults(fn=cmd_project)
 

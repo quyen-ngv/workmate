@@ -248,16 +248,13 @@ async def evaluate_call(
 
 
 def _profile_commands(project: Any) -> list[str]:
-    """The project's own test/build/lint commands (argv lists in its profile), as the shell would show them."""
+    """The project's own setup/build/test/lint/run commands (every form a profile may hold them in, with this
+    platform's override), as the shell would show them. Settings of the profile (ports, env, timeouts …) are not commands."""
     if project is None:
         return []
-    commands = []
-    for value in (project.profile or {}).values():
-        if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
-            commands.append(" ".join(value))
-    if project.test_command:
-        commands.append(project.test_command)
-    return commands
+    from actoroffice.services.checks import profile_commands
+
+    return list(dict.fromkeys(" ".join(argv) for argv in profile_commands(project.profile or {})))
 
 
 def _shown_input(args: dict[str, Any], redact: Any, limit: int = 4000) -> dict[str, Any]:

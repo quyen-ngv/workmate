@@ -125,6 +125,7 @@ class Office:
         self.connections = ConnectionService(self)  # accounts on outside systems (Jira, Confluence, Bitbucket, GitHub…)
         self.codeintel = CodeIntelService(self)  # the code index, the code graph and the service map
         self.webhooks = WebhookService(self)  # events pushed by code hosts (POST /hooks/<connection>)
+        self.projects.office = self  # a project is bound to a code-host connection and indexed after it is saved
         docflow.configure(settings.doc_pack_path)  # a pack that is not valid stops the office here, with every problem listed
         self.sourcehub = SourceHub(self)  # documents of outside systems, through whatever is connected
         self.docs = DocService(self)  # Doc Core: documents checked against the standard pack, sources pinned

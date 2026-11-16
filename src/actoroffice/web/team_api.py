@@ -624,12 +624,19 @@ def register_rules(app: FastAPI, office: Office) -> None:
 class SetupProject(BaseModel):
     id: str | None = None
     name: str
-    path: str
+    path: str = ""
     team_id: str | None = None
-    repo_url: str | None = None
+    repo_url: str | None = None  # slug or link of the repository; with a connection it is saved as the canonical slug
+    code_connection: str | None = None  # id of the code-host connection; "" unbinds, None leaves it
+    main_branch: str = ""  # empty: leave it
     test: str = ""
     build: str = ""
     lint: str = ""
+    # Company network / slow builds. None = leave what the profile has; empty = remove it.
+    setup: str | None = None  # run before the build (check repo:setup), e.g. "npm ci"
+    timeouts: dict[str, int] | None = None  # seconds per command: {"test": 1800}
+    env: dict[str, str] | None = None  # the build's own variables, never a secret
+    test_glob: list[str] | None = None  # which files are tests (checks tests_changed, coverage)
     # UI evidence (SI-23): how the office runs the app for screenshots; all empty = no UI profile
     ui_seed: str = ""
     ui_start: str = ""
@@ -666,19 +673,31 @@ class AiBody(BaseModel):
     model: str
 
 
-def _argv(text: str) -> list[str] | None:
-    import shlex
+def _argv(text: str) -> list[str] | list[list[str]] | None:
+    """The commands of a form field, one per line, quotes respected: one line → an argv list (as before), several
+    → a list of argv lists (run in order). None when empty; 422 for a quote that is never closed."""
+    from actoroffice.domain.work import split_command
 
-    text = text.strip()
-    return shlex.split(text, posix=True) if text else None
+    try:
+        commands = [argv for argv in (split_command(line) for line in text.splitlines() if line.strip()) if argv]
+    except ValueError as exc:
+        raise HTTPException(422, f"Lệnh có dấu nháy chưa đóng: {text.strip()[:120]}") from exc
+    if not commands:
+        return None
+    return commands[0] if len(commands) == 1 else commands
 
 
 def _cmd(profile: dict[str, Any], key: str) -> str:
+    """profile[key] as the form shows it: one command per line."""
     import shlex
 
     value = profile.get(key)
+    if isinstance(value, str):
+        return value
     if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
         return shlex.join(value)
+    if isinstance(value, list):
+        return "\n".join(shlex.join([str(a) for a in v]) if isinstance(v, list) else str(v) for v in value if v)
     return ""
 
 
@@ -717,6 +736,24 @@ def _ui_profile(body: SetupProject) -> dict[str, Any] | None:
     return ui
 
 
+def _build_settings(body: SetupProject) -> dict[str, Any]:
+    """The profile keys of the form's build settings that were sent (setup, timeouts, env, test_glob), checked;
+    an empty value means "remove the key". 422 for a variable name that looks like a secret or a bad timeout."""
+    from actoroffice.services.checks import check_profile
+
+    sent: dict[str, Any] = {}
+    if body.setup is not None:
+        sent["setup"] = _argv(body.setup)
+    if body.timeouts is not None:
+        sent["timeouts"] = {k.strip(): v for k, v in body.timeouts.items() if k.strip()}
+    if body.env is not None:
+        sent["env"] = {k.strip(): v for k, v in body.env.items() if k.strip()}
+    if body.test_glob is not None:
+        sent["test_glob"] = [g.strip() for g in body.test_glob if g.strip()]
+    check_profile(sent)
+    return sent
+
+
 def _telegram_env_key() -> str | None:
     import os
 
@@ -749,7 +786,7 @@ def register_setup(app: FastAPI, office: Office) -> None:
         return {
             "ai": {"name": office.settings.ai_name, "model": office.settings.ai_model or office.settings.default_model},
             "projects": [
-                {**p.model_dump(), "test": _cmd(p.profile, "test"), "build": _cmd(p.profile, "build"), "lint": _cmd(p.profile, "lint"), **_ui_fields(p.profile)}
+                {**p.model_dump(), "test": _cmd(p.profile, "test"), "build": _cmd(p.profile, "build"), "lint": _cmd(p.profile, "lint"), "setup": _cmd(p.profile, "setup"), **_ui_fields(p.profile)}
                 for p in projects
             ],
             "teams": [t.model_dump() for t in await office.teams.list_teams()],
@@ -770,13 +807,14 @@ def register_setup(app: FastAPI, office: Office) -> None:
     @app.post("/api/setup/project")
     async def setup_project(body: SetupProject) -> dict[str, Any]:
         ui = _ui_profile(body)  # checked before anything is saved
+        build_settings = _build_settings(body)  # the same: a secret-looking variable name is refused here
         if body.id:
             current = await office.projects.get(body.id)
-            project = await office.projects.update(
-                body.id, name=body.name, path=body.path, access=current.access if current.path == body.path else ProjectAccess.WORKTREE, description=current.description
-            )
+            access = current.access if (current.path or "") == body.path else ProjectAccess.WORKTREE if body.path.strip() else ProjectAccess.READ_ONLY
+            project = await office.projects.update(body.id, name=body.name, path=body.path, access=access, description=current.description)
         else:
-            project = await office.projects.create(body.name, path=body.path, access=ProjectAccess.WORKTREE)
+            # no folder: a repository on a code host only, read through its connection
+            project = await office.projects.create(body.name, path=body.path, access=ProjectAccess.WORKTREE if body.path.strip() else ProjectAccess.READ_ONLY)
         profile = dict(project.profile)
         for key in ("test", "build", "lint"):
             value = _argv(getattr(body, key))
@@ -788,9 +826,23 @@ def register_setup(app: FastAPI, office: Office) -> None:
             profile["ui"] = ui
         else:
             profile.pop("ui", None)
-        project = await office.projects.configure(project.id, team_id=body.team_id or None, repo_url=body.repo_url or None, profile=profile)
+        for key, value in build_settings.items():
+            if value:
+                profile[key] = value
+            else:
+                profile.pop(key, None)
+        warnings: list[str] = []
+        try:
+            project = await office.projects.configure(
+                project.id, team_id=body.team_id or None, repo=body.repo_url or None, profile=profile, code_connection=body.code_connection,
+                main_branch=body.main_branch or None, warnings=warnings,
+            )  # fmt: skip
+        except OfficeError:
+            if not body.id:  # the repository was refused: a project created by this very request is taken back
+                await office.db.execute("DELETE FROM projects WHERE id = ?", (project.id,))
+            raise
         imported = await office.rules.import_conventions(project, by=LOCAL_OWNER_ID)
-        return {"project": project.model_dump(), "imported_rules": [r.id for r in imported]}
+        return {"project": project.model_dump(), "imported_rules": [r.id for r in imported], "warnings": warnings}
 
     @app.post("/api/setup/jira")
     async def setup_jira(body: JiraBody) -> dict[str, Any]:

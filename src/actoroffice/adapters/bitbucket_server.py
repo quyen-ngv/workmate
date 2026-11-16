@@ -229,15 +229,10 @@ class BitbucketServer:
     def _split(self, repo: RepoRef) -> tuple[str, str]:
         """(project key, repository name) of a reference, after checking both are allowed. Besides `KEY/name` this takes
         what is left of a repository URL: `scm/key/name`, `projects/KEY/repos/name`, `users/someone/repos/name`."""
-        parts = [p for p in repo.slug.strip().removesuffix(".git").split("/") if p]
-        if len(parts) >= 4 and parts[-2] == "repos" and parts[-4] in ("projects", "users"):
-            key, name = parts[-3], parts[-1]
-            if parts[-4] == "users" and not key.startswith("~"):
-                key = "~" + key
-        elif len(parts) >= 2:
-            key, name = parts[-2], parts[-1]
-        else:
-            raise ConnectorError("invalid", f"{LABEL}: repo phải viết dạng PROJECT/tên-repo")
+        found = self.repo_ref(repo.slug)
+        if found is None:
+            raise ConnectorError("invalid", f"{LABEL}: repo phải viết dạng PROJECT/tên-repo (hoặc link repo trên {self.config.base_url})")
+        key, _, name = found.slug.partition("/")
         project = self._project(key)
         if project is None:
             raise ConnectorError("forbidden", f"{LABEL}: project «{key[:60]}» nằm ngoài các project được phép của kết nối")
@@ -246,6 +241,54 @@ class BitbucketServer:
         if not self._allowed(project, name):
             raise ConnectorError("forbidden", f"{LABEL}: repo «{project}/{name}» nằm ngoài các repo được phép của kết nối")
         return project, name
+
+    def repo_ref(self, text: str) -> RepoRef | None:
+        """`KEY/name`; a web link `<base>/projects/KEY/repos/name[/browse…]` or `<base>/users/someone/repos/name`; a clone
+        link `<base>/scm/key/name.git`, `ssh://git@host:7999/key/name.git`, `git@host:key/name.git`. A link must be on
+        this connection's address (host and context path; for ssh the host). Nothing is asked and no allow-list checked."""
+        text = (text or "").strip()
+        base = urlsplit(self.config.base_url)
+        scp = re.fullmatch(r"[\w.-]+@([\w.-]+):(?!/)(.+)", text)
+        if scp:  # git@host:key/name.git
+            if scp.group(1).lower() != (base.hostname or "").lower():
+                return None
+            path = scp.group(2)
+        elif "://" in text:
+            try:
+                parts = urlsplit(text)
+                port = parts.port
+            except ValueError:
+                return None
+            if (parts.hostname or "").lower() != (base.hostname or "").lower():
+                return None
+            if parts.scheme in ("http", "https"):
+                if (parts.scheme, port) != (base.scheme, base.port) or not parts.path.startswith(base.path + "/"):
+                    return None
+                path = parts.path[len(base.path) :]
+            elif parts.scheme == "ssh":
+                path = parts.path
+            else:
+                return None
+        else:
+            path = text
+        parts_ = [p for p in path.removesuffix("/").removesuffix(".git").split("/") if p]
+        if path is text:  # what is left of a link once the host is cut off may still start with the context path
+            start = next((i for i, p in enumerate(parts_) if p == "scm" or (p in ("projects", "users") and parts_[i + 2 : i + 3] == ["repos"])), 0)
+            parts_ = parts_[start:]
+        if len(parts_) >= 4 and parts_[0] in ("projects", "users") and parts_[2] == "repos":
+            key, name = parts_[1], parts_[3]
+            if parts_[0] == "users" and not key.startswith("~"):
+                key = "~" + key
+        elif len(parts_) == 3 and parts_[0] == "scm":
+            key, name = parts_[1], parts_[2]
+        elif len(parts_) == 2 and not text.lower().startswith(("http://", "https://")):  # a web address always says more
+            key, name = parts_
+        else:
+            return None
+        if not _KEY_RE.fullmatch(key) or not _NAME_RE.fullmatch(name) or name in (".", ".."):
+            return None
+        key = self._project(key) or key
+        return RepoRef(slug=f"{key}/{name}", url=self._web(key, name))
 
     @staticmethod
     def _project_path(key: str) -> str:
@@ -396,9 +439,15 @@ class BitbucketServer:
     async def clone_auth(self, repo: RepoRef) -> CloneAuth | None:
         """`<base>/scm/<project key, lower case>/<repo>.git`. A token alone goes to git as `Authorization: Bearer`; with a
         user name it is that user's password (the documented way for a personal token, and the one that works with LFS)."""
-        if self.http.blocked is not None or not self.config.clone:
-            return None
+        return await self.git_auth(repo, write=False) if self.config.clone else None
+
+    async def git_auth(self, repo: RepoRef, *, write: bool) -> CloneAuth | None:
+        """The clone URL and the credential for git, whatever the `clone` switch says; pushing needs `write`."""
+        if write:
+            self._require_write("push nhánh")
         key, name = self._split(repo)
+        if self.http.blocked is not None:
+            return None
         url = f"{self.config.base_url}/scm/{key.lower()}/{name}.git"
         if self._username:
             return CloneAuth(url=url, username=self._username, password=self._token)

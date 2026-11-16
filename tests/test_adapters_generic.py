@@ -797,3 +797,161 @@ async def test_command_source_through_the_office(office: Office, svn: dict[str, 
         await office.sourcehub.get(ticket, "docs/../secret.md")
     assert unknown.value.kind == "not_found" and "nhận ra" in str(unknown.value)
     assert (await office.connections.health("svn")).state == "ok"
+
+
+# ---- http: OAuth2 password grant ---------------------------------------------------------------------------------
+
+OAUTH_CONFIG = changed(HTTP_CONFIG, {"auth": "oauth2_password", "token_url": "/oauth/token", "scope": "docs.read"})
+OAUTH_SECRET = {"username": "bot", "password": "pw-Sup3r-secret", "client_id": "office", "client_secret": "cl1ent-s3cret-value"}
+
+
+class OAuthApi:
+    """The document system behind an OAuth2 password grant: POST /api/oauth/token gives `tok-<n>`, valid 600s."""
+
+    def __init__(self, *, expires_in: int | None = 600) -> None:
+        self.requests: list[httpx.Request] = []
+        self.sign_ins: list[dict[str, str]] = []
+        self.valid: set[str] = set()
+        self.expires_in = expires_in
+        self.transport = httpx.MockTransport(self.handle)
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.url.path == "/api/oauth/token":
+            form = dict(httpx.QueryParams(request.content.decode()))
+            self.sign_ins.append({**form, "authorization": request.headers.get("authorization", ""), "type": request.headers.get("content-type", "")})
+            if form.get("password") != OAUTH_SECRET["password"]:
+                return httpx.Response(400, json={"error": "invalid_grant", "error_description": f"bad password {form.get('password')}"})
+            token = f"tok-{len(self.sign_ins)}-0123456789abcdef"
+            self.valid = {token}
+            body: dict[str, Any] = {"access_token": token, "token_type": "bearer"}
+            if self.expires_in is not None:
+                body["expires_in"] = self.expires_in
+            return httpx.Response(200, json=body)
+        sent = request.headers.get("authorization", "")
+        if sent.removeprefix("Bearer ") not in self.valid:
+            return httpx.Response(401, json={"error": f"bad credentials: {sent}"})
+        if request.url.path == "/api/ping":
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(200, json=LIMITS)
+
+    def calls(self) -> list[str]:
+        return [r.url.path.removeprefix("/api") for r in self.requests]
+
+
+async def test_oauth_signs_in_once_and_reuses_the_token_until_it_expires() -> None:
+    api = OAuthApi()
+    source = build("http", OAUTH_CONFIG, OAUTH_SECRET, transport=api.transport)
+    now = [1000.0]
+    source.clock = lambda: now[0]
+
+    first, second = await asyncio.gather(source.fetch(DocRef(ref="DOC-101"), SCOPE), source.fetch(DocRef(ref="DOC-101"), SCOPE))
+    assert "5 lần mỗi ngày" in first.text and second.text == first.text
+    assert len(api.sign_ins) == 1, "two calls at once: one sign-in, the other waits for its token"
+    sign_in = api.sign_ins[0]
+    assert (sign_in["grant_type"], sign_in["username"], sign_in["password"], sign_in["scope"]) == ("password", "bot", OAUTH_SECRET["password"], "docs.read")
+    assert sign_in["type"].startswith("application/x-www-form-urlencoded")
+    assert sign_in["authorization"].startswith("Basic ") and "client_id" not in sign_in and "client_secret" not in sign_in, "client by HTTP Basic"
+    assert api.requests[-1].headers["authorization"] == "Bearer tok-1-0123456789abcdef"
+
+    now[0] += 600 - 60 - 1  # still inside expires_in - 60s
+    await source.fetch(DocRef(ref="DOC-101"), SCOPE)
+    assert len(api.sign_ins) == 1
+    now[0] += 2  # the token is replaced a minute before it ends
+    await source.fetch(DocRef(ref="DOC-101"), SCOPE)
+    assert len(api.sign_ins) == 2 and api.requests[-1].headers["authorization"] == "Bearer tok-2-0123456789abcdef"
+
+
+async def test_oauth_without_expires_in_lasts_five_minutes_and_a_public_client_goes_in_the_body() -> None:
+    api = OAuthApi(expires_in=None)
+    secret = {k: v for k, v in OAUTH_SECRET.items() if k != "client_secret"}
+    source = build("http", changed(OAUTH_CONFIG, {"scope": ...}), secret, transport=api.transport)
+    now = [0.0]
+    source.clock = lambda: now[0]
+    await source.fetch(DocRef(ref="DOC-101"), SCOPE)
+    assert api.sign_ins[0]["client_id"] == "office" and api.sign_ins[0]["authorization"] == "" and "scope" not in api.sign_ins[0]
+    now[0] = 239.0
+    await source.fetch(DocRef(ref="DOC-101"), SCOPE)
+    assert len(api.sign_ins) == 1
+    now[0] = 241.0  # 300s default - 60s
+    await source.fetch(DocRef(ref="DOC-101"), SCOPE)
+    assert len(api.sign_ins) == 2
+
+
+async def test_oauth_a_401_means_one_new_sign_in_and_one_retry() -> None:
+    api = OAuthApi()
+    source = build("http", OAUTH_CONFIG, OAUTH_SECRET, transport=api.transport)
+    await source.fetch(DocRef(ref="DOC-101"), SCOPE)
+    api.valid.clear()  # the system dropped the token before its time
+    assert "5 lần mỗi ngày" in (await source.fetch(DocRef(ref="DOC-101"), SCOPE)).text
+    assert api.calls() == ["/oauth/token", "/documents/DOC-101", "/documents/DOC-101", "/oauth/token", "/documents/DOC-101"]
+
+    # a system that refuses every token: one re-login, one retry, then the error (no loop)
+    before = len(api.requests)
+    real = api.handle
+    api.transport = httpx.MockTransport(lambda request: real(request) if request.url.path == "/api/oauth/token" else httpx.Response(401, json={}))
+    stubborn = build("http", OAUTH_CONFIG, OAUTH_SECRET, transport=api.transport)
+    with pytest.raises(ConnectorError) as denied:
+        await stubborn.fetch(DocRef(ref="DOC-101"), SCOPE)
+    assert denied.value.kind == "auth" and len(api.requests) - before == 2, "two sign-ins; the two refused calls never reach api.handle"
+
+
+async def test_oauth_wrong_password_is_an_auth_error_that_holds_no_secret(office: Office, monkeypatch) -> None:
+    api = OAuthApi()
+    wrong = {**OAUTH_SECRET, "password": "wr0ng-pass-value"}
+    source = build("http", OAUTH_CONFIG, wrong, transport=api.transport)
+    with pytest.raises(ConnectorError) as denied:
+        await source.fetch(DocRef(ref="DOC-101"), SCOPE)
+    assert denied.value.kind == "auth" and "đăng nhập" in str(denied.value)
+    assert api.calls() == ["/oauth/token"], "the API is not called without a token"
+    health = await source.test()
+    assert health.state == "error"
+
+    good = build("http", OAUTH_CONFIG, OAUTH_SECRET, transport=api.transport)
+    ok = await good.test()
+    assert ok.state == "ok" and "đăng nhập" in ok.detail and api.calls()[-2:] == ["/oauth/token", "/ping"], "test() signs in"
+    token = next(iter(api.valid))
+    api.valid.clear()
+    api.sign_ins.clear()
+    real = api.handle
+    refuse_all = httpx.MockTransport(lambda r: real(r) if r.url.path == "/api/oauth/token" else httpx.Response(401, json={"error": r.headers["authorization"]}))
+    echoing = build("http", OAUTH_CONFIG, OAUTH_SECRET, transport=refuse_all)
+    with pytest.raises(ConnectorError) as echoed:
+        await echoing.fetch(DocRef(ref="DOC-101"), SCOPE)
+
+    through(monkeypatch, api.transport)
+    await office.connections.save(ConnectionSpec(id="docs", use="http", config=OAUTH_CONFIG), secret=wrong)
+    said = [str(denied.value), repr(denied.value), health.detail, ok.detail, repr(source), repr(good), str(echoed.value), repr(echoed.value)]
+    said += [(await office.connections.health("docs")).detail, json.dumps(await office.connections.overview(), ensure_ascii=False)]
+    secrets = [*OAUTH_SECRET.values(), wrong["password"], token, "tok-", "Bearer"]
+    assert all(s not in text for text in said for s in secrets if s not in ("bot", "office")), said
+
+    bare = build("http", OAUTH_CONFIG, {"username": "bot"}, transport=api.transport)
+    assert (await bare.test()).state == "unconfigured" and "password" in (await bare.test()).detail
+
+
+@pytest.mark.parametrize(
+    ("changes", "named"),
+    [
+        ({"token_url": "https://login.other.test/oauth/token"}, ["token_url", "cùng host"]),
+        ({"token_url": "https://docs.acme.test:8443/oauth/token"}, ["token_url", "cùng host"]),
+        ({"token_url": "//evil.test/token"}, ["token_url"]),
+        ({"token_url": "/oauth/../token"}, ["token_url"]),
+        ({"token_url": ...}, ["token_url", "oauth2_password"]),
+        ({"token_field": " "}, ["token_field"]),
+    ],
+)
+def test_oauth_token_url_must_be_on_the_connections_own_host(changes: dict[str, Any], named: list[str]) -> None:
+    message = refused("http", changed(OAUTH_CONFIG, changes))
+    assert all(part in message for part in named), message
+
+
+async def test_oauth_token_url_on_the_same_host_and_another_host_at_save(office: Office) -> None:
+    api = OAuthApi()
+    source = build("http", changed(OAUTH_CONFIG, {"token_url": "https://docs.acme.test/api/oauth/token"}), OAUTH_SECRET, transport=api.transport)
+    assert "5 lần mỗi ngày" in (await source.fetch(DocRef(ref="DOC-101"), SCOPE)).text
+    with pytest.raises(ConnectorError, match="token_url"):
+        await office.connections.save(
+            ConnectionSpec(id="docs", use="http", config=changed(OAUTH_CONFIG, {"token_url": "https://login.other.test/oauth/token"})), secret=OAUTH_SECRET
+        )
+    assert await office.connections.get("docs") is None

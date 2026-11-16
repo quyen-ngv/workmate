@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -61,6 +62,34 @@ def host_of(url: str) -> str:
         return (urlsplit(url.strip()).hostname or "").lower()
     except ValueError:
         return ""
+
+
+def owner_repo(text: str, web_host: str, owner: str) -> str | None:
+    """The repository name in "name", "owner/name", `https://<web_host>/owner/name[.git][/…]`, `git@<web_host>:owner/name.git`
+    or `ssh://git@<web_host>/owner/name.git`. None: another host, another owner, or not a repository address."""
+    text = (text or "").strip()
+    scp = re.fullmatch(r"[\w.-]+@([\w.-]+):(?!/)(.+)", text)
+    if scp:
+        host, path = scp.group(1).lower(), scp.group(2)
+    elif "://" in text:
+        try:
+            parts = urlsplit(text)
+        except ValueError:
+            return None
+        if parts.scheme not in ("https", "ssh"):
+            return None
+        host, path = (parts.hostname or "").lower(), parts.path
+    else:
+        host, path = web_host, text
+    pieces = [p for p in path.split("/") if p]
+    if host != web_host.lower() or not pieces:
+        return None
+    if len(pieces) == 1 and host == web_host and "://" not in text and not scp:
+        pieces = [owner, pieces[0]]
+    if len(pieces) < 2 or pieces[0].lower() != owner.lower() or (len(pieces) > 2 and "://" not in text):
+        return None
+    name = pieces[1].removesuffix(".git")
+    return name if re.fullmatch(r"[A-Za-z0-9._-]+", name) and name not in (".", "..") else None
 
 
 def kind_for_status(status: int) -> str:

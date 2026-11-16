@@ -192,7 +192,7 @@ class CheckRunner:
         return CheckResult(id=check_id, status="passed", summary=f"{rule.id} {rule.title}", output_ref=ref)
 
     def _env(self, ctx: CheckContext) -> dict[str, str]:
-        return test_env(self.office)
+        return project_env(self.office, ctx.project)
 
     def _save(self, ctx: CheckContext, check_id: str, text: str) -> str | None:
         if not ctx.run_id:
@@ -204,15 +204,126 @@ class CheckRunner:
         return name
 
 
+# What the project's own commands inherit from the office's environment: where the tools are, and how they reach
+# the network of a company (proxy, package mirror, CA). Never the office's own secrets.
+PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY")
+ENV_KEEP = (
+    *("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "LANG", "JAVA_HOME", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA"),
+    *PROXY_VARS,
+    *("MAVEN_HOME", "M2_HOME", "MAVEN_OPTS", "MAVEN_ARGS", "GRADLE_USER_HOME", "GRADLE_OPTS", "JAVA_TOOL_OPTIONS"),
+    *("NODE_EXTRA_CA_CERTS", "NODE_OPTIONS", "NPM_CONFIG_REGISTRY", "NPM_CONFIG_USERCONFIG", "NPM_CONFIG_CAFILE", "YARN_REGISTRY"),
+    *("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_TRUSTED_HOST", "PIP_CERT", "UV_INDEX_URL", "UV_DEFAULT_INDEX"),
+    *("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "GOPROXY", "GOFLAGS", "DOTNET_ROOT", "NUGET_PACKAGES"),
+    *("ProgramFiles", "ProgramData", "SystemDrive", "windir", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "USERNAME", "USER"),
+)
+# curl, pip, npm … also read these in lower case (on Windows names have no case, see _kept)
+ENV_KEEP_LOWER = tuple(n.lower() for n in (*PROXY_VARS, "NPM_CONFIG_REGISTRY", "NPM_CONFIG_USERCONFIG", "NPM_CONFIG_CAFILE"))
+SECRET_ENV_NAME = re.compile(r"(?i)TOKEN|SECRET|PASSWORD|PASSWD|KEY|CREDENTIAL")
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# set by the office for every command of a project; a profile may not change them
+ENV_FIXED = ("GIT_CEILING_DIRECTORIES",)
+
+
+def _kept(name: str) -> bool:
+    if sys.platform == "win32":  # os.environ gives upper-case names there
+        return name.upper() in _KEEP_UPPER
+    return name in ENV_KEEP or name in ENV_KEEP_LOWER
+
+
+_KEEP_UPPER = frozenset(n.upper() for n in ENV_KEEP)
+
+
 def test_env(office: Office) -> dict[str, str]:
-    """Environment of the project's own commands (repo checks, the test of a merge): a short allow-list, no secrets."""
-    keep = ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "LANG", "JAVA_HOME", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA")
-    env = {k: v for k, v in os.environ.items() if k in keep}
+    """Environment of the project's own commands (repo checks, the test of a merge): an allow-list (tools, proxy,
+    package mirrors, CA files), no secrets. The password of a proxy URL is registered so it never shows in output."""
+    from actoroffice.core.http import ca_bundle, node_ca_file
+
+    env = {k: v for k, v in os.environ.items() if _kept(k)}
     env["GIT_CEILING_DIRECTORIES"] = str(office.settings.workspaces_dir.resolve())
     env["CI"] = "1"
     env["PYTHONUTF8"] = "1"  # Windows pipes default to the ANSI code page; tools printing Vietnamese would crash
     env["PYTHONIOENCODING"] = "utf-8"
+    # The company's CA (TLS inspection): Node tools do not read the system store, Python/curl tools read these files
+    if not env.get("NODE_EXTRA_CA_CERTS"):
+        node_ca = node_ca_file(office.settings.data_dir)
+        if node_ca:
+            env["NODE_EXTRA_CA_CERTS"] = node_ca
+    bundle = ca_bundle()
+    if bundle:
+        for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+            if not env.get(name):
+                env[name] = bundle
+    _hide_proxy_passwords(office, env)
     return env
+
+
+def project_env(office: Office, project: Project | None) -> dict[str, str]:
+    """test_env plus the project's own variables (`profile.env`, not secret: a name that looks like a secret is
+    refused when the profile is saved, and left out here if it is stored anyway)."""
+    env = test_env(office)
+    extra = (project.profile or {}).get("env") if project else None
+    if isinstance(extra, dict):
+        for name, value in extra.items():
+            if isinstance(name, str) and ENV_NAME.fullmatch(name) and not SECRET_ENV_NAME.search(name) and name not in ENV_FIXED and value is not None:
+                env[name] = str(value)
+        _hide_proxy_passwords(office, env)
+    return env
+
+
+def _hide_proxy_passwords(office: Office, env: dict[str, str]) -> None:
+    """`http://user:pass@proxy:8080`: the password (and `user:pass`, for a short one) is masked in everything saved."""
+    from urllib.parse import unquote, urlsplit
+
+    for name, value in env.items():
+        if name.upper() not in PROXY_VARS or "@" not in value:
+            continue
+        try:
+            netloc = urlsplit(value if "://" in value else f"http://{value}").netloc
+        except ValueError:
+            continue
+        userinfo = netloc.rpartition("@")[0]
+        user, sep, password = userinfo.partition(":")
+        if not sep or not password:
+            continue
+        for secret in (password, unquote(password), userinfo):
+            office.redact.register(secret)
+
+
+def check_profile(profile: dict[str, Any]) -> None:
+    """What a profile may hold beside its commands, checked when it is saved: `env` (names → plain strings, no
+    secret) and `timeouts` (command → seconds). Raises OfficeError (422) with what to change."""
+    env = profile.get("env")
+    if env is not None:
+        if not isinstance(env, dict):
+            raise ProfileError("profile.env phải là danh sách TÊN=GIÁ TRỊ")
+        for name, value in env.items():
+            if not isinstance(name, str) or not ENV_NAME.fullmatch(name):
+                raise ProfileError(f"Tên biến môi trường không hợp lệ: {name!r} (chỉ chữ, số và dấu _)")
+            if SECRET_ENV_NAME.search(name):
+                raise ProfileError(
+                    f"Biến {name} trông như một bí mật (TOKEN, SECRET, PASSWORD, KEY, CREDENTIAL) nên không lưu trong profile của dự án. "
+                    "Hãy đặt nó trong môi trường của máy chạy văn phòng, hoặc dùng một kết nối."
+                )
+            if name in ENV_FIXED:
+                raise ProfileError(f"Biến {name} do văn phòng đặt, không đổi được trong profile")
+            if not isinstance(value, str):
+                raise ProfileError(f"Giá trị của biến {name} phải là một chuỗi")
+    timeouts = profile.get("timeouts")
+    if timeouts is not None:
+        if not isinstance(timeouts, dict):
+            raise ProfileError("profile.timeouts phải là danh sách LỆNH=SỐ GIÂY")
+        for key, seconds in timeouts.items():
+            if isinstance(seconds, bool) or not isinstance(seconds, int | float) or seconds <= 0:
+                raise ProfileError(f"Timeout của '{key}' phải là số giây lớn hơn 0")
+
+
+class ProfileError(OfficeError):
+    code = 422
+
+
+# The profile keys that hold commands the office (or the AI, without asking) runs; `os.<platform>` may override each.
+# Other keys (ports, logs, env, timeouts, ui …) are settings, never commands.
+COMMAND_KEYS = ("setup", "build", "test", "lint", "run")
 
 
 def command_list(profile: dict[str, Any], key: str) -> list[list[str]]:
@@ -228,6 +339,11 @@ def command_list(profile: dict[str, Any], key: str) -> list[list[str]]:
     if isinstance(value, list):
         return [list(v) if isinstance(v, list) else str(v).split() for v in value if v]
     return []
+
+
+def profile_commands(profile: dict[str, Any]) -> list[list[str]]:
+    """Every command of the profile (COMMAND_KEYS, with this platform's override), as argv lists."""
+    return [argv for key in COMMAND_KEYS for argv in command_list(profile, key) if argv]
 
 
 def _platform_key() -> str:
@@ -507,7 +623,10 @@ async def changed_files(workspace: Path, base: str) -> list[str]:
 async def check_pr_linked(ctx: CheckContext) -> CheckResult:
     if ctx.ticket.pr_url:
         return CheckResult(id="pr_linked", status="passed", summary=ctx.ticket.pr_url)
-    if ctx.office.atlassian.code_host() is None and ctx.workspace is not None and (ctx.workspace / ".git").exists():
+    from .atlassian import has_code_host
+
+    local = not await has_code_host(ctx.office, ctx.office.sourcehub.scope(ctx.ticket))
+    if local and ctx.workspace is not None and (ctx.workspace / ".git").exists():
         # A repo without a code host is reviewed on this machine: the ticket's branch is what people merge.
         base = ctx.project.main_branch if ctx.project else "main"
         _code, branch, _ = await run_argv(["git", "rev-parse", "--abbrev-ref", "HEAD"], ctx.workspace, timeout=30)

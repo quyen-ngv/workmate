@@ -11,10 +11,14 @@ names of `source_get` / `source_search`.
 from __future__ import annotations
 
 import asyncio
+import base64
+import os
 import re
 from pathlib import Path
 from typing import Any
 
+from actoroffice.codeintel.sync import auth_env
+from actoroffice.core.http import git_tls_config
 from actoroffice.domain.errors import OfficeError
 from actoroffice.domain.work import ProjectAccess
 from actoroffice.ports.connection import Capability, ConnectionSpec, ConnectorError, Scope
@@ -187,8 +191,11 @@ async def wiki_page(args: dict[str, Any], ctx: ToolCtx) -> str:
 # ---- pull requests -----------------------------------------------------------------------------------------
 
 
-async def _git(cwd: Path, *args: str, timeout: float = 120) -> tuple[int, str]:
-    proc = await asyncio.create_subprocess_exec("git", "-C", str(cwd), *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+async def _git(cwd: Path, *args: str, timeout: float = 120, env: dict[str, str] | None = None) -> tuple[int, str]:
+    """`env`: extra variables for this one git process (credentials and TLS settings never go into argv or .git/config)."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(cwd), *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env={**os.environ, **env} if env else None
+    )
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
     except TimeoutError:
@@ -202,9 +209,14 @@ async def pr_create(args: dict[str, Any], ctx: ToolCtx) -> str:
     scope = await _scope(ctx)
     hosts = await code_hosts(office, scope, write=True)  # connections that may write, then the old Bitbucket client
     if not hosts:
-        why = f"The code host connection is read-only ({READ_ONLY_HINT})" if await code_hosts(office, scope) else "No code host is connected"
+        if await code_hosts(office, scope):
+            raise ToolError(
+                f"The code host connection is read-only ({READ_ONLY_HINT}): you cannot push or open the pull request. Commit "
+                "everything, then call stage_complete with the branch name and a short summary; a person opens the pull "
+                "request and links it to the ticket. Do not push."
+            )
         raise ToolError(
-            f"{why}: this repository is reviewed on this machine. Commit everything, then call "
+            "No code host is connected: this repository is reviewed on this machine. Commit everything, then call "
             "stage_complete with the branch name and a short summary; a person reviews the branch and merges it. "
             "Do not ask for a PR URL and do not push."
         )
@@ -212,16 +224,41 @@ async def pr_create(args: dict[str, Any], ctx: ToolCtx) -> str:
         raise ToolError("pr_create works inside a ticket's workspace.")
     ticket = await office.tickets.get(ctx.ticket_id)
     project = await office.projects.get(ticket.project_id) if ticket.project_id else None
+    bound = hosts[0] if project is not None and project.code_connection else None  # the project's own code host
     repo = str(args.get("repo") or (project.repo_url if project else "") or "")
     if not repo:
-        raise ToolError("Which repository? Pass repo (workspace/slug) or set the project's repo_url.")
+        raise ToolError(
+            "Which repository? Pass repo (PROJECT/repo on Bitbucket Server, owner/name elsewhere, or the repository's link), "
+            "or a person sets the project's connection and repository in Cài đặt › Repo / dự án."
+        )
     code, branch = await _git(ctx.workspace, "rev-parse", "--abbrev-ref", "HEAD")
     if code != 0 or branch in ("HEAD", ""):
         raise ToolError("The workspace is not on a branch.")
     destination = str(args.get("destination") or (project.main_branch if project else "main"))
     if branch == destination:
         raise ToolError(f"You are on {destination}; work on the ticket branch.")
-    code, out = await _git(ctx.workspace, "push", "-u", "origin", branch)
+    try:
+        auth = await bound.git_auth(repo, write=True) if bound is not None else None
+    except OfficeError as exc:
+        raise ToolError(str(exc)) from exc
+    if auth is not None:
+        # The branch goes to the connection's repository with the connection's credential, handed to git through its
+        # environment only: nothing is written to .git/config and the token is redacted from whatever git prints.
+        for secret in (auth.password, auth.bearer, base64.b64encode(f"{auth.username}:{auth.password}".encode()).decode() if auth.password else ""):
+            office.redact.register(secret)
+        code, out = await _git(ctx.workspace, "push", auth.url, f"HEAD:refs/heads/{branch}", env=auth_env(auth, git_tls_config()))
+        out = office.redact(out)
+        _code, origin = await _git(ctx.workspace, "remote", "get-url", "origin")
+        if code == 0 and _code == 0 and origin and bound.same_repo(origin) is False:
+            await office.tickets.add_comment(
+                ticket.id,
+                f"⚠️ origin của thư mục làm việc ({re.sub(r'://[^/@]+@', '://', origin)[:200]}) không phải repo «{bound.repo.slug}» của kết nối "
+                f"«{bound.spec.id}». Nhánh {branch} đã được push lên repo của kết nối, pull request mở ở đó.",
+                author_kind="system",
+                author_id=None,
+            )
+    else:  # no connection bound to the project: the folder's own remote and whatever credential git has on this machine
+        code, out = await _git(ctx.workspace, "push", "-u", "origin", branch)
     if code != 0:
         raise ToolError(f"git push failed: {out[-800:]}")
     description = str(args.get("description") or "")
@@ -381,8 +418,8 @@ ATLASSIAN_TOOLS: list[ToolDef] = [
     ),
     ToolDef(
         "pr_create",
-        "Push the ticket branch and open a pull request (default repo: the project's repo_url, destination: its main "
-        "branch). A person approves first. The PR is linked to the ticket.",
+        "Push the ticket branch and open a pull request (default repo: the project's repository on its code host, "
+        "destination: its main branch). A person approves first. The PR is linked to the ticket.",
         schema(
             {"title": {"type": "string"}, "description": {"type": "string"}, "repo": {"type": "string"}, "destination": {"type": "string"}},
             required=["title", "description"],

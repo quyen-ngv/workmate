@@ -13,7 +13,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
-from actoroffice.adapters._http import TIMEOUT_S, Http, now_iso, tls
+from actoroffice.adapters._http import TIMEOUT_S, Http, now_iso, owner_repo, tls
 from actoroffice.ports.code import ChangedFile, CloneAuth, PrComment, PullRequest, RepoRef, TreeEntry, WebhookEvent
 from actoroffice.ports.connection import Capability, ConnectorError, Health
 
@@ -185,7 +185,17 @@ class BitbucketCloud:
             out.append(ChangedFile(path=str(new or old or ""), status=status, old_path=str(old) if status == "renamed" and old else None))
         return out
 
+    def repo_ref(self, text: str) -> RepoRef | None:
+        """`workspace/name`, `https://bitbucket.org/workspace/name[.git]`, `git@bitbucket.org:workspace/name.git`."""
+        name = owner_repo(text, WEB_HOST, self.config.workspace)
+        return RepoRef(slug=f"{self.config.workspace}/{name}", url=f"https://{WEB_HOST}/{self.config.workspace}/{name}") if name else None
+
     async def clone_auth(self, repo: RepoRef) -> CloneAuth | None:
+        return await self.git_auth(repo, write=False)
+
+    async def git_auth(self, repo: RepoRef, *, write: bool) -> CloneAuth | None:
+        if write:
+            self._require_write("push nhánh")
         if self.http.blocked is not None:
             return None
         return CloneAuth(url=f"https://{WEB_HOST}/{self.config.workspace}/{self._name(repo)}.git", username=GIT_USERNAME, password=self._token)

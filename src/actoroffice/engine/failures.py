@@ -4,6 +4,8 @@
                    the stage's stall threshold): retried, also after the AI has worked (the session is resumed)
 - runtime_start:   the turn failed before doing anything (no token, no event, no tool call; SI-17): retried
 - command_timeout: the turn failed right after the office stopped a command that ran past its limit
+- auth:            the AI's own CLI is not signed in on this machine (or its sign-in expired): never retried, a person
+                   signs in
 - ai:              anything else (the AI's own error, an error after it worked): a person looks at it
 """
 
@@ -17,6 +19,7 @@ class FailureKind(StrEnum):
     NETWORK = "network"
     RUNTIME_START = "runtime_start"
     COMMAND_TIMEOUT = "command_timeout"
+    AUTH = "auth"
     AI = "ai"
 
 
@@ -35,6 +38,14 @@ NETWORK = re.compile(
     r"|internal server error|service unavailable|bad gateway|gateway timeout",
     re.IGNORECASE,
 )
+# The CLI says it has no (valid) sign-in, in its own words. Claude: "Not logged in · Please run /login"; Kiro: "you are
+# not signed in", ModelRegistryUnauthenticatedError, TokenExpiredError.
+AUTH = re.compile(
+    r"not (?:logged|signed) in\b|please (?:run /login|sign in|log in)|(?-i:\b(?:TokenExpiredError|\w*UnauthenticatedError)\b)"
+    r"|invalid api key|authentication_error|oauth token (?:has )?expired",
+    re.IGNORECASE,
+)
+SIGN_IN = {"kiro": "kiro-cli login", "claude": "claude rồi gõ /login"}
 # Windows refused the CLI's command line (too long): the SDK reports it as "Claude Code not found".
 COMMAND_LINE_TOO_LONG = re.compile(r"WinError 206|filename or extension is too long", re.IGNORECASE)
 
@@ -42,12 +53,15 @@ LABELS = {
     FailureKind.NETWORK: "mạng/API",
     FailureKind.RUNTIME_START: "lỗi khởi động",
     FailureKind.COMMAND_TIMEOUT: "lệnh quá giờ",
+    FailureKind.AUTH: "chưa đăng nhập",
     FailureKind.AI: "lỗi của AI",
 }
 
 
 def classify(error: str | None, *, progressed: bool, stalled: bool = False, command_killed: bool = False) -> FailureKind:
     """The kind of an ERROR turn. `progressed`: the turn used tokens, sent an event or called a tool."""
+    if AUTH.search(error or ""):
+        return FailureKind.AUTH  # before the network: a failed sign-in often drags a "fetch failed" along
     if stalled or NETWORK.search(error or ""):
         return FailureKind.NETWORK
     if not progressed:
@@ -73,6 +87,9 @@ def hint(kind: str | None, runtime: str, retries: int, error: str | None = None)
         if COMMAND_LINE_TOO_LONG.search(error or ""):
             return f"{tried}dòng lệnh khởi động {runtime} quá dài (WinError 206), không phải thiếu {runtime}; cần Dev xem"
         return f"{tried}kiểm tra {runtime} trên máy (cài đặt, đăng nhập) rồi bấm Thử lại"
+    if kind == FailureKind.AUTH:
+        command = SIGN_IN.get(runtime.lower().split(":")[0], f"lệnh đăng nhập của {runtime}")
+        return f"{runtime} trên máy chạy office chưa đăng nhập hoặc phiên đăng nhập đã hết hạn. Mở terminal trên máy đó, chạy `{command}`, rồi bấm Thử lại"
     if kind == FailureKind.COMMAND_TIMEOUT:
         return "cần bạn xem: lệnh của AI chạy quá giới hạn; tăng command_timeout_s trong profile hoặc nhắn AI chạy hẹp hơn"
     return "cần bạn xem tiến độ rồi nhắn hướng đi tiếp hoặc bấm Thử lại"

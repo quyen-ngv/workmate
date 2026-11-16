@@ -439,7 +439,7 @@ function renderTimeline(items) {
 }
 
 // The latest run failed: what kind of failure and whether a person must act (SI-38). runs[0] is the newest.
-const FAILURE_LABEL = { network: "mạng/API", runtime_start: "lỗi khởi động", command_timeout: "lệnh quá giờ", ai: "lỗi của AI" };
+const FAILURE_LABEL = { network: "mạng/API", runtime_start: "lỗi khởi động", command_timeout: "lệnh quá giờ", auth: "chưa đăng nhập", ai: "lỗi của AI" };
 function runError(runs) {
   const run = (runs || [])[0];
   if (!run || run.status !== "failed" || !run.error_kind) return "";

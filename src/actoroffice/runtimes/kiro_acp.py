@@ -24,6 +24,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -280,7 +281,7 @@ class _Turn:
         try:
             return await self._prompt()
         except AcpError as exc:
-            tail = self.stderr.decode("utf-8", "replace").strip()[-800:]
+            tail = stderr_summary(self.stderr.decode("utf-8", "replace"))
             error = f"Kiro: {exc}" + (f"\n{tail}" if tail else "")
             return TurnResult(status=TurnStatus.ERROR, session_id=self.session_id, error=error, text="\n\n".join(self.texts))
         finally:
@@ -539,6 +540,26 @@ class _Turn:
 
 
 # ---- helpers ----------------------------------------------------------------------------------------
+
+REQUEST_ECHO = re.compile(r"(Error handling request) \{.*?\"method\":\"([^\"]+)\".*(\{\"code\".*\})\s*$")
+NOISE = re.compile(r"ExperimentalWarning|--trace-warnings|^\s*$")
+
+
+def stderr_summary(text: str, limit: int = 800) -> str:
+    """What Kiro wrote on stderr, for people: without the request it echoes when it fails (the whole prompt and the
+    token of the office's tool server are in it) and without Node's warnings."""
+    lines = []
+    for line in text.splitlines():
+        if NOISE.search(line):
+            continue
+        echo = REQUEST_ECHO.search(line)
+        if echo:
+            line = f"{line[: echo.start()]}{echo.group(1)} {echo.group(2)}: {echo.group(3)}"
+        elif "jsonrpc" in line or "ACTOROFFICE_MCP_TOKEN" in line:
+            continue  # a request or a piece of one: never shown
+        lines.append(line.strip()[:400])
+    return "\n".join(lines)[-limit:].strip()
+
 
 def shell_type() -> str:
     """The shell `terminal/create` runs a command line in (asyncio.create_subprocess_shell): COMSPEC on Windows,

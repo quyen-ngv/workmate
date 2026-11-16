@@ -273,6 +273,7 @@ class _Turn:
             "terminal/kill": self.on_terminal_kill,
             "terminal/release": self.on_terminal_release,
             "_kiro/openExternalUrl": self.on_ignore,  # e.g. an MCP OAuth page: never opened unattended
+            "_kiro/terminal/shell_type": self.on_shell_type,
         }
         self.conn = _Connection(self.proc, handlers, self.on_notification)
         self._stderr_task = asyncio.create_task(self._read_stderr())
@@ -531,8 +532,21 @@ class _Turn:
     async def on_ignore(self, _params: dict[str, Any]) -> dict[str, Any]:
         return {}
 
+    async def on_shell_type(self, _params: dict[str, Any]) -> dict[str, Any]:
+        """Kiro asks a client that runs its terminals which shell they use, while it opens the session, to write
+        commands for that shell. Some versions give up on the session when the client does not know the request."""
+        return {"shellType": shell_type()}
+
 
 # ---- helpers ----------------------------------------------------------------------------------------
+
+def shell_type() -> str:
+    """The shell `terminal/create` runs a command line in (asyncio.create_subprocess_shell): COMSPEC on Windows,
+    /bin/sh elsewhere."""
+    if sys.platform == "win32":
+        return Path(os.environ.get("COMSPEC") or "cmd.exe").name
+    return "sh"
+
 
 KIRO_TOOL_NAMES = {
     "execute_bash": "Bash", "shell": "Bash", "execute_cmd": "Bash", "fs_write": "Write", "write": "Write",

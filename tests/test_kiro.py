@@ -77,6 +77,7 @@ async def test_a_turn_goes_through_the_office_gate_and_tools(workspace: Path):
     assert log["first_prompt"].startswith("<office_instructions>\nBạn là Minh")  # no system prompt in ACP
     assert log["outside_error"] and not (workspace.parent / "outside.txt").exists()
     assert log["tools"] == ["ticket_comment"] and log["called"]["isError"] is False and comments == ["đã xong"]
+    assert log["shell"] in ("cmd.exe", "sh") or log["shell"].lower().endswith(".exe"), "the agent is told which shell its commands run in"
     tools = [name for name, _ in gate.calls]
     assert tools[:2] == ["Read", "Bash"] and tools.count("Bash") == 1  # the approved command is not asked twice
     assert "Write" in tools and "mcp__office__ticket_comment" in tools

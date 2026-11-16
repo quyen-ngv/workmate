@@ -114,7 +114,7 @@ def prompt(params: dict, sessions: dict) -> dict:
     update(session, {"sessionUpdate": "usage_update", "used": 1000, "size": 200000, "cost": {"amount": 0.0125, "currency": "USD"}})
     update(session, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": f"Xong: {out}"}})
     with open(cwd + sep + "agent_log.json", "w", encoding="utf-8") as f:
-        json.dump({"outside_error": "error" in outside, "tools": state["tools"], "called": called, "first_prompt": text[:200]}, f, ensure_ascii=False)
+        json.dump({"outside_error": "error" in outside, "tools": state["tools"], "called": called, "first_prompt": text[:200], "shell": state.get("shell")}, f, ensure_ascii=False)
     return {"stopReason": "end_turn"}
 
 
@@ -131,6 +131,12 @@ def main() -> None:
             sid = f"sess-{len(sessions) + 1}"
             sessions[sid] = {"cwd": params["cwd"], "mcp": params["mcpServers"], "outside": params["cwd"] + "/../outside.txt",
                              "model": ((params.get("_meta") or {}).get("kiro") or {}).get("modelId")}
+            # like Kiro CLI: ask the client which shell its terminals run; a client that refuses fails the session
+            shell = request("_kiro/terminal/shell_type", {"sessionId": sid})
+            if "error" in shell:
+                send({"jsonrpc": "2.0", "id": message["id"], "error": shell["error"]})
+                continue
+            sessions[sid]["shell"] = shell["result"]["shellType"]
             result = {"sessionId": sid}
         elif method == "session/load":
             sessions[params["sessionId"]] = {"cwd": params["cwd"], "mcp": params["mcpServers"], "outside": params["cwd"] + "/../outside.txt"}

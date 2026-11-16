@@ -225,4 +225,5 @@ def test_ac5_office_http_clients_keep_tls_verification(tmp_path) -> None:
     for ctx in (_client_ssl(envelope.client), _client_ssl(bot._client)):
         assert ctx is shared
         assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
-        assert ctx.get_ca_certs() or ctx.cert_store_stats()["x509_ca"] > 0  # trusted roots are loaded
+        # the operating system's store (truststore) verifies with the system itself and holds no roots of its own
+        assert type(ctx).__module__.startswith("truststore") or ctx.get_ca_certs() or ctx.cert_store_stats()["x509_ca"] > 0

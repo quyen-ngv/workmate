@@ -19,6 +19,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
+from actoroffice.core.http import verify
 from actoroffice.domain.access import LEVEL_ORDER, AccessLevel, Resource
 from actoroffice.domain.errors import OfficeError, PolicyDenied
 
@@ -250,7 +251,7 @@ class InfraService:
         if not base:
             raise InfraError(f"{resource.name}: chưa có config.management_url")
         auth = (secret.get("user"), secret.get("password")) if secret.get("user") else None
-        return httpx.AsyncClient(base_url=base, auth=auth, timeout=20, transport=self.transport)
+        return httpx.AsyncClient(base_url=base, auth=auth, timeout=20, transport=self.transport, verify=verify(self.transport))
 
     async def mq_queues(self, resource: Resource) -> list[dict[str, Any]]:
         async with await self._mq(resource) as http:

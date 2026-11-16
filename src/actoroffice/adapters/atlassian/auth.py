@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from actoroffice.adapters._http import TIMEOUT_S
+from actoroffice.adapters._http import TIMEOUT_S, tls
 from actoroffice.ports.connection import ConnectorError
 
 SECRET_FIELDS: tuple[str, ...] = ("email", "token")
@@ -77,7 +77,7 @@ def site_auth(site: str, secret: dict[str, str], *, product: str, cloud_id: str 
 
 def build_client(site: str, secret: dict[str, str], *, product: str, cloud_id: str = "", transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
     auth = site_auth(site, secret, product=product, cloud_id=cloud_id)
-    return httpx.AsyncClient(base_url=auth.base_url, headers={"Accept": "application/json", **auth.headers}, timeout=TIMEOUT_S, transport=transport)
+    return httpx.AsyncClient(base_url=auth.base_url, headers={"Accept": "application/json", **auth.headers}, timeout=TIMEOUT_S, transport=transport, verify=tls(transport))
 
 
 def missing_secret_error(label: str) -> ConnectorError:

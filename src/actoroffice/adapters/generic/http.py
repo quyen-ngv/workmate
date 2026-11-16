@@ -13,7 +13,7 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
-from actoroffice.adapters._http import TIMEOUT_S, Http, host_of, now_iso
+from actoroffice.adapters._http import TIMEOUT_S, Http, host_of, now_iso, tls
 from actoroffice.adapters.generic.common import (
     SECRET_FIELDS,
     DocMapping,
@@ -148,7 +148,7 @@ class GenericHttp:
             headers[config.auth_header] = secret["token"]
         elif config.auth == "basic":
             auth = httpx.BasicAuth(secret["username"], secret["password"])
-        client = httpx.AsyncClient(base_url=config.base_url, headers=headers, auth=auth, timeout=config.timeout_s, transport=transport)
+        client = httpx.AsyncClient(base_url=config.base_url, headers=headers, auth=auth, timeout=config.timeout_s, transport=transport, verify=tls(transport))
         self.http = Http(client, label=label, blocked=blocked)
 
     async def close(self) -> None:

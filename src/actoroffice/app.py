@@ -12,7 +12,9 @@ from typing import Any
 
 import yaml
 
+from actoroffice.adapters import _http as adapter_http
 from actoroffice.config import Settings
+from actoroffice.core import http as core_http
 from actoroffice.core.events import EventBus
 from actoroffice.domain.chat import MessageKind
 from actoroffice.domain.errors import NotFound, PolicyDenied
@@ -118,6 +120,8 @@ class Office:
         self.ui = UiPreviewService(self)  # the ticket's temporary app for UI screenshots (SI-23)
         self.proposals = ProposalService(self)  # lists of proposed tickets approved in one go (SI-24)
         self.sources = SourceService(self)  # what a ticket's description points to and what the AI read of it (SI-39)
+        core_http.configure(settings.ca_bundle)
+        adapter_http.set_tls(core_http.ssl_context)  # adapters verify TLS with what the office trusts
         self.connections = ConnectionService(self)  # accounts on outside systems (Jira, Confluence, Bitbucket, GitHub…)
         self.codeintel = CodeIntelService(self)  # the code index, the code graph and the service map
         self.webhooks = WebhookService(self)  # events pushed by code hosts (POST /hooks/<connection>)

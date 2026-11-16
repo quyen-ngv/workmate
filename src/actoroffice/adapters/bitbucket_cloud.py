@@ -13,7 +13,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
-from actoroffice.adapters._http import TIMEOUT_S, Http, now_iso
+from actoroffice.adapters._http import TIMEOUT_S, Http, now_iso, tls
 from actoroffice.ports.code import ChangedFile, CloneAuth, PrComment, PullRequest, RepoRef, TreeEntry, WebhookEvent
 from actoroffice.ports.connection import Capability, ConnectorError, Health
 
@@ -94,7 +94,10 @@ class BitbucketCloud:
         self._token = secret.get("token", "")
         self._webhook_secret = secret.get("webhook_secret", "")
         ready = bool(self._email and self._token)
-        client = httpx.AsyncClient(base_url=API_BASE, auth=(self._email, self._token) if ready else None, timeout=TIMEOUT_S, transport=transport, headers={"Accept": "application/json"})
+        client = httpx.AsyncClient(
+            base_url=API_BASE, auth=(self._email, self._token) if ready else None, timeout=TIMEOUT_S, transport=transport,
+            headers={"Accept": "application/json"}, verify=tls(transport),
+        )  # fmt: skip
         blocked = None if ready else ConnectorError("unconfigured", f"{LABEL}: chưa có email và API token. Vào Cài đặt › Kết nối để nhập.")
         self.http = Http(client, label=LABEL, blocked=blocked)
 

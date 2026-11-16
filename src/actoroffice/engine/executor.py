@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from actoroffice import proctree
+from actoroffice.core.http import node_ca_file
 from actoroffice.domain.errors import Conflict, OfficeError
 from actoroffice.domain.run import Run, RunKind, RunStatus, TurnResult, TurnStatus, Usage, WakeRequest, WakeSource
-from actoroffice.domain.work import InteractionKind, InteractionStatus, Ticket, TicketStatus
+from actoroffice.domain.work import Comment, InteractionKind, InteractionStatus, Ticket, TicketStatus
 from actoroffice.ports.connection import Capability
 from actoroffice.runtimes.base import TurnSpec
 from actoroffice.runtimes.router import is_kiro
@@ -498,6 +499,11 @@ class Executor:
         # under version control). Stop git from walking up past the workspaces, so a `git commit` in a
         # scratch folder can never land in some enclosing repository.
         env = {"GIT_CEILING_DIRECTORIES": str(self.office.settings.workspaces_dir.resolve())}
+        # The AI's CLI (Kiro, Claude) is a Node program: it does not read the operating system's certificate store, so
+        # on a network that inspects TLS it is given the same certificate authorities the office trusts.
+        node_ca = node_ca_file(self.office.settings.data_dir)
+        if node_ca:
+            env["NODE_EXTRA_CA_CERTS"] = node_ca
         if actor is not None:
             # Commits are attributed to the employee who made them, not to the machine's git identity.
             name = f"{actor.name} ({position.title})" if position is not None else actor.name
@@ -749,7 +755,14 @@ class Executor:
         comments = await self.office.tickets.comments(ticket_id, limit=200)
         if since is None:
             return [c for c in comments if c.author_kind == "user"], True
-        return [c for c in comments if c.created_at >= since and c.author_id != actor_name and c.author_kind != "system"], False
+        fresh = [c for c in comments if c.created_at >= since and c.author_id != actor_name and c.author_kind != "system"]
+        # What the office wrote about a failed turn ("Lượt chạy lỗi: … chưa đăng nhập, chạy kiro-cli login") is for
+        # people. Read as a comment, the AI takes it for the present state and stops to wait for somebody.
+        failed = [c for c in fresh if c.author_id == "office"]
+        fresh = [c for c in fresh if c.author_id != "office"]
+        if failed:
+            fresh.append(Comment(id=0, ticket_id=ticket_id, author_kind="system", author_id="office", created_at=failed[-1].created_at, body=PAST_FAILURE))
+        return fresh, False
 
     async def _answered(self, wake: WakeRequest) -> list:
         ids = [r["interaction_id"] for r in wake.payload.get("reasons", []) if r.get("interaction_id")]
@@ -766,6 +779,13 @@ def _chat_line(m: Any, actors: dict[str, Any], positions: dict[str, str]) -> str
     else:
         who = "System"
     return f"[{who}] {m.body}"
+
+
+PAST_FAILURE = (
+    "An earlier turn on this ticket ended with an error of the machine or the connection (sign-in, network, start-up), "
+    "not of the ticket. You are running now, so that is over: do not report it, do not wait for anybody because of "
+    "it, do not set the ticket to in_review for it. Continue the work of the stage."
+)
 
 
 class _CountingGate:

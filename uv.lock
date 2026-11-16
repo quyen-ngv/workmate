@@ -18,6 +18,7 @@ dependencies = [
     { name = "psutil" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "truststore" },
     { name = "uvicorn" },
     { name = "websockets" },
 ]
@@ -65,6 +66,7 @@ requires-dist = [
     { name = "tree-sitter-javascript", marker = "extra == 'intel'", specifier = ">=0.23" },
     { name = "tree-sitter-python", marker = "extra == 'intel'", specifier = ">=0.23" },
     { name = "tree-sitter-typescript", marker = "extra == 'intel'", specifier = ">=0.23" },
+    { name = "truststore", specifier = ">=0.10" },
     { name = "uvicorn", specifier = ">=0.54.0" },
     { name = "websockets", specifier = ">=17.2" },
 ]

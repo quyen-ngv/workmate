@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from actoroffice.core.http import verify
 from actoroffice.domain.access import Resource
 from actoroffice.domain.errors import OfficeError
 
@@ -162,7 +163,7 @@ class LogService:
             must.append({"term": {resource.config.get("level_field") or "level": level.lower()}})
         secret = self.office.infra.secret(resource) or {}
         headers = {k: str(v) for k, v in (secret.get("headers") or {}).items()} if isinstance(secret, dict) else {}
-        async with httpx.AsyncClient(timeout=30, transport=self.transport, headers=headers) as http:
+        async with httpx.AsyncClient(timeout=30, transport=self.transport, headers=headers, verify=verify(self.transport)) as http:
             response = await http.post(f"{base}/{index}/_search", json={"size": min(limit, 2000), "sort": [{"@timestamp": "asc"}], "query": {"bool": {"must": must}}})
         if response.status_code >= 400:
             raise LogError(f"Elasticsearch {response.status_code}: {response.text[:200]}")
@@ -180,7 +181,7 @@ class LogService:
         secret = self.office.infra.secret(resource) or {}
         headers = {k: str(v) for k, v in (secret.get("headers") or {}).items()} if isinstance(secret, dict) else {}
         params = {"query": logql, "start": str(int(since.timestamp() * 1e9)), "end": str(int(until.timestamp() * 1e9)), "limit": str(min(limit, 5000)), "direction": "forward"}
-        async with httpx.AsyncClient(timeout=30, transport=self.transport, headers=headers) as http:
+        async with httpx.AsyncClient(timeout=30, transport=self.transport, headers=headers, verify=verify(self.transport)) as http:
             response = await http.get(f"{base}/loki/api/v1/query_range", params=params)
         if response.status_code >= 400:
             raise LogError(f"Loki {response.status_code}: {response.text[:200]}")

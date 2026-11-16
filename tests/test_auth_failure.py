@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from actoroffice.domain.run import RunStatus, TurnResult, TurnStatus
 from actoroffice.engine import failures
+from actoroffice.engine.executor import PAST_FAILURE
 from actoroffice.engine.failures import FailureKind
 from actoroffice.runtimes.kiro_acp import stderr_summary
+
+from .test_transient_retry import delays, office, ok, run_ticket, runtime  # noqa: F401  (fixtures)
 
 KIRO = (
     'Kiro: Kiro could not load the available models because you are not signed in. Please sign in and retry.\n'
@@ -50,3 +54,28 @@ def test_kiro_stderr_is_shown_without_the_request_it_echoes() -> None:
     assert 'Error handling request session/new: {"code":-32601,"message":"_kiro/terminal/shell_type is not supported by this client"}' in shown
     assert "MCP subsystem initialized" in shown
     assert stderr_summary("") == ""
+
+
+# ---- the turn after a failed one ---------------------------------------------------------------------------------------
+
+
+async def test_the_next_turn_is_not_told_to_wait_for_a_sign_in_that_is_over(office, runtime) -> None:
+    """The office's note about a failed turn is for people. The AI used to read it as a comment and stop to wait for
+    somebody to sign in, although it was running."""
+
+    async def not_signed_in(ctx):
+        return TurnResult(status=TurnStatus.ERROR, error=KIRO)
+
+    runtime.scripts += [not_signed_in, ok]
+    ticket_id, runs = await run_ticket(office)
+    failed = next(r for r in runs if r.status == RunStatus.FAILED)
+    assert failed.error_kind == "auth" and len(runtime.specs) == 1, "a sign-in failure is not retried"
+    note = next(c.body for c in await office.tickets.comments(ticket_id, limit=50) if c.body.startswith("Lượt chạy lỗi"))
+    assert "chưa đăng nhập" in note and "kiro-cli login" in note or "/login" in note, "people still see what to do"
+
+    await office.stages.steer(ticket_id, "thử lại", by="user")
+    await office.scheduler.wait_idle(timeout=20)
+    assert len(runtime.specs) == 2
+    prompt = runtime.specs[1].prompt
+    assert "Lượt chạy lỗi" not in prompt and "not signed in" not in prompt and "kiro-cli login" not in prompt
+    assert PAST_FAILURE in prompt and "thử lại" in prompt

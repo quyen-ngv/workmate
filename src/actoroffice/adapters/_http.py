@@ -27,6 +27,20 @@ IDEMPOTENT = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
 
 Sleep = Callable[[float], Awaitable[None]]
 
+_tls: Callable[[], Any] | None = None  # set by the office: what every adapter's client verifies TLS with
+
+
+def set_tls(provider: Callable[[], Any] | None) -> None:
+    """The office hands adapters its TLS trust (a company CA bundle or the operating system's store). Adapters do
+    not import the office, so it is given here once; without it httpx's default roots are used."""
+    global _tls
+    _tls = provider
+
+
+def tls(transport: Any = None) -> Any:
+    """The `verify=` for an adapter's httpx client. With a test transport nothing is loaded."""
+    return True if transport is not None or _tls is None else _tls()
+
 _REASONS = {
     "auth": "xác thực thất bại, kiểm tra tài khoản/token của kết nối",
     "forbidden": "không có quyền",

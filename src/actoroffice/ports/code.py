@@ -30,6 +30,7 @@ class CloneAuth(BaseModel):
     url: str  # https clone URL without credentials
     username: str = ""
     password: str = ""  # token; handed to git through the child's environment only, never written to .git/config
+    bearer: str = ""  # a token sent as `Authorization: Bearer` instead (Bitbucket Server HTTP access tokens): no user name needed
 
 
 class PullRequest(BaseModel):

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from actoroffice.core.http import verify
 from actoroffice.domain.errors import NotFound, OfficeError
 from actoroffice.domain.team import Team
 
@@ -65,7 +66,9 @@ def save_credentials(data_dir: Path, base_url: str, email: str, token: str) -> N
 class JiraClient:
     def __init__(self, base_url: str, email: str, token: str, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.base_url = base_url.rstrip("/")
-        self.http = httpx.AsyncClient(base_url=self.base_url, auth=(email, token), timeout=30, transport=transport, headers={"Accept": "application/json"})
+        self.http = httpx.AsyncClient(
+            base_url=self.base_url, auth=(email, token), timeout=30, transport=transport, headers={"Accept": "application/json"}, verify=verify(transport)
+        )
 
     async def close(self) -> None:
         await self.http.aclose()

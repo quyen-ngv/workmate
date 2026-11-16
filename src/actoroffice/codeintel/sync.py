@@ -8,7 +8,7 @@ import base64
 import hashlib
 import os
 import subprocess
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -202,23 +202,27 @@ def local_source(path: Path, branch: str = "main") -> Source:
     return FolderSource(path)  # a repository without any commit yet
 
 
-def auth_env(auth: CloneAuth | None) -> dict[str, str]:
-    """Credentials for one git process, through its environment: never in argv, never in .git/config."""
-    if auth is None or not auth.password:
-        return {"GIT_TERMINAL_PROMPT": "0"}
-    token = base64.b64encode(f"{auth.username}:{auth.password}".encode()).decode()
-    return {
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "http.extraHeader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {token}",
-    }
+def auth_env(auth: CloneAuth | None, git_config: Sequence[tuple[str, str]] = ()) -> dict[str, str]:
+    """Credentials and settings for one git process, through its environment: never in argv, never in .git/config.
+    `git_config`: extra settings of the caller, e.g. which certificates to trust."""
+    settings = list(git_config)
+    if auth is not None and auth.bearer:
+        settings.append(("http.extraHeader", f"Authorization: Bearer {auth.bearer}"))
+    elif auth is not None and auth.password:
+        token = base64.b64encode(f"{auth.username}:{auth.password}".encode()).decode()
+        settings.append(("http.extraHeader", f"Authorization: Basic {token}"))
+    env = {"GIT_TERMINAL_PROMPT": "0"}
+    if settings:
+        env["GIT_CONFIG_COUNT"] = str(len(settings))
+        for i, (key, value) in enumerate(settings):
+            env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
+    return env
 
 
-def mirror(url: str, dest: Path, branch: str = "main", auth: CloneAuth | None = None) -> GitSource:
+def mirror(url: str, dest: Path, branch: str = "main", auth: CloneAuth | None = None, git_config: Sequence[tuple[str, str]] = ()) -> GitSource:
     """A bare mirror of a remote repository, cloned once and fetched afterwards. Read-only, apart from the worktrees
     tickets work in."""
-    env = auth_env(auth)
+    env = auth_env(auth, git_config)
     if (dest / "HEAD").is_file():
         _git(dest, "fetch", "--prune", "--quiet", "origin", "+refs/heads/*:refs/heads/*", env=env)
     else:

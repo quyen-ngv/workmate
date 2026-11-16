@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
+from actoroffice.core.http import verify
 from actoroffice.domain.errors import OfficeError
 from actoroffice.ports.code import RepoRef
 from actoroffice.ports.connection import Capability, ConnectionSpec, ConnectorError, Scope
@@ -62,7 +63,9 @@ async def _call(http: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -
 class Confluence:
     def __init__(self, base_url: str, email: str, token: str, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.base = base_url.rstrip("/") + "/wiki"
-        self.http = httpx.AsyncClient(base_url=self.base, auth=(email, token), timeout=30, transport=transport, headers={"Accept": "application/json"})
+        self.http = httpx.AsyncClient(
+            base_url=self.base, auth=(email, token), timeout=30, transport=transport, headers={"Accept": "application/json"}, verify=verify(transport)
+        )
 
     async def close(self) -> None:
         await self.http.aclose()
@@ -141,7 +144,8 @@ class BitbucketCloud:
     def __init__(self, email: str, token: str, workspace: str, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.workspace = workspace
         self.http = httpx.AsyncClient(
-            base_url="https://api.bitbucket.org/2.0", auth=(email, token), timeout=30, transport=transport, headers={"Accept": "application/json"}
+            base_url="https://api.bitbucket.org/2.0", auth=(email, token), timeout=30, transport=transport, headers={"Accept": "application/json"},
+            verify=verify(transport),
         )
 
     async def close(self) -> None:

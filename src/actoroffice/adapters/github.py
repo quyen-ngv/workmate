@@ -13,7 +13,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
-from actoroffice.adapters._http import TIMEOUT_S, Http, host_of, now_iso
+from actoroffice.adapters._http import TIMEOUT_S, Http, host_of, now_iso, tls
 from actoroffice.ports.code import ChangedFile, CloneAuth, PrComment, PullRequest, RepoRef, TreeEntry, WebhookEvent
 from actoroffice.ports.connection import Capability, ConnectorError, Health
 
@@ -103,7 +103,7 @@ class GitHub:
             blocked = ConnectorError("unconfigured", f"{LABEL}: chưa có token. Vào Cài đặt › Kết nối để nhập.")
         else:
             headers["Authorization"] = f"Bearer {self._token}"
-        self.http = Http(httpx.AsyncClient(base_url=config.base_url, headers=headers, timeout=TIMEOUT_S, transport=transport), label=LABEL, blocked=blocked)
+        self.http = Http(httpx.AsyncClient(base_url=config.base_url, headers=headers, timeout=TIMEOUT_S, transport=transport, verify=tls(transport)), label=LABEL, blocked=blocked)
 
     async def close(self) -> None:
         await self.http.close()

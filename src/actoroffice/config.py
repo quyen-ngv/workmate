@@ -25,6 +25,9 @@ class Settings(BaseModel):
     transient_retry_delays_s: list[float] = [30, 120, 300]
     command_timeout_s: float = 900  # hard limit of one AI shell command; a project overrides it in its profile
     max_unattended_agent_messages: int = 8  # actor↔actor chat messages in a row before pausing for the user
+    # A PEM file with the certificate authorities to trust for every outgoing connection (a company network that
+    # inspects TLS). None = the operating system's certificate store. Verification is never switched off.
+    ca_bundle: str | None = None
     web_host: str = "127.0.0.1"
     web_port: int = 8765
     # Team copilot

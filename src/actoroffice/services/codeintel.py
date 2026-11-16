@@ -22,6 +22,7 @@ from actoroffice.codeintel.index import IndexOptions, index_repo, state_of
 from actoroffice.codeintel.query import CodeQuery
 from actoroffice.codeintel.store import IndexStore
 from actoroffice.codeintel.sync import ApiSource, GitSource, Source, SyncError, is_git, local_source, mirror
+from actoroffice.core.http import git_tls_config
 from actoroffice.domain.errors import NotFound, OfficeError
 from actoroffice.domain.work import Project, Ticket
 from actoroffice.ports.code import RepoRef
@@ -163,8 +164,9 @@ class CodeIntelService:
             loop = asyncio.get_running_loop()
             return ApiSource(host, repo.remote, lambda coro: asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=300), repo.branch)
         self.office.redact.register(auth.password)
+        self.office.redact.register(auth.bearer)
         dest = self.office.settings.data_dir / "repos" / repo.remote.connection / f"{repo.remote.slug}.git"
-        return await asyncio.to_thread(mirror, auth.url, dest, repo.branch, auth)
+        return await asyncio.to_thread(mirror, auth.url, dest, repo.branch, auth, git_tls_config())
 
     # ---- indexing --------------------------------------------------------------------------------------------
 

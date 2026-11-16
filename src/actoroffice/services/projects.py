@@ -91,6 +91,10 @@ class ProjectService:
         current = await self.get(project_id)
         if kind is not None and kind not in ("code", "reference", "automation"):
             raise ProjectError("kind: code | reference | automation")
+        if profile is not None:
+            from .checks import check_profile  # every way a profile is saved: no secret-looking variable names, sane timeouts
+
+            check_profile(profile)
         updates: dict[str, Any] = {k: v for k, v in {"team_id": team_id, "kind": kind, "profile": profile, "test_command": test_command}.items() if v is not None}
         wanted = repo if repo is not None else repo_url
         if main_branch is not None and main_branch.strip():

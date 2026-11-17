@@ -1,4 +1,9 @@
-"""People, teams, memberships and ticket participants; who holds which role for a ticket."""
+"""People, teams, memberships and ticket participants; who holds which role for a ticket.
+
+One team. The office works as a single team: the first team (oldest) is THE team, created on first need ("Team") when
+there is none. Anything that names no team (a ticket, a repository, a chat, a person's roles) belongs to it, so a
+role, a gate or a knowledge item never goes missing because nobody picked a team. Teams made earlier stay readable.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ from actoroffice.services.docflow import pack_gates, pack_templates
 from actoroffice.store import Database
 
 ROLES = {r.value for r in Role}
+DEFAULT_TEAM_NAME = "Team"
 
 
 class TeamError(OfficeError):
@@ -37,6 +43,42 @@ class TeamService:
         self.db = db
         self.bus = bus
         self.pack_of: Any = None  # ticket → the standard pack it follows (set by the office: DocService.pack_of)
+        self._default: str | None = None  # id of THE team, once known
+
+    # ---- the team ---------------------------------------------------------------------------------
+
+    async def default_team_id(self, *, create: bool = False) -> str | None:
+        """The team everything belongs to: the oldest one. None when there is none yet, unless `create`."""
+        if self._default and await self.db.fetchone("SELECT 1 FROM teams WHERE id = ?", (self._default,)):
+            return self._default
+        row = await self.db.fetchone("SELECT id FROM teams ORDER BY created_at, rowid LIMIT 1")
+        if row is None and create:
+            return (await self.create_team(DEFAULT_TEAM_NAME)).id
+        self._default = str(row["id"]) if row else None
+        return self._default
+
+    async def team_of(self, ticket: Ticket | None) -> str | None:
+        """The team a ticket belongs to: its own, else THE team."""
+        return (ticket.team_id if ticket is not None and ticket.team_id else None) or await self.default_team_id()
+
+    async def adopt_orphans(self) -> int:
+        """Tickets and repositories saved without a team belong to THE team (when there is one). Returns how many tickets."""
+        team_id = await self.default_team_id()
+        if team_id is None:
+            return 0
+        cur = await self.db.execute("UPDATE tickets SET team_id = ? WHERE team_id IS NULL", (team_id,))
+        # people registered with roles before the team existed are in it with those roles
+        for row in await self.db.fetchall(
+            "SELECT id, default_roles_json FROM users WHERE id <> ? AND default_roles_json NOT IN ('', '[]') "
+            "AND id NOT IN (SELECT user_id FROM memberships WHERE team_id = ?)", (LOCAL_OWNER_ID, team_id),
+        ):
+            await self._join(str(row["id"]), json.loads(row["default_roles_json"]))
+        await self.db.execute(
+            "UPDATE projects SET config_json = json_set(config_json, '$.team_id', ?) "
+            "WHERE json_extract(config_json, '$.team_id') IS NULL AND COALESCE(json_extract(config_json, '$.is_default'), 0) = 0",
+            (team_id,),
+        )
+        return int(cur.rowcount or 0)
 
     # ---- users ------------------------------------------------------------------------------------
 
@@ -66,8 +108,19 @@ class TeamService:
             "INSERT INTO users(id, name, email, telegram_id, default_roles_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (user.id, user.name, email, telegram_id, json.dumps(user.default_roles), user.created_at),
         )
+        await self._join(user.id, user.default_roles)
         self.bus.publish("people.changed")
         return user
+
+    async def _join(self, user_id: str, roles: list[str]) -> None:
+        """A person's roles are also their roles in THE team (when there is one), so a gate finds them."""
+        team_id = await self.default_team_id(create=True) if roles else None
+        if team_id is not None:
+            await self.db.execute(
+                "INSERT INTO memberships(team_id, user_id, roles_json) VALUES (?, ?, ?) "
+                "ON CONFLICT(team_id, user_id) DO UPDATE SET roles_json = excluded.roles_json",
+                (team_id, user_id, json.dumps([r for r in roles if r != Role.ADMIN.value] or roles)),
+            )
 
     async def update_user(
         self,
@@ -93,6 +146,8 @@ class TeamService:
             "UPDATE users SET name = ?, email = ?, telegram_id = ?, default_roles_json = ?, active = ? WHERE id = ?",
             (updated.name, updated.email, updated.telegram_id, json.dumps(updated.default_roles), 1 if updated.active else 0, user_id),
         )
+        if roles is not None:
+            await self._join(user_id, updated.default_roles)
         self.bus.publish("people.changed")
         return updated
 
@@ -141,6 +196,7 @@ class TeamService:
             "INSERT INTO teams(id, name, jira_project_key, confluence_space, settings_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (team.id, team.name, team.jira_project_key, team.confluence_space, team.settings.model_dump_json(), team.created_at),
         )
+        self._default = None  # the oldest team is THE team: look again
         self.bus.publish("people.changed")
         return team
 
@@ -230,12 +286,11 @@ class TeamService:
             )
             if row:
                 roles |= set(json.loads(row["roles_json"]))
-            if ticket.team_id:
-                row = await self.db.fetchone(
-                    "SELECT roles_json FROM memberships WHERE team_id = ? AND user_id = ?", (ticket.team_id, user_id)
-                )
-                if row:
-                    roles |= set(json.loads(row["roles_json"]))
+        team_id = await self.team_of(ticket)
+        if team_id:
+            row = await self.db.fetchone("SELECT roles_json FROM memberships WHERE team_id = ? AND user_id = ?", (team_id, user_id))
+            if row:
+                roles |= set(json.loads(row["roles_json"]))
         if Role.ADMIN.value in roles:
             roles |= ROLES
         return roles
@@ -253,6 +308,32 @@ class TeamService:
             roles |= set(json.loads(row["roles_json"]))
         return bool(roles & set(wanted))
 
+    async def gate_policies(self) -> dict[str, tuple[GatePolicy, bool]]:
+        """Every gate of the office and who approves it now, for THE team: name → (policy, set by the team)."""
+        team_id = await self.default_team_id()
+        own = (await self.get_team(team_id)).settings.gates if team_id else {}
+        names = [*default_gates(), *(g for g in pack_gates(self.pack_of(None) if self.pack_of else None) if g not in default_gates())]
+        return {name: (own[name], True) if name in own else (await self.gate_policy(None, name), False) for name in names}
+
+    async def set_gate(self, gate: str, policy: GatePolicy | None) -> None:
+        """Set who approves a gate for THE team; None goes back to the default."""
+        known = await self.gate_policies()
+        if gate not in known:
+            raise TeamError(f"Không có bước duyệt '{gate}'. Có: {', '.join(known)}")
+        if policy is not None:
+            bad = [r for r in [*policy.roles, *policy.submit_by, *policy.accept_findings] if r not in ROLES]
+            if bad:
+                raise TeamError(f"Vai không hợp lệ: {', '.join(bad)} (chọn trong: {', '.join(sorted(ROLES))})")
+            if not policy.roles and not policy.fallback and not policy.external:
+                raise TeamError("Cần ít nhất một vai được duyệt, hoặc người dự phòng")
+        team = await self.get_team(await self.default_team_id(create=True) or "")
+        gates = dict(team.settings.gates)
+        if policy is None:
+            gates.pop(gate, None)
+        else:
+            gates[gate] = policy.model_copy(update={"external": known[gate][0].external})  # how a gate resolves is not a choice
+        await self.update_team(team.model_copy(update={"settings": team.settings.model_copy(update={"gates": gates})}))
+
     async def approvers(self, ticket: Ticket, policy: GatePolicy) -> list[User]:
         """Who is asked at a gate: participants holding a role, else team members holding it, else the fallback."""
         wanted = set(policy.roles)
@@ -262,8 +343,9 @@ class TeamService:
         for member in await self.participants(ticket.id):
             if wanted & set(member.roles):
                 found[member.user.id] = member.user
-        if not found and ticket.team_id:
-            for member in await self.members(ticket.team_id):
+        team_id = await self.team_of(ticket)
+        if not found and team_id:
+            for member in await self.members(team_id):
                 if wanted & set(member.roles):
                     found[member.user.id] = member.user
         if not found and policy.fallback == Role.OWNER.value and ticket.owner_user_id:
@@ -274,15 +356,17 @@ class TeamService:
         name = ticket.stage_template
         if not name:
             return None
-        if ticket.team_id:
-            team = await self.get_team(ticket.team_id)
+        team_id = await self.team_of(ticket)
+        if team_id:
+            team = await self.get_team(team_id)
             if name in team.settings.stage_templates:
                 return team.settings.stage_templates[name]
         return default_templates().get(name) or pack_templates(self.pack_of(ticket) if self.pack_of else None).get(name)
 
-    async def gate_policy(self, ticket: Ticket, gate: str) -> GatePolicy:
-        if ticket.team_id:
-            team = await self.get_team(ticket.team_id)
+    async def gate_policy(self, ticket: Ticket | None, gate: str) -> GatePolicy:
+        team_id = await self.team_of(ticket)
+        if team_id:
+            team = await self.get_team(team_id)
             if gate in team.settings.gates:
                 return team.settings.gates[gate]
         return default_gates().get(gate) or pack_gates(self.pack_of(ticket) if self.pack_of else None).get(gate) or GatePolicy(roles=["owner"])

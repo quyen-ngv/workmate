@@ -80,10 +80,12 @@ class RunService:
         total: dict[str, Any] = {"runs": len(rows), "cost_usd": 0.0, "duration_s": 0, "actors": set()}
         for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
             total[key] = 0
+        total["credits"] = 0.0
         for row in rows:
             usage = json.loads(row["usage_json"] or "{}")
             for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
                 total[key] += int(usage.get(key) or 0)
+            total["credits"] = round(total["credits"] + float(usage.get("credits") or 0), 4)
             total["cost_usd"] += float(row["cost_usd"] or 0)
             total["actors"].add(row["actor_id"])
             if row["started_at"] and row["finished_at"]:
@@ -126,6 +128,7 @@ class RunService:
             "COALESCE(SUM(json_extract(usage_json, '$.output_tokens')), 0) AS output_tokens, "
             "COALESCE(SUM(json_extract(usage_json, '$.cache_read_tokens')), 0) AS cache_read_tokens, "
             "COALESCE(SUM(json_extract(usage_json, '$.cache_write_tokens')), 0) AS cache_write_tokens, "
+            "COALESCE(SUM(json_extract(usage_json, '$.credits')), 0) AS credits, "
             "COALESCE(SUM(cost_usd), 0) AS cost_usd FROM runs" + (f" WHERE {' AND '.join(where)}" if where else ""),
             params,
         )
@@ -138,6 +141,7 @@ class RunService:
             "COALESCE(SUM(json_extract(usage_json, '$.output_tokens')), 0) AS output_tokens, "
             "COALESCE(SUM(json_extract(usage_json, '$.cache_read_tokens')), 0) AS cache_read_tokens, "
             "COALESCE(SUM(json_extract(usage_json, '$.cache_write_tokens')), 0) AS cache_write_tokens, "
+            "COALESCE(SUM(json_extract(usage_json, '$.credits')), 0) AS credits, "
             "COALESCE(SUM(cost_usd), 0) AS cost_usd FROM runs" + (" WHERE started_at >= ?" if since else "") + " GROUP BY actor_id",
             (since,) if since else (),
         )
@@ -281,7 +285,7 @@ class RunService:
 
 
 def _empty_usage() -> dict[str, Any]:
-    return {"runs": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost_usd": 0.0}
+    return {"runs": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "credits": 0.0, "cost_usd": 0.0}
 
 
 def ticket_session_key(actor_id: str, ticket_id: int) -> str:

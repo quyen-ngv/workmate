@@ -178,6 +178,7 @@ class ReviewService:
             cwd=ctx.workspace,
             system_prompt=REVIEWER + f"\nWrite claims and notes in {office.settings.language}.",
             model=office.settings.ai_model or office.settings.default_model,
+            effort=office.settings.ai_effort,
             tools=sorted(READ_ONLY),
             max_turns=20,
             show_thinking=False,

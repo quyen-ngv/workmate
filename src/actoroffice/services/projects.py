@@ -52,7 +52,9 @@ class ProjectService:
         if await self.db.fetchone("SELECT 1 FROM projects WHERE name = ?", (name,)):
             raise Conflict(f"Dự án '{name}' đã tồn tại")
         checked = await asyncio.to_thread(self._validated, path, access)  # may run git: keep the event loop free
-        project = Project(id=new_id("prj"), name=name, description=description.strip(), **checked)
+        office = getattr(self, "office", None)
+        team_id = await office.teams.default_team_id() if office is not None else None  # one team: a repository is its
+        project = Project(id=new_id("prj"), name=name, description=description.strip(), team_id=team_id, **checked)
         await self._insert(project)
         self.bus.publish("project.changed", project=project.model_dump())
         return project

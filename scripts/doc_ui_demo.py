@@ -297,6 +297,30 @@ async def seed(office: Office, root: Path) -> None:
     await office.codeintel.ensure(await office.codeintel.repos(team_id=team.id))
     await office.knowledge.note(kind="decision", title="Hạn mức là hằng số trong code", content="Chưa ai cần đổi lúc chạy.", by="Copilot", team_id=team.id)
     await office.docrepo.sync(full=True)  # every document as a file in <data_dir>/docs, committed
+    from actoroffice.domain.work import InteractionKind
+
+    ai = await office.ensure_ai()
+    await office.tickets.add_comment(first.id, "Nhớ giữ tên hằng số MAX_PER_DAY, đừng đổi tên.", author_kind="steer", author_id="user")
+    chat = await office.chat.dm(ai.id)  # the start chat: a request, the AI's questions, a button, a proposal
+    await office.chat.post_user(chat.id, "Cần thêm hạn mức hoàn tiền theo loại khách (thường / VIP) cho repo Shop.", wake=False)
+    questions = (
+        "Để đề xuất đúng việc, cho tôi hỏi 2 điểm:\n1. Hạn mức VIP bao nhiêu lần/ngày? (đề xuất: 20)\n"
+        "2. Loại khách lấy từ đâu: bảng `customers.tier` hay hệ thống CRM? (đề xuất: `customers.tier`)"
+    )
+    await office.chat.post_actor(chat.id, ai, questions, wake=False)
+    await office.chat.post_user(chat.id, "VIP 20 lần, lấy từ customers.tier. Có cả tài liệu nghiệp vụ trên Confluence.", wake=False)
+    button = {"actions": [{"page": "connections", "label": "🔌 Kết nối Confluence"}]}
+    await office.chat.post_actor(chat.id, ai, "Chưa có kết nối Confluence nên tôi chưa đọc được tài liệu đó.", meta=button, wake=False)
+    await office.chat.post_actor(chat.id, ai, "Tôi đề xuất 1 epic (phân tích → nghiệp vụ → task) bên dưới, bạn xem và duyệt nhé.", wake=False)
+    item = {"title": "Hạn mức hoàn tiền theo loại khách", "why": "Lan yêu cầu trong chat", "workflow": "epic", "project": "Shop",
+            "description": "AC-1: khách VIP được hoàn 20 lần/ngày\nAC-2: khách thường giữ 9 lần"}
+    await office.proposals.propose([item], actor_id=ai.id, actor_name=ai.name, run_id=None, ticket_id=None, conversation_id=chat.id)
+    await office.interactions.create(  # the AI asks to run a command it may not run on its own
+        InteractionKind.APPROVE_TOOL,
+        {"tool": "Bash", "input": {"command": "mvn -q dependency:tree"}, "input_hash": "demo", "target": "mvn -q dependency:tree",
+         "reason": "lệnh mạng: cần hỏi", "asked_by": ai.name, "project": "Shop", "suggestions": [{"rule": "Bash(mvn -q dependency:tree)", "scope": "exact"}]},
+        actor_id=ai.id, ticket_id=first.id,
+    )
 
 
 async def main(port: int) -> None:

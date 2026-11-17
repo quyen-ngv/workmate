@@ -18,6 +18,7 @@ const state = {
   open: JSON.parse(localStorage.getItem("ao.open") || "[]"),
   focus: localStorage.getItem("ao.focus") || null,
   split: localStorage.getItem("ao.split") === "1",
+  chat: { conv: null, ai: null, messages: [], pending: [], thinking: false },  // the start chat with the office AI
   side: localStorage.getItem("ao.side") || "files",
   details: {}, // key → {ticket, stage, detail}
   drafts: {}, // proposal card id → the person's choices per proposed ticket (kept across re-renders)
@@ -314,12 +315,13 @@ function renderSidebar() {
     <div class="brand"><span class="dots"><i></i><i></i><i></i></span> Copilot
       ${needs_you ? `<span class="badge" title="Việc đang chờ bạn">${needs_you} cần bạn</span>` : ""}</div>
     <div class="side-scroll">
-      <div class="side-title">Spaces</div>
+      <button class="space chat-home ${state.focus ? "" : "on"}" data-chat-home><span class="ico">💬</span><span class="name">Trò chuyện với ${esc(state.chat.ai?.name || "Copilot")}</span>${state.chat.pending.length ? `<span class="badge">${state.chat.pending.length}</span>` : ""}</button>
+      ${teams.length > 1 ? `<div class="side-title">Spaces</div>
       <button class="space ${state.team ? "" : "on"}" data-team=""><span class="ico">∗</span><span class="name">Tất cả</span><span class="badge soft">${tickets.length}</span></button>
-      ${teams.map((t) => `<button class="space ${state.team === t.id ? "on" : ""}" data-team="${esc(t.id)}"><span class="ico">${esc(t.name[0] || "?")}</span><span class="name">${esc(t.name)}</span>${t.needs_you ? `<span class="badge">Cần bạn</span>` : ""}</button>`).join("")}
+      ${teams.map((t) => `<button class="space ${state.team === t.id ? "on" : ""}" data-team="${esc(t.id)}"><span class="ico">${esc(t.name[0] || "?")}</span><span class="name">${esc(t.name)}</span>${t.needs_you ? `<span class="badge">Cần bạn</span>` : ""}</button>`).join("")}` : ""}
       <div class="side-title">Việc <button data-new title="Việc mới">+</button></div>
       ${Object.entries(byTeam).map(([team, list]) => `
-        <div class="side-title team-head">${esc(teamName(team))}</div>
+        ${teams.length > 1 ? `<div class="side-title team-head">${esc(teamName(team))}</div>` : ""}
         ${list.map((t) => `
           <button class="tk ${state.focus === t.ticket ? "on" : ""}" data-open="${esc(t.ticket)}" title="${esc(t.title)}">
             <span class="dot ${esc(t.status)}"></span>
@@ -336,6 +338,53 @@ function renderSidebar() {
       <button data-page="inbox">Cần tôi ${needs_you ? `(${needs_you})` : ""}</button>
       <button data-page="rules">Rules</button><button data-page="kb">Kiến thức</button><button data-page="people">Người</button><button data-page="map">Bản đồ</button><button data-page="connections">Kết nối</button><button data-page="standard">Chuẩn tài liệu</button><button data-page="setup">Cài đặt</button>
     </div>`;
+}
+
+// ---- the start chat: the office AI turns what people want into tickets -----------------------------------------
+
+const CHAT = "chat";
+// Pages a chat message may point to (tools/chat_tools.py UI_PAGES) → the attribute that opens them.
+const CHAT_PAGES = { new_task: "data-new", repo: 'data-page="setup"', connections: 'data-page="connections"', rules: 'data-page="rules"', kb: 'data-page="kb"',
+  standard: 'data-page="standard"', people: 'data-page="people"', map: 'data-page="map"', setup: 'data-page="setup"' };
+const CHAT_STARTERS = [["new_task", "📝 Giao việc bằng form"], ["repo", "📁 Thêm repo"], ["connections", "🔌 Kết nối"], ["rules", "📏 Rules"], ["kb", "📚 Kiến thức"], ["standard", "📐 Chuẩn tài liệu"]];
+const chatAction = (page, label) => `<button class="btn small" ${CHAT_PAGES[page] || 'data-page="setup"'}>${esc(label)}</button>`;
+
+function chatShell() {
+  return `<section class="pane focus chat" data-pane="${CHAT}">
+    <div class="chat-head"><b>💬 ${esc(state.chat.ai?.name || "Copilot")}</b><span class="rev">Kể việc bạn cần: AI hỏi lại cho rõ rồi đề xuất ticket để bạn duyệt.</span></div>
+    <div class="chat-log"><div id="welcome"></div><div data-chat-log></div><div class="cards" data-chat-cards></div></div>
+    <div class="composer"><textarea data-chat-input placeholder="Ví dụ: Thêm hạn mức hoàn tiền theo loại khách cho repo pay-api… (Enter để gửi, Shift+Enter xuống dòng)"></textarea><button class="btn primary" data-chat-send>Gửi</button></div>
+  </section>`;
+}
+
+async function loadChat() {
+  const r = await api("/api/copilot");
+  state.chat = { ...state.chat, conv: r.conversation, ai: r.ai, messages: r.messages, pending: r.pending, thinking: r.thinking };
+  state.details[CHAT] = { detail: { pending: r.pending } };  // the cards' buttons look their item up here
+}
+
+function chatMessage(m) {
+  if (m.author_kind === "user") {
+    return `<div class="ev comment mine"><div class="bubble"><div class="when">Bạn · ${esc(fmtTime(m.created_at))}</div>${esc(m.body)}</div></div>`;
+  }
+  if (m.author_kind === "system") return `<div class="chat-sys">${esc(m.body)}</div>`;
+  const actions = (m.meta?.actions || []).map((a) => chatAction(a.page, a.label)).join("");
+  return `<div class="chat-ai"><div class="when">🤖 ${esc(state.chat.ai?.name || "AI")} · ${esc(fmtTime(m.created_at))}</div>
+    <div class="doc">${md(m.body)}</div>${actions ? `<div class="opts">${actions}</div>` : ""}</div>`;
+}
+
+function renderChat() {
+  const pane = $(`.pane[data-pane="${CHAT}"]`);
+  if (!pane) return;
+  const log = $("[data-chat-log]", pane);
+  const c = state.chat;
+  const intro = `<div class="chat-ai"><div class="when">🤖 ${esc(c.ai?.name || "Copilot")}</div><div class="doc">Chào bạn. Kể cho tôi việc cần làm (một tính năng, một lỗi, một tài liệu, một câu hỏi về hệ thống).
+Tôi sẽ hỏi lại những điểm còn thiếu, rồi đề xuất ticket với quy trình phù hợp để bạn duyệt.</div>
+    <div class="opts">${CHAT_STARTERS.map(([page, label]) => chatAction(page, label)).join("")}</div></div>`;
+  log.innerHTML = intro + (c.messages || []).map(chatMessage).join("") + (c.thinking ? `<div class="chat-ai thinking"><span class="when">🤖 ${esc(c.ai?.name || "AI")} đang trả lời…</span></div>` : "");
+  $("[data-chat-cards]", pane).innerHTML = (c.pending || []).map((item) => card(item, CHAT)).join("");
+  const box = $(".chat-log", pane);
+  box.scrollTop = box.scrollHeight;
 }
 
 // ---- tabs ----------------------------------------------------------------------------------------------------
@@ -370,10 +419,10 @@ function renderPanes() {
     // same panes: keep the elements, so the field being typed in keeps its focus (renderPane restores it)
     for (const p of have) p.classList.toggle("focus", p.dataset.pane === state.focus);
   } else {
-    $("#panes").innerHTML = keys.length ? keys.map((k) => `<section class="pane ${k === state.focus ? "focus" : ""}" data-pane="${esc(k)}"></section>`).join("")
-      : `<div class="welcome" id="welcome"><div class="empty">Chọn một việc bên trái, hoặc bấm + để giao việc mới cho AI.</div></div>`;
+    if (keys.length) $("#panes").innerHTML = keys.map((k) => `<section class="pane ${k === state.focus ? "focus" : ""}" data-pane="${esc(k)}"></section>`).join("");
+    else if (!$("#panes > .pane.chat")) $("#panes").innerHTML = chatShell();
   }
-  if (!keys.length) act(renderWelcome);
+  if (!keys.length) { act(async () => { if (!state.chat.conv) await loadChat(); renderChat(); await renderWelcome(); }); renderSide(); return; }
   for (const key of keys) renderPane(key);
   renderSide();
 }
@@ -407,6 +456,7 @@ function timeline(key) {
 }
 
 const COMMENT_ICON = { system: "▪", user: "💬", steer: "🧭", change: "⚠", actor: "🤖" };
+const MINE = new Set(["user", "steer"]);  // comments people wrote (the AI's are "actor", the office's "system")
 
 function renderTimeline(items) {
   const out = [];
@@ -431,6 +481,9 @@ function renderTimeline(items) {
   function line(a) {
     if (a.kind === "comment") {
       const who = a.by === "system" ? "" : a.author === "user" ? "Owner" : a.author || "";
+      if (MINE.has(a.by)) {  // what people wrote: on their side, like a chat
+        return `<div class="ev comment mine ${esc(a.by)}"><div class="bubble"><div class="when">${esc(who || "Bạn")} · ${esc(fmtTime(a.at))}${a.by === "steer" ? " · chỉ dẫn cho AI" : ""}</div>${esc(a.title)}</div></div>`;
+      }
       return `<div class="ev comment ${esc(a.by)}"><span class="ic">${COMMENT_ICON[a.by] || "💬"}</span><span class="tx"><span class="when">${esc(fmtTime(a.at))}${who ? ` · ${esc(who)}` : ""}</span> ${esc(a.title)}</span></div>`;
     }
     const cls = [a.kind, a.status === "running" ? "running" : "", a.status === "error" ? "error" : ""].join(" ");
@@ -731,6 +784,8 @@ function proposalDraft(item) {
   }));
 }
 
+const PROPOSAL_FLOWS = [["code", "code (đầy đủ)"], ["quick", "quick (sửa nhỏ)"], ["epic", "epic (phân tích → nghiệp vụ → task)"], ["research", "nghiên cứu"], ["doc", "tài liệu"], ["automation", "tự động hoá"]];
+
 function proposalCard(item) {
   const p = item.payload || {};
   const items = p.items || [];
@@ -748,7 +803,7 @@ function proposalCard(item) {
       <textarea data-p="description" rows="3" aria-label="Mô tả / AC">${esc(d.description)}</textarea>
       <div class="why">Vì sao: ${esc(it.why)}</div>
       <div class="proposal-opts">
-        <select data-p="workflow" aria-label="Quy trình">${option("code", "code (đầy đủ)", d.workflow === "code")}${option("quick", "quick (sửa nhỏ)", d.workflow === "quick")}</select>
+        <select data-p="workflow" aria-label="Quy trình">${PROPOSAL_FLOWS.map(([v, l]) => option(v, l, d.workflow === v)).join("")}</select>
         <select data-p="project_id" aria-label="Dự án">${choices.map((x) => option(x.id, x.name, x.id === d.project_id)).join("")}</select>
         <select data-p="run_now" aria-label="Chạy ngay hay để backlog">${option("1", "Chạy ngay", d.run_now)}${option("0", "Để backlog", !d.run_now)}</select>
       </div>
@@ -786,6 +841,7 @@ function mergeButton(m) {
 }
 
 function renderPane(key) {
+  if (key === CHAT) return renderChat();
   const el = $(`.pane[data-pane="${CSS.escape(key)}"]`);
   const d = state.details[key];
   if (!el) return;
@@ -811,7 +867,7 @@ function renderPane(key) {
       <div class="pane-meta">
         ${st.who?.length ? `<span>chờ ${esc(st.who.join(", "))}</span>` : ""}
         ${steps.length ? `<span>bước ${st.steps_done}/${steps.length}</span>` : ""}
-        <span>lần ${st.attempt || 1}</span><span>${(tokens(st.usage) / 1000).toFixed(1)}k tok</span>
+        <span>lần ${st.attempt || 1}</span><span>${(tokens(st.usage) / 1000).toFixed(1)}k tok${st.usage?.credits ? ` · ${Number(st.usage.credits).toFixed(2)} credit` : ""}</span>
         ${t.jira_url ? `<a href="${esc(t.jira_url)}" target="_blank" rel="noreferrer">${esc(t.jira_key)}</a>` : ""}
         ${t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noreferrer">PR</a>` : ""}
         ${closed ? `<span class="pane-controls"><button class="btn small primary" data-reopen title="Đưa ticket về một giai đoạn để AI làm tiếp">↩ Mở lại</button></span>` : `<span class="pane-controls">
@@ -991,13 +1047,13 @@ async function renderWelcome() {
   if (!box) return;
   const s = await api("/api/setup");
   const steps = [
-    ["Thêm người và team (BA, Dev…)", s.people > 0 && s.teams.length > 0, "people"],
+    ["Thêm người và vai trò (BA, Dev, Lead…)", s.people > 0, "people"],
     ["Thêm repo/dự án cho AI làm việc", s.projects.length > 0, "setup"],
     ["Kết nối Telegram (tuỳ chọn)", !!s.connections?.telegram?.configured, "setup"],
     ["Kết nối code host / tài liệu: Bitbucket, Confluence, Oracle… (tuỳ chọn)", (s.integrations || []).length > 0, "connections"],
     ["Giao việc đầu tiên cho AI", state.board.tickets.length > 0, "new"],
   ];
-  if (steps.every(([, ok]) => ok)) return;
+  if (steps.every(([, ok]) => ok)) { box.innerHTML = ""; return; }
   box.innerHTML = `<div class="checklist"><h2>Bắt đầu</h2>
     ${steps.map(([label, ok, page]) => `<div class="step ${ok ? "ok" : ""}"><span class="tick">${ok ? "✓" : "○"}</span><span class="name">${esc(label)}</span>
       ${ok ? "" : page === "new" ? `<button class="btn primary" data-new>Giao việc</button>` : `<button class="btn" data-page="${page}">Mở</button>`}</div>`).join("")}
@@ -1023,14 +1079,16 @@ async function pageNewTask() {
   const body = sheet("Giao việc mới cho AI", `
     <div class="form">
       <label>Tiêu đề<input data-f="title" placeholder="vd. Hoàn tiền cho đơn VIP trong 60 ngày"></label>
-      <label>Loại việc<select data-f="template">${people.templates.map((t) => `<option value="${esc(t)}">${esc((people.template_titles || {})[t] || t)}</option>`).join("")}</select></label>
+      <label title="Quy trình quyết định các giai đoạn, ai duyệt ở đâu và tài liệu nào phải có. Không giới hạn kỹ năng của AI.">Quy trình<select data-f="template">${people.templates.map((t) => `<option value="${esc(t)}">${esc((people.template_titles || {})[t] || t)}</option>`).join("")}</select></label>
       <label>Repo / dự án<select data-f="project_id"><option value="">— (không có repo)</option>${setup.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
-      <label>Team<select data-f="team_id"><option value="">—</option>${people.teams.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</select></label>
+${people.teams.length > 1 ? `      <label>Team<select data-f="team_id"><option value="">—</option>${people.teams.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</select></label>` : ""}
       <label>Người yêu cầu<select data-f="owner_user_id"><option value="">—</option>${people.users.filter((u) => u.id !== "user").map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join("")}</select></label>
       <label>Khi người chưa trả lời<select data-f="mode"><option value="wait">Chờ</option><option value="assume">Làm theo giả định</option></select></label>
     </div>
     <label>Mô tả<textarea data-f="description" rows="6" placeholder="Bối cảnh, mong muốn, link Jira/Confluence…"></textarea></label>
-    <div><button class="btn primary" data-create-task>Giao cho AI</button></div>`);
+    <p class="hint">Quy trình chỉ quyết định các bước (giai đoạn, ai duyệt, tài liệu bắt buộc), không giới hạn việc AI làm: AI vẫn dùng mọi skill, rule và kiến thức
+      dù việc thuộc loại nào, và đổi được quy trình giữa chừng bằng nút ⇄ trên ticket. Chưa biết chọn gì thì kể việc trong chat, AI chọn giúp.</p>
+    <div><button class="btn primary" data-create-task>Giao cho AI</button> <button class="btn" data-chat-home>💬 Kể trong chat</button></div>`);
   body.dataset.page = "new";
 }
 
@@ -1055,7 +1113,7 @@ async function pageInbox() {
 
 async function pageRules() {
   const [rules, people] = await Promise.all([api("/api/rules"), api("/api/people")]);
-  const scopes = [["global", "Toàn bộ"], ...people.teams.map((t) => [`team:${t.id}`, `Team ${t.name}`])];
+  const scopes = [["global", "Toàn bộ"], ...(people.teams.length > 1 ? people.teams.map((t) => [`team:${t.id}`, `Team ${t.name}`]) : [])];
   const scopeName = (scope) => (scopes.find(([v]) => v === scope) || [scope, scope])[1];
   sheet("Rules", `
     <div class="form">
@@ -1092,7 +1150,7 @@ function connectionForm(a, c) {
   }).join("");
   const optional = new Set(a.optional_secret_fields || []);
   const secrets = (a.secret_fields || []).map((k) => `<label>${esc(k)} (bí mật${optional.has(k) ? ", không bắt buộc" : ""})<input type="password" data-sec="${esc(k)}" autocomplete="new-password" placeholder="${c ? "để trống = giữ nguyên" : optional.has(k) ? "không bắt buộc" : ""}"></label>`).join("");
-  const scopes = [["office", "Cả văn phòng"], ...(state.board.teams || []).map((t) => [`team:${t.id}`, `Team ${t.name}`])];
+  const scopes = [["office", "Cả văn phòng"], ...((state.board.teams || []).length > 1 ? state.board.teams.map((t) => [`team:${t.id}`, `Team ${t.name}`]) : [])];
   // the permissions the token needs, per capability: what people tick when they create the token
   const needs = Object.entries(a.required_scopes || {}).filter(([, v]) => (v || []).length).map(([cap, v]) => `${CAP_LABEL[cap] || cap}: ${v.join(", ")}`);
   return `<div class="conn-form" data-conn-form data-use="${esc(a.name)}">
@@ -1132,7 +1190,7 @@ const RULE_LEVEL = { "": "theo lớp trên", error: "lỗi (chặn duyệt)", wa
 async function pageStandard(scope = "office") {
   const v = await api(`/api/doc-profile?scope=${encodeURIComponent(scope)}`);
   const own = v.profile || { pack: null, rules: {} };
-  const scopes = [["office", "Cả văn phòng"], ...(state.board.teams || []).map((t) => [`team:${t.id}`, `Team ${t.name}`])];
+  const scopes = [["office", "Cả văn phòng"], ...((state.board.teams || []).length > 1 ? state.board.teams.map((t) => [`team:${t.id}`, `Team ${t.name}`]) : [])];
   if (!scopes.some(([s]) => s === v.scope)) scopes.push([v.scope, v.scope.startsWith("ticket:") ? `Epic / ticket ${scope.split(":")[1]}` : v.scope]);
   const inherited = (v.inherited || []).map((p) => [p.pack ? `pack ${p.pack}` : "", ...Object.entries(p.rules || {}).map(([k, l]) => `${k}: ${l}`)].filter(Boolean).join(", ")).filter(Boolean);
   const names = new Set([...v.rules.map((r) => r.id), ...Object.keys(own.rules || {})]);
@@ -1149,7 +1207,36 @@ async function pageStandard(scope = "office") {
       <div class="rev">Đang dùng: <b>${esc(v.pack.name)}</b> v${esc(v.pack.version)} · luồng: ${esc((v.pack.flows || []).join(", "))}${inherited.length ? ` · lớp trên đã đổi: ${esc(inherited.join(" | "))}` : ""}</div>
       <table class="list"><thead><tr><th>Luật</th><th>Kiểu</th><th>Hiện là</th><th>Lớp này đặt</th></tr></thead><tbody>${rows}</tbody></table>
     </div>
-    <div class="opts"><button class="btn primary" data-std-save>Lưu</button>${v.profile ? `<button class="btn" data-std-clear>Bỏ lớp này</button>` : ""}</div>`);
+    <div class="opts"><button class="btn primary" data-std-save>Lưu</button>${v.profile ? `<button class="btn" data-std-clear>Bỏ lớp này</button>` : ""}</div>
+    <div data-pack-box><div class="empty">Đang tải nội dung bộ chuẩn…</div></div>`);
+  const current = own.pack || [...(v.inherited || [])].reverse().find((p) => p.pack)?.pack || "default";
+  await renderPackBox(current, v.scope, own);
+}
+
+// The content of the pack in use: templates, the AI's instructions, review criteria, pack.yaml. The built-in pack is
+// read-only: "Tạo bản riêng" makes one that extends it, for this layer.
+async function renderPackBox(name, scope, own) {
+  const box = $("[data-pack-box]");
+  if (!box) return;
+  const p = await api(`/api/doc-pack?name=${encodeURIComponent(name)}`);
+  const ro = p.editable ? "" : "readonly";
+  const docs = p.doc_types.map((d) => `<details class="pack-part"><summary><b>${esc(d.id)}</b> <span class="rev">mục: ${esc(d.items.map((k) => `${k} (${p.item_kinds[k] || ""})`).join(", "))}${d.based_on.length ? ` · viết dựa trên ${esc(d.based_on.join(", "))}` : ""}</span></summary>
+      <div class="rev">Heading bắt buộc: ${esc(d.sections.join(" · "))}</div>
+      <textarea data-pk-template="${esc(d.id)}" rows="16" ${ro}>${esc(d.template)}</textarea></details>`).join("");
+  const instr = Object.entries(p.instructions).map(([k, text]) => `<details class="pack-part"><summary><b>${esc(k)}</b> <span class="rev">hướng dẫn cho AI</span></summary>
+      <textarea data-pk-instr="${esc(k)}" rows="12" ${ro}>${esc(text)}</textarea></details>`).join("");
+  const reviews = Object.entries(p.reviews).map(([k, r]) => `<details class="pack-part"><summary><b>${esc(k)}</b> <span class="rev">soát ${esc(r.doc)} ở gate ${esc(r.at.join(", "))}</span></summary>
+      <div class="rev">Mỗi dòng một tiêu chí</div><textarea data-pk-review="${esc(k)}" rows="6" ${ro}>${esc(r.rubric.join("\n"))}</textarea></details>`).join("");
+  box.innerHTML = `<h3>Nội dung bộ chuẩn <code>${esc(p.name)}</code>${p.extends ? ` <span class="rev">kế thừa ${esc(p.extends)}</span>` : ""}</h3>
+    ${p.editable ? `<p class="rev">Sửa rồi bấm Lưu: chỉ phần khác với bộ chuẩn gốc được ghi. Có hiệu lực ở lần kiểm kế tiếp.</p>`
+      : `<div class="form"><span class="rev">Bộ chuẩn có sẵn không sửa trực tiếp. Tạo bản riêng (kế thừa nó) để sửa, dùng cho lớp đang chọn:</span>
+        <label>Tên<input data-pk-new placeholder="vd. pay-team" size="16"></label><button class="btn primary" data-pk-create="${esc(p.name)}" data-scope="${esc(scope)}">Tạo bản riêng</button></div>`}
+    <h4>Mẫu tài liệu</h4>${docs}
+    <h4>Hướng dẫn AI viết tài liệu</h4>${instr}
+    <h4>Tiêu chí AI soát chất lượng</h4>${reviews || `<div class="rev">không có</div>`}
+    ${p.editable ? `<details class="pack-part"><summary><b>pack.yaml</b> <span class="rev">nâng cao: luật, luồng, gate, cú pháp</span></summary><textarea data-pk-yaml rows="24">${esc(p.yaml)}</textarea></details>
+      <div class="opts"><button class="btn primary" data-pk-save="${esc(p.name)}">Lưu nội dung bộ chuẩn</button></div>` : ""}`;
+  box.dataset.own = JSON.stringify(own || {});
 }
 
 function connectionBody(form) {
@@ -1219,7 +1306,7 @@ function renderMap() {
   const diff = d.added ? `<span class="chip good">+${d.added.nodes} nút, +${d.added.edges} cạnh</span> <span class="chip bad">−${d.removed.nodes} nút, −${d.removed.edges} cạnh</span> so với nhánh chính` : "";
   body.innerHTML = `<div class="map-crumbs">${crumbs.join(" › ")}${d.truncated ? ` <span class="chip warn" title="Module lớn: vẽ theo file, không theo từng hàm">rút gọn</span>` : ""} ${diff}</div>
     <div class="map-bar">
-      <label>Team <select data-map="team"><option value="">(không thuộc team)</option>${teams.map((t) => `<option value="${esc(t.id)}" ${mapState.team === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>
+      <label ${teams.length > 1 ? "" : "hidden"}>Team <select data-map="team"><option value="">(không thuộc team)</option>${teams.map((t) => `<option value="${esc(t.id)}" ${mapState.team === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>
       <label>Bảng <select data-map="tables">${[["shared", "dùng chung"], ["all", "tất cả"], ["none", "ẩn"]].map(([v, l]) => `<option value="${v}" ${mapState.tables === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
       <span>${kinds.map((k) => `<label class="inline"><input type="checkbox" data-map-kind="${esc(k)}" ${!mapState.kinds.size || mapState.kinds.has(k) ? "checked" : ""}> ${esc(EDGE_LABEL[k] || k)}</label>`).join(" ")}</span>
       <label>Tô theo ticket <input type="text" data-map="ticket" value="${esc(ov?.ticket || "")}" placeholder="vd. AO-12" size="8"></label>
@@ -1277,20 +1364,41 @@ async function pageKb() {
       <td>${i.status !== "verified" ? `<button class="btn small good" data-kb="${i.id}" data-kb-status="verified">Đúng</button>` : ""}${i.status !== "rejected" ? `<button class="btn small bad" data-kb="${i.id}" data-kb-status="rejected">Sai</button>` : ""}</td></tr>`).join("")}</table>` || `<div class="empty">Chưa có kiến thức.</div>`);
 }
 
+const ROLE_LABEL = { ba: "BA", dev: "Dev", qe: "QE", lead: "Lead", owner: "Người yêu cầu", admin: "Admin" };
+const GATE_ROLES = ["ba", "dev", "qe", "lead", "owner"];
+
 async function pagePeople() {
-  const p = await api("/api/people");
-  sheet("Người & team", `
+  const [p, gates] = await Promise.all([api("/api/people"), api("/api/gates")]);
+  const team = p.teams[0];
+  const roleOf = (u) => {
+    const m = team?.members.find((x) => x.user.id === u.id);
+    return [...new Set([...(u.default_roles || []), ...(m?.roles || [])])];
+  };
+  const people = p.users.filter((u) => u.id !== "user").map((u) => `<tr><td><b>${esc(u.name)}</b>${u.active ? "" : ` <span class="chip">nghỉ</span>`}<div class="rev">${esc([u.email, u.telegram_id ? `tg ${u.telegram_id}` : ""].filter(Boolean).join(" · "))}</div></td>
+      <td>${GATE_ROLES.filter((r) => r !== "owner").concat("admin").map((r) => `<label class="chk"><input type="checkbox" data-u-role="${esc(u.id)}" value="${r}" ${roleOf(u).includes(r) ? "checked" : ""}>${ROLE_LABEL[r]}</label>`).join("")}</td>
+      <td><button class="btn small" data-u-save="${esc(u.id)}">Lưu vai</button></td></tr>`).join("");
+  const gateRows = gates.map((g) => `<tr data-gate-row="${esc(g.gate)}"><td><b>${esc(g.title)}</b><div class="rev"><code>${esc(g.gate)}</code>${g.custom ? " · team đã chỉnh" : ""}${g.external ? " · do sự kiện bên ngoài xác nhận" : ""}</div></td>
+      <td>${GATE_ROLES.map((r) => `<label class="chk"><input type="checkbox" data-g-role value="${r}" ${g.roles.includes(r) ? "checked" : ""}>${ROLE_LABEL[r]}</label>`).join("")}</td>
+      <td><select data-g-fallback><option value="owner" ${g.fallback === "owner" ? "selected" : ""}>Người yêu cầu</option><option value="" ${g.fallback ? "" : "selected"}>Không ai (báo lỗi)</option></select></td>
+      <td><input type="number" min="1" max="5" value="${esc(g.min)}" data-g-min style="width:4em"></td>
+      <td>${GATE_ROLES.filter((r) => r !== "owner").map((r) => `<label class="chk"><input type="checkbox" data-g-submit value="${r}" ${(g.submit_by || []).includes(r) ? "checked" : ""}>${ROLE_LABEL[r]}</label>`).join("")}</td>
+      <td><button class="btn small" data-gate-save="${esc(g.gate)}">Lưu</button>${g.custom ? `<button class="btn small" data-gate-reset="${esc(g.gate)}">Mặc định</button>` : ""}</td></tr>`).join("");
+  sheet("Người & vai trò", `
     <div class="form">
       <label>Tên<input data-p="name"></label><label>Telegram id<input data-p="telegram_id" type="number"></label>
-      <label>Email<input data-p="email"></label><label>Vai chung<input data-p="roles" placeholder="ba dev qe lead admin"></label>
+      <label>Email<input data-p="email"></label><label>Vai<input data-p="roles" placeholder="ba dev qe lead admin"></label>
       <button class="btn primary" data-add-person>Thêm người</button>
     </div>
-    <div class="form"><label>Team mới<input data-t="name"></label><label>Jira project<input data-t="jira_project_key"></label><label>Confluence space<input data-t="confluence_space"></label><button class="btn primary" data-add-team>Thêm team</button></div>
-    ${p.teams.map((t) => `<div class="rule"><div class="h"><b>${esc(t.name)}</b>${t.jira_project_key ? `<span class="chip">Jira ${esc(t.jira_project_key)}</span>` : ""}</div>
-      <div class="b">${t.members.map((m) => `${esc(m.user.name)} (${esc(m.roles.join(", "))})`).join(" · ") || "chưa có thành viên"}</div>
-      <div class="form"><label>Người<select data-m-user="${esc(t.id)}">${p.users.filter((u) => u.id !== "user").map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join("")}</select></label>
-        <label>Vai trong team<input data-m-roles="${esc(t.id)}" placeholder="ba dev"></label><button class="btn" data-add-member="${esc(t.id)}">Gán</button>
-        <button class="btn" data-mcp-team="${esc(t.id)}">MCP server (${Object.keys((t.settings || {}).mcp_servers || {}).length})</button></div></div>`).join("")}`);
+    <table class="list"><tr><th>Người</th><th>Vai (một người giữ được nhiều vai)</th><th></th></tr>${people || `<tr><td colspan="3" class="empty">Chưa có ai. Thêm người ở trên.</td></tr>`}</table>
+    ${team ? `<h3>Team · ${esc(team.name)}</h3>
+    <div class="form" data-team-form="${esc(team.id)}"><label>Tên team<input data-t="name" value="${esc(team.name)}"></label><label>Jira project<input data-t="jira_project_key" value="${esc(team.jira_project_key || "")}"></label>
+      <label>Confluence space<input data-t="confluence_space" value="${esc(team.confluence_space || "")}"></label><button class="btn" data-team-save="${esc(team.id)}">Lưu</button>
+      <button class="btn" data-mcp-team="${esc(team.id)}">MCP server (${Object.keys((team.settings || {}).mcp_servers || {}).length})</button></div>` : ""}
+    <h3>Ai duyệt bước nào</h3>
+    <p class="hint">Mỗi bước: những vai được duyệt (ai giữ vai đó trên ticket, hoặc trong team, nhận thẻ), người dự phòng khi không ai giữ vai, số người phải duyệt,
+      và vai phải bấm "gửi duyệt" trước (vd. Dev gửi rồi Lead duyệt). Để mặc định thì theo quy trình có sẵn.</p>
+    <table class="list gates"><tr><th>Bước</th><th>Vai được duyệt</th><th>Dự phòng</th><th>Số người</th><th>Phải gửi trước</th><th></th></tr>${gateRows}</table>
+    ${p.teams.length > 1 ? `<p class="hint">Dữ liệu cũ còn ${p.teams.length} team; văn phòng dùng team đầu tiên (${esc(team.name)}) cho mọi việc mới.</p>` : ""}`);
 }
 
 // ---- outside MCP servers of a team's AI (/api/teams/{id}/mcp) ------------------------------------------------
@@ -1442,7 +1550,24 @@ function mcpClick(ds) {
   });
 }
 
-const MODELS = [["sonnet", "Claude Sonnet (khuyên dùng)"], ["opus", "Claude Opus (mạnh nhất, tốn hơn)"], ["haiku", "Claude Haiku (nhanh, rẻ)"], ["kiro", "Kiro CLI (cần cài kiro-cli)"]];
+const MODELS = [["sonnet", "Claude Sonnet (khuyên dùng)"], ["opus", "Claude Opus (mạnh nhất, tốn hơn)"], ["haiku", "Claude Haiku (nhanh, rẻ)"], ["kiro", "Kiro CLI · model mặc định của Kiro"]];
+const EFFORT_VI = { "": "Mặc định của model", low: "low · nhanh, ít suy nghĩ", medium: "medium", high: "high · suy nghĩ kỹ", xhigh: "xhigh", max: "max · tối đa, tốn nhất" };
+
+// Model and effort of the office AI: Claude models, Kiro's default, and the Kiro models a session or `--list-models` named.
+function aiForm(ai) {
+  const kiro = (ai.kiro?.models || []).map((m) => [`kiro:${m.value}`, `Kiro · ${m.name}${m.name !== m.value ? ` (${m.value})` : ""}`]);
+  const all = [...MODELS, ...kiro];
+  const models = all.some(([v]) => v === ai.model) ? all : [[ai.model, ai.model], ...all];
+  const efforts = ai.model.startsWith("kiro") && (ai.kiro?.efforts || []).length ? ["", ...ai.kiro.efforts.map((e) => e.value)] : ["", ...(ai.efforts || [])];
+  return `<div class="form">
+      <label>Model<select data-ai="model">${models.map(([v, l]) => `<option value="${esc(v)}" ${v === ai.model ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+      <label>Hoặc model Kiro khác<input data-ai="kiro" placeholder="vd. claude-sonnet-4.6" title="Ghi id model của Kiro; để trống thì dùng ô Model"></label>
+      <label>Effort<select data-ai="effort">${efforts.map((e) => `<option value="${esc(e)}" ${e === (ai.effort || "") ? "selected" : ""}>${esc(EFFORT_VI[e] || e)}</option>`).join("")}</select></label>
+      <button class="btn primary" data-save-ai>Lưu</button>
+      <button class="btn" data-kiro-models title="Hỏi kiro-cli các model tài khoản này dùng được">↻ Lấy model từ Kiro</button>
+    </div>
+    <p class="hint">Kiro tính phí theo credit: số credit mỗi lượt hiện cạnh số token. Effort chỉ áp khi model hỗ trợ mức đó; mức không hỗ trợ thì giữ mặc định.${ai.kiro?.model ? ` Phiên Kiro gần nhất chạy model <code>${esc(ai.kiro.model)}</code>.` : ""}</p>`;
+}
 
 async function pageSetup() {
   const s = await api("/api/setup");
@@ -1453,13 +1578,9 @@ async function pageSetup() {
   // connections that read code: the code host a project's repository is on
   const codeConns = (await api("/api/connections")).filter((a) => (a.capabilities || []).includes("code_read")).flatMap((a) => (a.connections || []).filter((x) => x.enabled).map((x) => [x.id, `${x.id} (${a.title || a.name})`]));
   teamOpts.conn = (sel) => `<option value="">— không gắn —</option>${codeConns.concat(sel && !codeConns.some(([v]) => v === sel) ? [[sel, `${sel} (không còn)`]] : []).map(([v, l]) => `<option value="${esc(v)}" ${v === sel ? "selected" : ""}>${esc(l)}</option>`).join("")}`;
-  const models = MODELS.some(([v]) => v === s.ai.model) ? MODELS : [[s.ai.model, s.ai.model], ...MODELS];
   sheet("Cài đặt", `
     <h3>AI</h3>
-    <div class="form">
-      <label>Model<select data-ai="model">${models.map(([v, l]) => `<option value="${esc(v)}" ${v === s.ai.model ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
-      <button class="btn primary" data-save-ai>Lưu</button>
-    </div>
+    ${aiForm(s.ai)}
 
     <h3>Repo / dự án</h3>
     <p class="hint">Thư mục repo trên máy này (để trống nếu repo chỉ nằm trên code host: office đọc qua kết nối). AI làm trên git worktree riêng cho mỗi việc, không sửa thẳng nhánh của bạn. Lệnh test/build để AI tự kiểm tra (để trống nếu chưa có).</p>
@@ -1510,7 +1631,7 @@ function projectForm(p, teamOpts) {
     <div class="form">
       <label>Tên<input data-pf="name" value="${esc(p.name)}" placeholder="vd. billing"></label>
       <label>Thư mục repo<input data-pf="path" value="${esc(p.path || "")}" placeholder="vd. F:/code/billing"></label>
-      <label>Team<select data-pf="team_id">${teamOpts(p.team_id)}</select></label>
+      ${(state.board.teams || []).length > 1 ? `<label>Team<select data-pf="team_id">${teamOpts(p.team_id)}</select></label>` : ""}
       <label>Kết nối code<select data-pf="code_connection" title="Code host chứa repo này: push, pull request và webhook đi qua kết nối này">${teamOpts.conn ? teamOpts.conn(p.code_connection || "") : ""}</select></label>
       <label>Repo trên code host<input data-pf="repo_url" value="${esc(p.repo_url || "")}" placeholder="ICONNECT/tcbs-bond-trading hoặc dán link"></label>
       <label>Nhánh chính<input data-pf="main_branch" value="${esc(p.main_branch || "")}" placeholder="vd. master, develop"></label>
@@ -1549,7 +1670,7 @@ function openTicket(key) {
 }
 
 document.addEventListener("click", (e) => {
-  const t = e.target.closest("button, a, [data-group]");
+  const t = e.target.closest("[data-close], button, a, [data-group]");
   if (!t) return;
   const ds = t.dataset;
   if (ds.open) { e.preventDefault(); $("#overlay").hidden = true; openTicket(ds.open); return; }
@@ -1587,6 +1708,19 @@ document.addEventListener("click", (e) => {
   if (ds.close) { e.stopPropagation(); state.open = state.open.filter((k) => k !== ds.close); if (state.focus === ds.close) state.focus = state.open[0] || null; save(); renderTabs(); renderPanes(); return; }
   if (ds.tab) { state.focus = ds.tab; save(); renderTabs(); renderSidebar(); renderPanes(); return; }
   if (ds.split !== undefined) { state.split = !state.split; save(); renderTabs(); renderPanes(); return; }
+  if (ds.chatHome !== undefined) { if (!$("#overlay").hidden) closeSheet(); state.focus = null; save(); renderTabs(); renderSidebar(); renderPanes(); return; }
+  if (ds.chatSend !== undefined) {
+    const box = $("[data-chat-input]");
+    const text = (box?.value || "").trim();
+    if (!text || !state.chat.conv) return;
+    return act(async () => {
+      const m = await api(`/api/conversations/${state.chat.conv.id}/messages`, { method: "POST", body: { body: text } });
+      box.value = "";
+      if (!state.chat.messages.some((x) => x.id === m.id)) state.chat.messages.push(m);
+      state.chat.thinking = true;
+      renderChat();
+    });
+  }
   if (ds.side) { state.side = state.side === ds.side ? "" : ds.side; save(); renderTabs(); renderSide(); return; }
   if (t.hasAttribute("data-group")) { t.classList.toggle("open"); return; }
   if (ds.closeSheet !== undefined) { closeSheet(); return; }
@@ -1598,10 +1732,21 @@ document.addEventListener("click", (e) => {
     await api(`/api/projects/${t.dataset.ruleDel}/permissions`, { method: "POST", body: { allow_rules: (proj.allow_rules || []).filter((r) => r !== t.dataset.rule) } });
     await pageSetup();
   });
-  if (ds.saveAi !== undefined) return act(async () => { await api("/api/setup/ai", { method: "POST", body: { model: $('[data-ai="model"]').value } }); toast("Đã lưu model"); });
+  if (ds.saveAi !== undefined) return act(async () => {
+    const other = $('[data-ai="kiro"]').value.trim();
+    const model = other ? `kiro:${other.replace(/^kiro:/, "")}` : $('[data-ai="model"]').value;
+    await api("/api/setup/ai", { method: "POST", body: { model, effort: $('[data-ai="effort"]').value } });
+    toast("Đã lưu model và effort");
+    await pageSetup();
+  });
+  if (ds.kiroModels !== undefined) return act(async () => {
+    const r = await api("/api/setup/ai/kiro-models", { method: "POST" });
+    toast(`Kiro có ${(r.models || []).length} model`);
+    await pageSetup();
+  });
   if (ds.saveProject) return act(async () => {
     const box = t.closest("[data-proj]");
-    const v = (n) => ($(`[data-pf="${n}"]`, box).value || "").trim();
+    const v = (n) => ($(`[data-pf="${n}"]`, box)?.value || "").trim();
     const timeouts = Object.fromEntries(Object.entries(kvParse(v("timeouts"))).map(([name, s]) => [name, Number(s)]));
     if (Object.values(timeouts).some((s) => !Number.isInteger(s) || s <= 0)) throw new Error("Timeout: mỗi dòng LỆNH=SỐ GIÂY, vd. test=1800");
     const build = { setup: v("setup"), timeouts, env: kvParse(v("env")) };
@@ -1668,6 +1813,22 @@ document.addEventListener("click", (e) => {
     const [relation, other] = ds.linkRm.split("|");
     return act(async () => { await api(`/api/tickets/${key}/links`, { method: "POST", body: { other, relation, remove: true } }); await refresh(key); });
   }
+  if (ds.pkCreate) return act(async () => {
+    const name = ($("[data-pk-new]")?.value || "").trim().toLowerCase();
+    if (!name) { toast("Đặt tên cho bộ chuẩn riêng", true); return; }
+    await api("/api/doc-pack", { method: "PUT", body: { name, base: ds.pkCreate } });
+    const own = JSON.parse($("[data-pack-box]").dataset.own || "{}");
+    await api("/api/doc-profile", { method: "PUT", body: { scope: ds.scope, pack: name, rules: own.rules || {} } });
+    toast(`Đã tạo bộ chuẩn ${name} cho lớp này`);
+    await pageStandard(ds.scope);
+  });
+  if (ds.pkSave) return act(async () => {
+    const pick = (attr) => Object.fromEntries([...document.querySelectorAll(`[${attr}]`)].map((el) => [el.getAttribute(attr), el.value]));
+    const reviews = Object.fromEntries(Object.entries(pick("data-pk-review")).map(([k, v]) => [k, v.split("\n")]));
+    const r = await api("/api/doc-pack", { method: "PUT", body: { name: ds.pkSave, templates: pick("data-pk-template"), instructions: pick("data-pk-instr"), reviews, yaml: $("[data-pk-yaml]")?.value } });
+    toast(`Đã lưu bộ chuẩn ${r.name}`);
+    await renderPackBox(r.name, $("[data-std-form]")?.dataset.scope || "office", JSON.parse($("[data-pack-box]").dataset.own || "{}"));
+  });
   if (ds.repoSync !== undefined) return act(async () => { const r = await api("/api/docs-repo/sync", { method: "POST" }); toast(r.error ? `Đồng bộ lỗi: ${r.error}` : `Đã đồng bộ (${r.commits.length} commit)`, !!r.error); await pageKb(); });
   if (ds.repoFile) return act(async () => {
     const f = await api(`/api/docs-repo/file?path=${encodeURIComponent(ds.repoFile)}&heading=${encodeURIComponent(ds.repoHeading || "")}`);
@@ -1762,7 +1923,7 @@ document.addEventListener("click", (e) => {
   }
   if (ds.revoke) return act(async () => { await api(`/api/grants/${ds.revoke}/revoke`, { method: "POST" }); renderSide(); });
   if (ds.createTask !== undefined) return act(async () => {
-    const f = (n) => ($(`[data-f="${n}"]`).value || "").trim();
+    const f = (n) => ($(`[data-f="${n}"]`)?.value || "").trim();
     const ticket = await api("/api/tasks", { method: "POST", body: { title: f("title"), description: f("description"), template: f("template"), team_id: f("team_id") || null, project_id: f("project_id") || null, owner_user_id: f("owner_user_id") || null, mode: f("mode") } });
     $("#overlay").hidden = true;
     await loadBoard();
@@ -1791,6 +1952,30 @@ document.addEventListener("click", (e) => {
     await api("/api/teams", { method: "POST", body: { name: v("name"), jira_project_key: v("jira_project_key") || null, confluence_space: v("confluence_space") || null } });
     await pagePeople();
     await loadBoard();
+  });
+  if (ds.uSave) return act(async () => {
+    const roles = [...document.querySelectorAll(`[data-u-role="${CSS.escape(ds.uSave)}"]`)].filter((x) => x.checked).map((x) => x.value);
+    const u = (await api("/api/people")).users.find((x) => x.id === ds.uSave);
+    await api(`/api/people/${ds.uSave}`, { method: "PUT", body: { name: u.name, email: u.email, telegram_id: u.telegram_id, roles, active: u.active } });
+    toast(`Đã lưu vai của ${u.name}`);
+    await pagePeople();
+  });
+  if (ds.teamSave) return act(async () => {
+    const box = $(`[data-team-form="${CSS.escape(ds.teamSave)}"]`);
+    const v = (n) => ($(`[data-t="${n}"]`, box)?.value || "").trim();
+    await api(`/api/teams/${ds.teamSave}`, { method: "PUT", body: { name: v("name"), jira_project_key: v("jira_project_key") || null, confluence_space: v("confluence_space") || null } });
+    toast("Đã lưu team");
+    await pagePeople();
+    await loadBoard();
+  });
+  if (ds.gateSave || ds.gateReset) return act(async () => {
+    const gate = ds.gateSave || ds.gateReset;
+    const row = $(`[data-gate-row="${CSS.escape(gate)}"]`);
+    const picked = (sel) => [...row.querySelectorAll(sel)].filter((x) => x.checked).map((x) => x.value);
+    const body = ds.gateReset ? { reset: true } : { roles: picked("[data-g-role]"), fallback: $("[data-g-fallback]", row).value || null, min: Number($("[data-g-min]", row).value || 1), submit_by: picked("[data-g-submit]") };
+    await api(`/api/gates/${encodeURIComponent(gate)}`, { method: "PUT", body });
+    toast(ds.gateReset ? "Đã về mặc định" : "Đã lưu: thẻ duyệt mới đi theo cách này");
+    await pagePeople();
   });
   if (ds.addMember) return act(async () => {
     const user = $(`[data-m-user="${CSS.escape(ds.addMember)}"]`).value;
@@ -1853,14 +2038,15 @@ document.addEventListener("change", (e) => {
 
 document.addEventListener("keydown", (e) => {
   // chat boxes: Enter sends, Shift+Enter is a new line (never while an input method is composing a word)
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.target.matches("[data-steer], [data-text]")) {
-    const send = e.target.matches("[data-steer]") ? $("[data-send]", e.target.closest("[data-pane]")) : $("[data-answer-text]", e.target.closest("[data-card]"));
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.target.matches("[data-steer], [data-text], [data-chat-input]")) {
+    const send = e.target.matches("[data-chat-input]") ? $("[data-chat-send]") : e.target.matches("[data-steer]") ? $("[data-send]", e.target.closest("[data-pane]")) : $("[data-answer-text]", e.target.closest("[data-card]"));
     if (send) { e.preventDefault(); send.click(); }
   }
   if (e.key === "Escape" && !$("#overlay").hidden) closeSheet();
 });
 
 async function refresh(key) {
+  if (key === CHAT) { await loadChat(); renderChat(); renderSidebar(); return; }
   await loadBoard();
   if (key && state.open.includes(key)) await loadTicket(key);
   renderPanes();
@@ -1892,6 +2078,23 @@ function connect() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/ws`);
   ws.onmessage = (msg) => {
     const { kind, data } = JSON.parse(msg.data);
+    const conv = state.chat.conv?.id;
+    if (conv && kind === "chat.message" && data.message?.conversation_id === conv) {
+      if (!state.chat.messages.some((x) => x.id === data.message.id)) state.chat.messages.push(data.message);
+      if (data.message.author_kind !== "user") state.chat.thinking = false;
+      renderChat();
+      return;
+    }
+    if (conv && (kind === "run.started" || kind === "run.finished") && data.run?.conversation_id === conv) {
+      state.chat.thinking = kind === "run.started";
+      if (kind === "run.finished") act(async () => { await loadChat(); renderChat(); });
+      else renderChat();
+      return;
+    }
+    if (conv && kind.startsWith("interaction.") && (data.interaction?.payload?.conversation_id === conv)) {
+      act(async () => { await loadChat(); renderChat(); renderSidebar(); });
+      return;
+    }
     if (kind === "run.event" && data.activity) {
       const key = state.runTicket[data.run_id];
       if (key) {

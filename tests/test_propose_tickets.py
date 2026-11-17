@@ -109,7 +109,7 @@ async def test_ac1_propose_from_ticket_session_and_replace_previous(office: Offi
         ([], "1..20"),
         ([ITEMS[2]] * 21, "1..20"),
         ([{"why": "x", "description": "y"}], "mục 1: thiếu trường title"),
-        ([ITEMS[0], {**ITEMS[2], "workflow": "research"}], "mục 2: trường workflow"),
+        ([ITEMS[0], {**ITEMS[2], "workflow": "deploy"}], "mục 2: trường workflow"),
         ([{**ITEMS[0], "project": "Không có"}], "mục 1: trường project"),
         ([{**ITEMS[0], "depends_on": [2]}, ITEMS[2]], "mục 1: trường depends_on"),
         ([{**ITEMS[0], "depends_on": ["AO-999"]}], "mục 1: trường depends_on: không có ticket AO-999"),

@@ -41,6 +41,7 @@ class SourceHub:
         self.office = office
 
     def scope(self, ticket: Ticket | None) -> Scope:
+        # no ticket: the office-wide connections only (the IDE server answers a person outside the team this way)
         return Scope(team_id=ticket.team_id, project_id=ticket.project_id, ticket_key=ticket.key) if ticket is not None else Scope()
 
     async def _sources(self, scope: Scope) -> list[tuple[ConnectionSpec, Any]]:

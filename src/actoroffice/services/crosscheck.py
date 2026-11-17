@@ -694,6 +694,7 @@ class CrossCheckService:
             cwd=cwd,
             system_prompt=part.system + language,
             model=office.settings.ai_model or office.settings.default_model,
+            effort=office.settings.ai_effort,
             tools=["Read", "Grep", "Glob"],
             internal_tools=[BoundTool(t, ToolCtx(office, ai, position, run_id, ticket_id=ticket.id, workspace=cwd)) for t in CODE_TOOLS],
             max_turns=25,

@@ -23,9 +23,17 @@ from actoroffice.store import Database, Tx
 
 from .wakes import WakeService
 
+# Arguments that say how a call is shown or waited for, not what it does: a retry of the same call that changes only
+# these is the call a person already decided on (the AI rewrites the description of a command each time it tries).
+PRESENTATION_ARGS = ("description", "timeout", "timeout_ms", "run_in_background")
+
 
 def input_hash(tool: str, args: dict[str, Any]) -> str:
-    return hashlib.sha256(json.dumps([tool, args], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    """What a one-time decision is bound to: the call, without its presentation; a command with its spaces evened out."""
+    what = {k: v for k, v in (args or {}).items() if k not in PRESENTATION_ARGS}
+    if tool in ("Bash", "PowerShell") and isinstance(what.get("command"), str):
+        what["command"] = " ".join(what["command"].split())
+    return hashlib.sha256(json.dumps([tool, what], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 class InteractionService:

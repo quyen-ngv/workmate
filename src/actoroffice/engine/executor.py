@@ -184,6 +184,7 @@ class Executor:
                 cwd=ws.path,
                 system_prompt=system,
                 model=model,
+                effort=office.settings.ai_effort,
                 tools=position.tools,
                 coding_preset=position.prompt_preset == "claude_code",
                 resume_session_id=resume,
@@ -427,8 +428,11 @@ class Executor:
                     language=office.settings.language,
                     skills=office.skills.for_actor(actor, position),
                     memories=await office.memory.context_for(actor, " ".join(m.body for m in history[-5:])),
-                ),
+                )
+                # the office AI's direct chat is the start screen of the team UI: requests become tickets there
+                + (context.COPILOT_CHAT_RULES_BLOCK if conv.kind.value == "dm" and actor.name == office.settings.ai_name else ""),
                 model=model,
+                effort=office.settings.ai_effort,
                 tools=["Read", "Glob", "Grep"],
                 coding_preset=False,  # chat never needs the coding preset: about half the base tokens
                 resume_session_id=resume,
@@ -836,6 +840,7 @@ def _add(usage: Usage, cost: float, result: TurnResult) -> tuple[Usage, float]:
             output_tokens=usage.output_tokens + u.output_tokens,
             cache_read_tokens=usage.cache_read_tokens + u.cache_read_tokens,
             cache_write_tokens=usage.cache_write_tokens + u.cache_write_tokens,
+            credits=round(usage.credits + u.credits, 4),
             model=u.model or usage.model,
         ),
         cost + result.cost_usd,

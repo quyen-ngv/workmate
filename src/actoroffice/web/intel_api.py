@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from actoroffice.app import Office
 from actoroffice.codeintel import services as service_map
+from actoroffice.doccore import PackError
 from actoroffice.domain.errors import OfficeError
 from actoroffice.ports.connection import ConnectionSpec, ConnectorError
 
@@ -34,6 +35,15 @@ class RemoteRepoBody(BaseModel):
     team: str = ""
     connection: str = ""  # a connection id; empty = the nearest one that reads code
     branch: str = ""  # empty = the repository's default branch
+
+
+class DocPackBody(BaseModel):
+    name: str  # the pack to change or create (never "default")
+    base: str | None = None  # when it is created: the pack it extends
+    templates: dict[str, str] = Field(default_factory=dict)  # document type → template text
+    instructions: dict[str, str] = Field(default_factory=dict)  # instruction block → text
+    reviews: dict[str, list[str]] = Field(default_factory=dict)  # review id → criteria
+    yaml: str | None = None  # the whole pack.yaml (advanced)
 
 
 class DocProfileBody(BaseModel):
@@ -66,6 +76,31 @@ def register(app: FastAPI, office: Office) -> None:
             return await office.docs.profile_view(body.scope)
         except OfficeError as exc:
             raise HTTPException(exc.code if exc.code in (400, 404) else 400, str(exc)) from exc
+
+    @app.get("/api/doc-pack")
+    async def doc_pack(name: str = "default") -> dict[str, Any]:
+        """A standard pack as people read it: templates, the AI's instructions, review criteria, rules, its pack.yaml."""
+        from actoroffice.services import packedit
+
+        try:
+            return packedit.view(name, office.settings.data_dir)
+        except PackError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.put("/api/doc-pack")
+    async def save_doc_pack(body: DocPackBody) -> dict[str, Any]:
+        """Create a pack of the unit's own (extending the one in use) or change it; refused, nothing changed, when the
+        result does not load."""
+        from actoroffice.services import packedit
+
+        try:
+            packedit.save(body.name.strip(), office.settings.data_dir, base=body.base, templates=body.templates,
+                          instructions=body.instructions, reviews=body.reviews, yaml_text=body.yaml)
+        except PackError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        await office.audit.record("doc:pack", "saved", target=body.name, detail={"templates": sorted(body.templates), "instructions": sorted(body.instructions), "yaml": body.yaml is not None})
+        office.bus.publish("doc.profile", scope="pack:" + body.name)
+        return packedit.view(body.name.strip(), office.settings.data_dir)
 
     # ---- connections -------------------------------------------------------------------------------------------
 

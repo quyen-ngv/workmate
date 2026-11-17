@@ -553,3 +553,11 @@ async def test_ac10_gate_denies_wait_loop_without_a_card(office, tmp_path):
     rows = await office.db.fetchall("SELECT outcome, detail_json FROM audit_log WHERE action = 'tool:Bash'")
     assert [r["outcome"] for r in rows] == ["denied"] and WAIT_LOOP_REASON[:40] in rows[0]["detail_json"]
     assert await office.interactions.pending() == [] and gate.asked == []
+
+
+def test_a_decision_is_bound_to_what_the_call_does_not_to_how_it_is_described() -> None:
+    first = input_hash("Bash", {"command": "mvn -q  dependency:tree", "description": "Xem cây phụ thuộc", "timeout": 120000})
+    retry = input_hash("Bash", {"command": "mvn -q dependency:tree", "description": "List the dependency tree"})
+    assert first == retry, "the AI re-describes a command when it retries it: the person already decided on it"
+    assert input_hash("Bash", {"command": "mvn -q dependency:tree -U"}) != retry
+    assert input_hash("Write", {"file_path": "a.py", "content": "x = 1"}) != input_hash("Write", {"file_path": "a.py", "content": "x = 2"})

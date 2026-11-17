@@ -153,6 +153,8 @@ class Office:
         default = await self.projects.ensure_default()
         self.chat.default_project_id = default.id
         await self.teams.ensure_local_owner()
+        self.tickets.default_team = self.teams.default_team_id  # one team: a ticket that names none is its
+        await self.teams.adopt_orphans()
         await self.docs.load_profiles()
         await self.connections.migrate_legacy_once()  # the Jira / Bitbucket files from before connections, once
 

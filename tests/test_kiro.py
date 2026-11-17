@@ -156,3 +156,30 @@ async def test_the_first_prompt_waits_until_the_agent_listed_the_office_tools(wo
     server.listed.set()  # what the `list` request of the agent's MCP shim does
     assert await server.wait_listed(0.05) is True
     assert KiroAcpRuntime(command=AGENT).mcp_ready_s == 0 and KiroAcpRuntime().mcp_ready_s > 0
+
+
+async def test_the_model_and_effort_asked_for_are_set_to_what_the_session_offers_and_credits_are_read(workspace: Path):
+    spec = spec_for(workspace, "Làm AO-1", comments=[], model="kiro:claude-opus-4.6")
+    spec.effort = "max"
+    result = await KiroAcpRuntime(command=AGENT).run_turn(spec, Gate(workspace), _ignore)
+    log = json.loads((workspace / "agent_log.json").read_text(encoding="utf-8"))
+    assert log["model"] == "claude-opus-4.6" and log["effort"] == "max" and log["set"] == [["effortLevel", "max"]], "the model went in _meta; the effort is set after"
+    assert result.usage.credits == pytest.approx(0.42) and result.usage.input_tokens == 1200 and result.usage.cache_read_tokens == 800
+    assert result.usage.model == "kiro:claude-opus-4.6"
+    offered = KiroAcpRuntime.options()
+    assert [m["value"] for m in offered["models"]] == ["auto", "claude-sonnet-4.6", "claude-opus-4.6"] and [e["value"] for e in offered["efforts"]] == ["low", "medium", "high", "max"]
+
+    # an effort the model does not offer is left alone: the turn still runs
+    spec = spec_for(workspace, "Làm AO-1", comments=[], model="kiro:claude-sonnet-4.6")
+    spec.effort = "xhigh"
+    result = await KiroAcpRuntime(command=AGENT).run_turn(spec, Gate(workspace), _ignore)
+    log = json.loads((workspace / "agent_log.json").read_text(encoding="utf-8"))
+    assert result.status == TurnStatus.COMPLETED and log["set"] == [] and log["effort"] == "high"
+
+
+def test_credits_are_found_wherever_a_report_puts_them():
+    assert kiro_acp.credits_in({"credits": 8.5, "contextUsagePercentage": 12.3}) == 8.5
+    assert kiro_acp.credits_in({"promptTurnSummaries": [{"usage": {"value": 1.5, "unit": "Credit"}}, {"usage": {"amount": 0.5, "unitPlural": "credits"}}]}) == 2.0
+    assert kiro_acp.credits_in({"elapsed": 12, "status": "ok"}) == 0.0
+    v2 = kiro_acp.advertised({"models": {"availableModels": [{"modelId": "claude-sonnet-4.5", "name": "Sonnet"}], "currentModelId": "claude-sonnet-4.5"}})
+    assert v2["models"] == [{"value": "claude-sonnet-4.5", "name": "Sonnet"}] and v2["model"] == "claude-sonnet-4.5" and "model_config" not in v2

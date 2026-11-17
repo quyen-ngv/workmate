@@ -33,6 +33,7 @@ class Settings(BaseModel):
     # Team copilot
     ai_name: str = "Copilot"  # the single AI engineer every team works with
     ai_model: str | None = None  # None = default_model; "kiro" / "kiro:<id>" runs it on Kiro CLI
+    ai_effort: str | None = None  # low | medium | high | xhigh | max (how hard the model thinks); None = its default
     jira_poll_s: float = 60  # Jira mirror interval in seconds (0 = off)
     stall_after_s: float = 900  # watchdog: a run with no event for this long is stalled (stages not listed below)
     stall_after_s_by_stage: dict[str, float] = {"understand": 600, "build": 900}

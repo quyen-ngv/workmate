@@ -191,6 +191,7 @@ class ClaudeSdkRuntime:
             max_buffer_size=MAX_MESSAGE_BYTES,  # a big file read or tool result must not kill the run
             # The model decides when to think; "summarized" returns readable thinking so the user can follow it.
             thinking={"type": "adaptive", "display": "summarized"} if spec.show_thinking else None,
+            effort=spec.effort or None,  # type: ignore[arg-type]  # how deep the model thinks; None = its default
             # The CLI then gives the model a StructuredOutput tool and returns its input as ResultMessage.structured_output.
             output_format={"type": "json_schema", "schema": spec.output_schema} if spec.output_schema else None,
             cli_path=self.cli_path,

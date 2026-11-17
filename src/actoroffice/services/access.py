@@ -240,7 +240,9 @@ class AccessService:
         ttl = max(0.25, min(float(ttl_h or 4), MAX_TTL_H))
         from actoroffice.domain.stage import GatePolicy
 
-        approvers = await office.teams.approvers(ticket, GatePolicy(roles=APPROVER_ROLES))
+        policy = await office.teams.gate_policy(ticket, "env_access")
+        roles = policy.roles or APPROVER_ROLES
+        approvers = await office.teams.approvers(ticket, GatePolicy(roles=roles, fallback=policy.fallback))
         return await office.interactions.create(
             InteractionKind.ENV_ACCESS,
             {
@@ -253,8 +255,8 @@ class AccessService:
                 "level_label": LEVEL_VI[wanted],
                 "ttl_h": ttl,
                 "reason": reason.strip()[:600],
-                "roles": APPROVER_ROLES,
-                "roles_label": "Dev / Lead",
+                "roles": roles,
+                "roles_label": " / ".join(r.upper() if r in ("ba", "qe") else r.title() for r in roles),
                 "approver_ids": [u.id for u in approvers],
                 "approver_names": [u.name for u in approvers],
                 "stage": ticket.stage,
@@ -267,8 +269,9 @@ class AccessService:
     async def answer(self, item: Interaction, response: dict[str, Any], *, by: str) -> Interaction:
         office = self.office
         ticket = await office.tickets.get(item.ticket_id or 0)
-        if by != LOCAL_OWNER_ID and not await office.teams.can_act(by, ticket, APPROVER_ROLES):
-            raise PolicyDenied("Cần vai Dev hoặc Lead để cấp quyền môi trường")
+        roles = (await office.teams.gate_policy(ticket, "env_access")).roles or APPROVER_ROLES
+        if by != LOCAL_OWNER_ID and not await office.teams.can_act(by, ticket, roles):
+            raise PolicyDenied(f"Cần vai {', '.join(roles)} để cấp quyền môi trường")
         approved = bool(response.get("approved"))
         if approved:
             grant = await self.grant(ticket.id, item.payload["resource_id"], item.payload["level"], float(item.payload["ttl_h"]), by=by, reason=item.payload.get("reason", ""))

@@ -113,9 +113,16 @@ def prompt(params: dict, sessions: dict) -> dict:
 
     update(session, {"sessionUpdate": "usage_update", "used": 1000, "size": 200000, "cost": {"amount": 0.0125, "currency": "USD"}})
     update(session, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": f"Xong: {out}"}})
+    # like Kiro v3: the turn's metering, one entry per request of the turn
+    update(session, {"sessionUpdate": "session_info_update", "_meta": {"kiro": {"kind": "turn_completion", "promptTurnSummaries": [
+        {"meteringUsage": [{"value": 0.25, "unit": "credit", "unitPlural": "credits"}]},
+        {"meteringUsage": [{"value": 0.17, "unit": "credit", "unitPlural": "credits"}]},
+    ]}}})
+    update(session, {"sessionUpdate": "session_info_update", "_meta": {"kiro": {"kind": "context_usage", "usagePercentage": 12.5}}})
     with open(cwd + sep + "agent_log.json", "w", encoding="utf-8") as f:
-        json.dump({"outside_error": "error" in outside, "tools": state["tools"], "called": called, "first_prompt": text[:200], "shell": state.get("shell")}, f, ensure_ascii=False)
-    return {"stopReason": "end_turn"}
+        json.dump({"outside_error": "error" in outside, "tools": state["tools"], "called": called, "first_prompt": text[:200], "shell": state.get("shell"),
+                   "model": state.get("model"), "effort": state.get("effort"), "set": state.get("set", [])}, f, ensure_ascii=False)
+    return {"stopReason": "end_turn", "usage": {"inputTokens": 1200, "outputTokens": 340, "totalTokens": 1540, "cachedReadTokens": 800}}
 
 
 def main() -> None:
@@ -137,7 +144,19 @@ def main() -> None:
                 send({"jsonrpc": "2.0", "id": message["id"], "error": shell["error"]})
                 continue
             sessions[sid]["shell"] = shell["result"]["shellType"]
-            result = {"sessionId": sid}
+            sessions[sid]["effort"] = "high"
+            # like Kiro v3: what the session can be set to
+            result = {"sessionId": sid, "configOptions": [
+                {"id": "model", "name": "Model", "type": "select", "currentValue": sessions[sid]["model"] or "auto",
+                 "options": [{"value": "auto", "name": "Auto"}, {"value": "claude-sonnet-4.6", "name": "Claude Sonnet 4.6"}, {"value": "claude-opus-4.6", "name": "Claude Opus 4.6"}]},
+                {"id": "effortLevel", "name": "Effort", "type": "select", "currentValue": "high",
+                 "options": [{"value": "low", "name": "Low"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}, {"value": "max", "name": "Max"}]},
+            ]}
+        elif method == "session/set_config_option":
+            state = sessions[params["sessionId"]]
+            state.setdefault("set", []).append([params["configId"], params["value"]])
+            state["model" if params["configId"] == "model" else "effort"] = params["value"]
+            result = {"configOptions": []}
         elif method == "session/load":
             sessions[params["sessionId"]] = {"cwd": params["cwd"], "mcp": params["mcpServers"], "outside": params["cwd"] + "/../outside.txt"}
             update(params["sessionId"], {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "OLD"}, "_meta": {"kiro": {"replay": True}}})

@@ -665,7 +665,8 @@ async def kb_search(args: dict[str, Any], ctx: ToolCtx) -> str:
     office = ctx.office
     ticket = await office.tickets.get(ctx.ticket_id) if ctx.ticket_id else None
     kinds = [str(k) for k in args.get("kinds") or []] or None
-    items = await office.knowledge.search(str(args.get("query") or ""), team_id=ticket.team_id if ticket else None, kinds=kinds, limit=min(int(args.get("limit") or 10), 25))
+    team_id = await office.teams.team_of(ticket)  # one team: a chat reads the team's knowledge too
+    items = await office.knowledge.search(str(args.get("query") or ""), team_id=team_id, kinds=kinds, limit=min(int(args.get("limit") or 10), 25))
     if not items:
         return "Nothing in the knowledge base."
     out = []
@@ -695,7 +696,7 @@ async def kb_note(args: dict[str, Any], ctx: ToolCtx) -> str:
             title=str(args.get("title") or ""),
             content=str(args.get("content") or ""),
             by=ctx.actor.name,
-            team_id=ticket.team_id if ticket else None,
+            team_id=await office.teams.team_of(ticket),
             project_id=ticket.project_id if ticket else None,
             ticket_id=ticket.id if ticket else None,
             sources=[str(s) for s in args.get("sources") or []],

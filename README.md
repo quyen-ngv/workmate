@@ -67,7 +67,15 @@ uv run actoroffice serve                                  # web: /team (herdr-li
 - Permissions per repo (Settings): **read-only** (every change asks), **workspace** (default: edits, read-only
   commands, local git and the repo's test/build commands run; the network, other folders and unknown programs
   ask), **folder** (anything whose paths stay in the code folder runs, any program included) or **full**. "Always allow" on an approval card is remembered for that repo, by command prefix.
-- Runtime per team: Claude (default) or Kiro CLI (`ai_model: kiro` in config.yaml or the team settings).
+- Runtime per team: Claude (default) or Kiro CLI (`ai_model: kiro` in config.yaml or the team settings). Settings › AI
+  picks the model (`kiro:<model id>`: the list comes from a Kiro session or `kiro-cli chat --list-models`) and the
+  effort (`ai_effort: low | medium | high | xhigh | max`), applied only where the model offers it. Kiro's credits per
+  turn show next to the tokens.
+- The team UI opens on a chat with the office AI: people say what they need, the AI asks what is missing, proposes
+  tickets with the workflow that fits (epic, code, quick, research, doc, automation) on one card to approve, and puts
+  buttons to the page where something must be set up (repository, connections, rules, knowledge, document standard).
+- Settings › Chuẩn tài liệu shows the pack in use (templates, the AI's writing instructions, review criteria) and
+  edits a pack of the unit's own that extends it (`<data_dir>/packs/<name>/`, only what differs is written).
 - Documents repository: `docs_repo: docs` in config.yaml keeps every epic, story, document and knowledge item as a
   Markdown file in a git folder (`epics/<KEY>-<name>/stories/<KEY>-<name>/design.md`, `knowledge/…`), within seconds of
   a change, committed when the office goes quiet. Edits made there (an editor, Kiro, a pushed commit) come back as new

@@ -43,6 +43,7 @@ class TurnSpec:
     system_prompt: str
     model: str
     tools: list[str]
+    effort: str | None = None  # low | medium | high | xhigh | max; None = the model's default
     coding_preset: bool = False
     resume_session_id: str | None = None
     internal_tools: list[BoundTool] = field(default_factory=list)

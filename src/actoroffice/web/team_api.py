@@ -19,8 +19,18 @@ from actoroffice.domain.errors import NotFound, OfficeError
 from actoroffice.domain.stage import TEMPLATE_TITLES, default_templates
 from actoroffice.domain.team import LOCAL_OWNER_ID, MCP_DEFAULT_ALLOWED, TeamSettings
 from actoroffice.domain.work import TicketStatus
+from actoroffice.runtimes import kiro_acp
+from actoroffice.runtimes.kiro_acp import KiroAcpRuntime
 from actoroffice.services.docflow import pack_templates
 from actoroffice.services.stages import stage_title
+
+
+class GateBody(BaseModel):
+    roles: list[str] = Field(default_factory=list)
+    fallback: str | None = "owner"  # "owner" = the person who asked for the ticket; None = nobody
+    min: int = 1
+    submit_by: list[str] = Field(default_factory=list)
+    reset: bool = False  # back to the default
 
 
 class LinkBody(BaseModel):
@@ -197,6 +207,25 @@ def register(app: FastAPI, office: Office) -> None:
     async def edit_person(user_id: str, body: PersonBody) -> dict[str, Any]:
         user = await teams.update_user(user_id, name=body.name, roles=body.roles, telegram_id=body.telegram_id, email=body.email, active=body.active)
         return user.model_dump()
+
+    @app.get("/api/gates")
+    async def gates() -> list[dict[str, Any]]:
+        """Who approves each step, for the team: the default, or what the team set."""
+        from actoroffice.domain.stage import GATE_TITLES
+
+        return [
+            {"gate": name, "title": GATE_TITLES.get(name, name), "custom": custom, **policy.model_dump(include={"roles", "fallback", "min", "submit_by", "external"})}
+            for name, (policy, custom) in (await teams.gate_policies()).items()
+        ]
+
+    @app.put("/api/gates/{gate}")
+    async def set_gate(gate: str, body: GateBody) -> list[dict[str, Any]]:
+        from actoroffice.domain.stage import GatePolicy
+
+        policy = None if body.reset else GatePolicy(roles=body.roles, fallback=body.fallback or None, min=max(1, body.min), submit_by=body.submit_by)
+        await teams.set_gate(gate, policy)
+        await office.audit.record("team:gate", "reset" if body.reset else "set", target=gate, detail=body.model_dump())
+        return await gates()
 
     @app.post("/api/teams")
     async def add_team(body: TeamBody) -> dict[str, Any]:
@@ -643,6 +672,20 @@ def register_rules(app: FastAPI, office: Office) -> None:
         office.docrepo.touch(ticket.id)
         return await office.links.view(ticket)
 
+    @app.get("/api/copilot")
+    async def copilot_chat(after: int = 0) -> dict[str, Any]:
+        """The start screen: the direct chat with the office AI (created on first visit), its messages, and the cards
+        it opened in this chat (ticket proposals, questions) that wait for an answer."""
+        ai = await office.ensure_ai()
+        conv = await office.chat.dm(ai.id)
+        pending = [i.model_dump() for i in await office.interactions.pending() if i.payload.get("conversation_id") == conv.id]
+        running = await office.db.fetchone("SELECT id FROM runs WHERE conversation_id = ? AND status = 'running' LIMIT 1", (conv.id,))
+        return {
+            "conversation": conv.model_dump(), "ai": {"id": ai.id, "name": ai.name},
+            "messages": [m.model_dump() for m in await office.chat.messages(conv.id, after_id=after, limit=200)],
+            "pending": pending, "thinking": running is not None,
+        }
+
     @app.get("/api/docs-repo")
     async def docs_repo() -> dict[str, Any]:
         return await office.docrepo.status()
@@ -735,6 +778,10 @@ class OneAtATimeBody(BaseModel):
 
 class AiBody(BaseModel):
     model: str
+    effort: str | None = None  # "" = the model's default
+
+
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def _argv(text: str) -> list[str] | list[list[str]] | None:
@@ -858,7 +905,10 @@ def register_setup(app: FastAPI, office: Office) -> None:
         ]
         projects = [p for p in await office.projects.list() if not p.is_default]
         return {
-            "ai": {"name": office.settings.ai_name, "model": office.settings.ai_model or office.settings.default_model},
+            "ai": {
+                "name": office.settings.ai_name, "model": office.settings.ai_model or office.settings.default_model,
+                "effort": office.settings.ai_effort or "", "efforts": list(EFFORTS), "kiro": KiroAcpRuntime.options(),
+            },
             "projects": [
                 {**p.model_dump(), "test": _cmd(p.profile, "test"), "build": _cmd(p.profile, "build"), "lint": _cmd(p.profile, "lint"), "setup": _cmd(p.profile, "setup"), **_ui_fields(p.profile)}
                 for p in projects
@@ -1017,9 +1067,55 @@ def register_setup(app: FastAPI, office: Office) -> None:
         model = body.model.strip()
         if not model:
             raise HTTPException(422, "Chọn model")
-        office.settings.ai_model = model
+        effort = (body.effort or "").strip() or None
+        if effort and effort not in EFFORTS:
+            raise HTTPException(422, f"Effort: {', '.join(EFFORTS)}")
+        office.settings.ai_model, office.settings.ai_effort = model, effort
         path = office.settings.config_path
         data = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.exists() else {}
-        data["ai_model"] = model
+        data["ai_model"], data["ai_effort"] = model, effort
         path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
-        return {"ok": True, "model": model}
+        return {"ok": True, "model": model, "effort": effort}
+
+    @app.post("/api/setup/ai/kiro-models")
+    async def kiro_models() -> dict[str, Any]:
+        """Ask Kiro CLI which models this account may use (`kiro-cli chat --list-models --format json`). What a Kiro
+        session advertised is kept as well; the settings page offers both."""
+        found = await list_kiro_models(office.settings.kiro_cli_path)
+        if found:
+            kiro_acp.ADVERTISED["models"] = found
+        return KiroAcpRuntime.options()
+
+
+async def list_kiro_models(cli_path: str | None) -> list[dict[str, str]]:
+    """The models `kiro-cli chat --list-models` names: [{"value", "name"}]. The JSON shape is not documented, so any list
+    of strings or of objects with an id is taken; plain text falls back to one model id per line."""
+    import asyncio
+    import json as _json
+
+    exe = cli_path or kiro_acp.find_kiro_cli()
+    if not exe:
+        raise HTTPException(409, "Không tìm thấy kiro-cli trên máy chạy office (đặt kiro_cli_path trong config.yaml).")
+    try:
+        proc = await asyncio.create_subprocess_exec(exe, "chat", "--list-models", "--format", "json", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await asyncio.wait_for(proc.communicate(), 60)
+    except (OSError, TimeoutError) as exc:
+        raise HTTPException(502, f"kiro-cli không trả lời: {exc}") from exc
+    text = out.decode("utf-8", "replace").strip()
+    if proc.returncode != 0 and not text:
+        raise HTTPException(502, f"kiro-cli lỗi: {kiro_acp.stderr_summary(err.decode('utf-8', 'replace'))[:400]}")
+    try:
+        data: Any = _json.loads(text)
+    except ValueError:
+        data = [line.strip().split()[0] for line in text.splitlines() if line.strip() and not line.strip().startswith(("#", "-", "*"))]
+    if isinstance(data, dict):
+        data = next((v for k, v in data.items() if isinstance(v, list) and "model" in k.lower()), next((v for v in data.values() if isinstance(v, list)), []))
+    found: list[dict[str, str]] = []
+    for entry in data if isinstance(data, list) else []:
+        if isinstance(entry, str):
+            found.append({"value": entry, "name": entry})
+        elif isinstance(entry, dict):
+            value = next((entry[k] for k in ("model_id", "modelId", "id", "model", "name") if entry.get(k)), None)
+            if value:
+                found.append({"value": str(value), "name": str(entry.get("name") or entry.get("model_name") or value)})
+    return found

@@ -14,7 +14,14 @@ is cancelled and the ticket waits (DEFERRED); when the user approves, the actor 
 which the stored approval then lets through.
 
 ACP has no system prompt: the office instructions open the first message of each new session.
-Model: an actor whose model is "kiro" uses Kiro's default; "kiro:<model id>" picks one (`_meta.kiro.modelId`).
+Model and effort: an actor whose model is "kiro" uses Kiro's default; "kiro:<model id>" picks one. The model id goes
+in `_meta.kiro.modelId` of `session/new`; then, from what the session advertises (engine v3: `configOptions` with ids
+`model` and `effortLevel`; v2: `models.availableModels`), the office sets the model and the effort it was asked for with
+`session/set_config_option` (v3) or `session/set_model` (v2), and only to a value that is advertised. What a session
+advertised is kept (`KiroAcpRuntime.options()`): the settings page offers those models and effort levels.
+
+Usage: Kiro meters in credits. They are read from `session_info_update` (`_meta.kiro.kind = "turn_completion"`, v3),
+`_kiro.dev/metadata` (`credits`, v2) and a standard `usage_update` cost; tokens from `PromptResponse.usage` when given.
 """
 
 from __future__ import annotations
@@ -38,6 +45,10 @@ from .base import EventSink, GateDecision, RuntimeCaps, ToolGate, TurnSpec
 from .office_mcp import SERVER_NAME, ToolServer
 
 log = logging.getLogger(__name__)
+
+# What the last session advertised, for the settings page: {"models": [{"value", "name"}], "efforts": [...], "model": current}
+ADVERTISED: dict[str, Any] = {}
+EFFORT_IDS = ("effortLevel", "effort", "effort_level")
 
 MAX_LINE = 32 * 1024 * 1024
 TERMINAL_OUTPUT = 256 * 1024
@@ -94,6 +105,11 @@ class KiroAcpRuntime:
         # the office tools. So the first prompt waits until Kiro has asked the office server for its tools.
         self.mcp_ready_s = mcp_ready_s if mcp_ready_s is not None else (0.0 if command else MCP_READY_S)
         self._turns: dict[str, _Turn] = {}
+
+    @staticmethod
+    def options() -> dict[str, Any]:
+        """The models and effort levels the last Kiro session advertised ({} before any session ran)."""
+        return dict(ADVERTISED)
 
     def _argv(self) -> list[str] | None:
         if self.command:
@@ -237,6 +253,11 @@ class _Turn:
         self._text = ""
         self._thought = ""
         self.cost = 0.0
+        self.credits = 0.0  # this turn's, from turn_completion
+        self.meta_credits = 0.0  # from _kiro.dev/metadata (v2): the latest value of the turn
+        self.tokens: dict[str, int] = {}
+        self.model = ""
+        self.extensions = {"_kiro.dev/metadata", "_kiro/metadata"}  # notifications that carry usage
         self.deferred: DeferredTool | None = None
         self.approved_commands: set[str] = set()
         self.terminals: dict[str, _Terminal] = {}
@@ -306,10 +327,11 @@ class _Turn:
         mcp += [acp_mcp_entry(name, cfg) for name, cfg in spec.mcp_servers.items()]
         common = {"cwd": str(spec.cwd), "mcpServers": mcp, "additionalDirectories": [str(d) for d in spec.add_dirs]}
         fresh = True
+        session: Any = None
         if spec.resume_session_id and can_load:
             self.loading = True
             try:
-                await self.conn.request("session/load", {**common, "sessionId": spec.resume_session_id})
+                session = await self.conn.request("session/load", {**common, "sessionId": spec.resume_session_id})
                 self.session_id, fresh = spec.resume_session_id, False
             except AcpError:
                 log.warning("kiro: could not load session %s; starting a new one", spec.resume_session_id)
@@ -318,8 +340,9 @@ class _Turn:
         if fresh:
             model = spec.model.split(":", 1)[1] if spec.model.startswith("kiro:") else ""
             meta = {"_meta": {"kiro": {"modelId": model}}} if model else {}
-            created = await self.conn.request("session/new", {**common, **meta})
-            self.session_id = str(created["sessionId"])
+            session = await self.conn.request("session/new", {**common, **meta})
+            self.session_id = str(session["sessionId"])
+        await self._configure(session)
         if self.tools is not None and self.mcp_ready_s > 0:
             if await self.tools.wait_listed(self.mcp_ready_s):
                 await asyncio.sleep(MCP_SETTLE_S)  # Kiro registers the tools just after it received the list
@@ -328,6 +351,8 @@ class _Turn:
         text =f"<office_instructions>\n{spec.system_prompt}\n</office_instructions>\n\n{spec.prompt}" if fresh else spec.prompt
         reply = await self.conn.request("session/prompt", {"sessionId": self.session_id, "prompt": [{"type": "text", "text": text}]})
         await self._flush()
+        self._read_usage((reply or {}).get("usage"))
+        self.credits = self.credits or credits_in((reply or {}).get("_meta"))
         reason = str((reply or {}).get("stopReason", "end_turn"))
         status = STOP.get(reason, TurnStatus.COMPLETED)
         if self.deferred is not None or (self.tools is not None and self.tools.deferred is not None):
@@ -339,11 +364,61 @@ class _Turn:
             status=status,
             session_id=self.session_id,
             text="\n\n".join(self.texts).strip(),
-            usage=Usage(),  # Kiro reports credits, not tokens
+            usage=Usage(
+                input_tokens=self.tokens.get("input", 0), output_tokens=self.tokens.get("output", 0),
+                cache_read_tokens=self.tokens.get("cache_read", 0), cache_write_tokens=self.tokens.get("cache_write", 0),
+                credits=round(self.credits or self.meta_credits, 4), model=f"kiro:{self.model}" if self.model else "",
+            ),
             cost_usd=self.cost,
             deferred=self.deferred,
             error="Kiro từ chối trả lời yêu cầu này" if reason == "refusal" else None,
         )
+
+    # ---- model, effort, usage ---------------------------------------------------------------------
+
+    async def _configure(self, session: Any) -> None:
+        """Set the model and the effort asked for, to values the session advertised. Never fails the turn: a value
+        that is not offered is left at Kiro's default, with a note in the log."""
+        assert self.conn is not None
+        offered = advertised(session)
+        if offered.get("models") or offered.get("efforts"):
+            ADVERTISED.clear()
+            ADVERTISED.update(offered)
+        self.model = str(offered.get("model") or "")
+        want_model = self.spec.model.split(":", 1)[1] if self.spec.model.startswith("kiro:") else ""
+        values = {m["value"] for m in offered.get("models") or []}
+        if want_model and want_model != self.model:
+            if want_model not in values:
+                log.warning("kiro: model %s is not offered by this session (%s); keeping %s", want_model, ", ".join(sorted(values)) or "none listed", self.model or "the default")
+            else:
+                try:
+                    if offered.get("model_config"):
+                        await self.conn.request("session/set_config_option", {"sessionId": self.session_id, "configId": offered["model_config"], "value": want_model})
+                    else:
+                        await self.conn.request("session/set_model", {"sessionId": self.session_id, "modelId": want_model})
+                    self.model = want_model
+                except AcpError as exc:
+                    log.warning("kiro: could not switch to model %s: %s", want_model, exc)
+        effort = (self.spec.effort or "").strip()
+        if effort and effort != offered.get("effort"):
+            levels = {e["value"] for e in offered.get("efforts") or []}
+            if offered.get("effort_config") and effort in levels:
+                try:
+                    await self.conn.request("session/set_config_option", {"sessionId": self.session_id, "configId": offered["effort_config"], "value": effort})
+                except AcpError as exc:
+                    log.warning("kiro: could not set effort %s: %s", effort, exc)
+            else:
+                log.warning("kiro: effort %s is not offered for this model (%s)", effort, ", ".join(sorted(levels)) or "none listed")
+
+    def _read_usage(self, usage: Any) -> None:
+        """ACP `PromptResponse.usage` (inputTokens, outputTokens, cachedReadTokens, cachedWriteTokens), when given."""
+        if not isinstance(usage, dict):
+            return
+        for key, names in (("input", ("inputTokens", "input_tokens")), ("output", ("outputTokens", "output_tokens")),
+                           ("cache_read", ("cachedReadTokens", "cacheReadTokens")), ("cache_write", ("cachedWriteTokens", "cacheWriteTokens"))):
+            value = next((usage[n] for n in names if isinstance(usage.get(n), int | float)), None)
+            if value is not None:
+                self.tokens[key] = int(value)
 
     async def cancel(self) -> None:
         if self.conn is not None and self.session_id:
@@ -379,7 +454,14 @@ class _Turn:
     # ---- streamed updates ------------------------------------------------------------------------
 
     async def on_notification(self, method: str, params: dict[str, Any]) -> None:
-        if method != "session/update" or self.loading:
+        if self.loading:
+            return
+        if method in self.extensions:  # v2: {"credits": 8.5, "contextUsagePercentage": 12.3}
+            found = credits_in(params)
+            if found:
+                self.meta_credits = found
+            return
+        if method != "session/update":
             return
         update = params.get("update") or {}
         kind = update.get("sessionUpdate")
@@ -400,6 +482,13 @@ class _Turn:
             await self._flush()
             todos = [{"content": e.get("content", ""), "status": e.get("status", "pending")} for e in update.get("entries") or []]
             await self.sink("tool_use", {"tool": "TodoWrite", "input": {"todos": todos}, "id": None})
+        elif kind == "session_info_update":
+            info = (update.get("_meta") or {}).get("kiro") or {}
+            if info.get("kind") == "turn_completion":
+                self.credits += credits_in({k: v for k, v in {**update, **info}.items() if k != "_meta"})
+        elif kind == "config_option_update":
+            offered = advertised(update)
+            self.model = str(offered.get("model") or self.model)
         elif kind == "usage_update":
             cost = update.get("cost") or {}
             if str(cost.get("currency", "USD")).upper() == "USD" and cost.get("amount") is not None:
@@ -666,3 +755,68 @@ def _kill(proc: asyncio.subprocess.Process) -> None:
     if proc.returncode is not None:
         return
     kill_tree(proc.pid)
+
+
+# ---- what a session advertises, what a report charges -------------------------------------------------------------
+
+
+def _choices(option: dict[str, Any]) -> list[dict[str, str]]:
+    """The values of an ACP select option, groups flattened: [{"value", "name"}]."""
+    out: list[dict[str, str]] = []
+    for entry in option.get("options") or []:
+        if not isinstance(entry, dict):
+            continue
+        if isinstance(entry.get("options"), list):  # a group
+            out += _choices(entry)
+            continue
+        value = entry.get("value", entry.get("id"))
+        if value is not None:
+            out.append({"value": str(value), "name": str(entry.get("name") or value)})
+    return out
+
+
+def advertised(session: Any) -> dict[str, Any]:
+    """The models and effort levels a `session/new` / `session/load` result (or a `config_option_update`) offers.
+    v3: `configOptions` [{id, currentValue, options}]; v2: `models` {availableModels [{modelId, name}], currentModelId}."""
+    out: dict[str, Any] = {}
+    if not isinstance(session, dict):
+        return out
+    options = session.get("configOptions") or session.get("configOption") or []
+    for option in [options] if isinstance(options, dict) else options:
+        if not isinstance(option, dict):
+            continue
+        cid = str(option.get("id") or option.get("configId") or "")
+        current = option.get("currentValue", option.get("value"))
+        if cid == "model" or (option.get("category") == "model"):
+            out.update(model_config=cid, models=_choices(option) or out.get("models", []), model=current)
+        elif cid in EFFORT_IDS or option.get("category") in ("effort", "thought_level"):
+            out.update(effort_config=cid, efforts=_choices(option), effort=current)
+    models = session.get("models")
+    if isinstance(models, dict) and not out.get("models"):
+        out["models"] = [
+            {"value": str(m.get("modelId") or m.get("id")), "name": str(m.get("name") or m.get("modelId") or m.get("id"))}
+            for m in models.get("availableModels") or [] if isinstance(m, dict) and (m.get("modelId") or m.get("id"))
+        ]
+        out["model"] = models.get("currentModelId") or out.get("model")
+    return out
+
+
+def credits_in(value: Any) -> float:
+    """Credits named anywhere in a usage report: a number under a key that says credit, or a {value|amount, unit} whose
+    unit is credits. Summed over lists (one entry per request of the turn)."""
+    if isinstance(value, list):
+        return sum(credits_in(v) for v in value)
+    if not isinstance(value, dict):
+        return 0.0
+    unit = str(value.get("unit") or value.get("unitPlural") or value.get("currency") or "").lower()
+    if "credit" in unit:
+        amount = next((value[k] for k in ("value", "amount", "usage", "quantity") if isinstance(value.get(k), int | float)), None)
+        if amount is not None:
+            return float(amount)
+    total = 0.0
+    for key, item in value.items():
+        if isinstance(item, int | float) and not isinstance(item, bool) and "credit" in key.lower():
+            total += float(item)
+        elif isinstance(item, dict | list):
+            total += credits_in(item)
+    return total

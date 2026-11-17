@@ -52,6 +52,9 @@ async def test_each_layer_overrides_the_one_before(office: Office, setup) -> Non
     await office.docs.save_profile(f"team:{team.id}", {"rules": {"R-NO-ORPHAN": "error"}})
     assert await orphan(office, child) == ["error"], "the team is stricter than the office"
     other = await office.tickets.create("Việc của team khác")
+    elsewhere = await office.teams.create_team("Khác")  # a team kept from before there was only one
+    await office.db.execute("UPDATE tickets SET team_id = ? WHERE id = ?", (elsewhere.id, other.id))
+    other = await office.tickets.get(other.id)
     assert office.docs.pack_of(other).rules["R-NO-ORPHAN"].severity == "warn", "another team is not touched"
 
     await office.docs.save_profile(f"project:{epic.project_id}", {"rules": {"R-NO-ORPHAN": "off"}})
@@ -76,6 +79,9 @@ async def test_a_team_follows_its_own_pack(office: Office, setup, tmp_path: Path
     assert office.docs.pack_of(child).name == "acme" and await orphan(office, child) == ["error"]
     assert (await office.teams.gate_policy(child, "design")).roles == ["architect"], "gates come from the team's pack"
     outsider = await office.tickets.create("x")
+    elsewhere = await office.teams.create_team("Khác")
+    await office.db.execute("UPDATE tickets SET team_id = ? WHERE id = ?", (elsewhere.id, outsider.id))
+    outsider = await office.tickets.get(outsider.id)
     assert (await office.teams.gate_policy(outsider, "design")).roles == ["lead"] and office.docs.pack.name == "default"
     view = await office.docs.profile_view(f"team:{team.id}")
     assert view["pack"]["name"] == "acme" and "acme" in view["packs"] and {"id": "R-NO-ORPHAN", "type": "traces_to", "severity": "error"} in view["rules"]

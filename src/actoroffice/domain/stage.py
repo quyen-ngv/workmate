@@ -226,4 +226,15 @@ def default_gates() -> dict[str, GatePolicy]:
         "script": GatePolicy(roles=["dev", "lead"], fallback="owner", external=True),
         "merge": GatePolicy(roles=["dev", "lead"], fallback="owner", external=True),
         "knowledge": GatePolicy(roles=["ba", "dev", "lead", "owner"], fallback="owner"),
+        # decisions that are not a stage of a ticket, set like the gates
+        "proposal": GatePolicy(roles=["ba", "lead", "owner"], fallback="owner"),  # tickets the AI proposes become real
+        "env_access": GatePolicy(roles=["dev", "lead"], fallback="owner"),  # time-limited access to a shared environment
     }
+
+
+# What each gate decides, for the page that sets who approves it.
+GATE_TITLES = {
+    "requirement": "Yêu cầu (code)", "plan": "Kế hoạch làm (code)", "accept": "Nghiệm thu", "script": "Script tự động chạy",
+    "merge": "Merge PR", "knowledge": "Kiến thức khi đóng ticket", "analysis": "Phân tích epic", "business": "Nghiệp vụ & chia task (epic)",
+    "design": "Thiết kế của task", "proposal": "Duyệt ticket AI đề xuất (chat)", "env_access": "Cấp quyền vào môi trường",
+}

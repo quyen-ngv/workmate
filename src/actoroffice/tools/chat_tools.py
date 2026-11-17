@@ -53,6 +53,36 @@ async def propose_ticket(args: dict[str, Any], ctx: ToolCtx) -> str:
     )
 
 
+# Pages of the team UI a chat message may send people to (web/static/team/team.js renders them as buttons).
+UI_PAGES = {
+    "new_task": "giao việc mới (form)",
+    "repo": "thêm / sửa repo, dự án (Cài đặt)",
+    "connections": "kết nối Jira, Confluence, Bitbucket, Oracle… (Kết nối)",
+    "rules": "rules của team (Rules)",
+    "kb": "kiến thức và kho tài liệu (Kiến thức)",
+    "standard": "chuẩn tài liệu: mẫu, luật, hướng dẫn (Chuẩn tài liệu)",
+    "people": "người và team, vai trò (Người)",
+    "map": "bản đồ dịch vụ, code (Bản đồ)",
+    "setup": "cài đặt chung: model AI, Telegram (Cài đặt)",
+}
+
+
+async def suggest_actions(args: dict[str, Any], ctx: ToolCtx) -> str:
+    if not ctx.conversation_id:
+        raise ToolError("suggest_actions only works in a chat")
+    actions = []
+    for raw in args.get("actions") or []:
+        page = str((raw or {}).get("page") or "").strip()
+        if page not in UI_PAGES:
+            raise ToolError(f"page must be one of: {', '.join(UI_PAGES)}")
+        actions.append({"page": page, "label": str(raw.get("label") or UI_PAGES[page])[:80]})
+    if not actions:
+        raise ToolError("Give at least one action")
+    text = str(args.get("text") or "").strip() or "Bạn có thể làm ở đây:"
+    await ctx.office.chat.post_actor(ctx.conversation_id, ctx.actor, text[:1000], meta={"actions": actions[:6]}, wake=False)
+    return f"Posted {len(actions)} button(s) under your message. Do not repeat them in your reply."
+
+
 async def chat_create_group(args: dict[str, Any], ctx: ToolCtx) -> str:
     office = ctx.office
     ids = [ctx.actor.id]
@@ -152,6 +182,24 @@ CHAT_TOOLS: list[ToolDef] = [
         propose_ticket,
     ),
     PROPOSE_TICKETS,
+    ToolDef(
+        "suggest_actions",
+        "Put one or more buttons in the chat that open a page of the team UI, with a short line saying why. Use it when the person "
+        "has to do something there themselves (add a repository, connect Jira or Bitbucket, add a rule, a knowledge item, change the "
+        "document standard, add people). Pages: " + "; ".join(f"{k} = {v}" for k, v in UI_PAGES.items()) + ".",
+        schema(
+            {
+                "text": {"type": "string", "description": "One short line: what to do there and why"},
+                "actions": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"page": {"type": "string", "enum": list(UI_PAGES)}, "label": {"type": "string"}}, "required": ["page"]},
+                },
+            },
+            required=["actions"],
+        ),
+        suggest_actions,
+        activity="quiet",
+    ),
     ToolDef(
         "chat_create_group",
         "Create a group chat with colleagues (the user is always added) and post your opening message, to discuss "

@@ -131,4 +131,5 @@ async def test_publish_goes_through_a_wiki_connection_that_may_write(office: Off
     assert (await office.tickets.get(ticket.id)).confluence_url == "https://wiki.test/BIL/1"
 
     loose = await office.tickets.create("Không team", description="x")
+    await office.db.execute("UPDATE tickets SET team_id = ? WHERE id = ?", (other.id, loose.id))  # a team with no space
     assert await office.knowledge.publish(loose.id) == [] and "chưa khai space" in caplog.text

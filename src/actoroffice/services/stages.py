@@ -115,7 +115,7 @@ class StageService:
         ticket = await office.tickets.get(ref)
         if ticket.stage:
             raise Conflict(f"{ticket.key} đã ở giai đoạn {ticket.stage}")
-        team_id = team_id or ticket.team_id
+        team_id = team_id or ticket.team_id or await office.teams.default_team_id(create=True)  # one team: its workflows and gates
         probe = ticket.model_copy(update={"stage_template": template, "team_id": team_id})
         tpl = await office.teams.template(probe)
         if tpl is None or not tpl.stages:
@@ -262,7 +262,8 @@ class StageService:
 
     async def add_usage(self, stage_run_id: int, usage: Usage, cost: float, session_id: str | None) -> None:
         run = await self.get_run(stage_run_id)
-        total: dict[str, Any] = {k: int(run.usage.get(k) or 0) + int(getattr(usage, k)) for k in Usage.model_fields if k != "model"}
+        total: dict[str, Any] = {k: int(run.usage.get(k) or 0) + int(getattr(usage, k)) for k in Usage.model_fields if k not in ("model", "credits")}
+        total["credits"] = round(float(run.usage.get("credits") or 0) + usage.credits, 4)
         total["model"] = usage.model or run.usage.get("model") or ""
         await self.office.db.execute(
             "UPDATE stage_runs SET usage_json = ?, cost_usd = cost_usd + ?, session_id = COALESCE(?, session_id) WHERE id = ?",

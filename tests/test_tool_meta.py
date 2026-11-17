@@ -221,7 +221,7 @@ def test_metadata_holds_what_the_name_sets_held() -> None:
         "repo_list", "source_search", "docs_search", "docs_grep",
     }  # fmt: skip
     assert names(activity="source") == {"db_query", "db_schema", "logs_search", "logs_errors", "logs_cluster", "logs_trace", "kafka_peek", "mq_peek", "redis_scan"}
-    assert names(activity="quiet") == {"plan_steps", "step_done"}
+    assert names(activity="quiet") == {"plan_steps", "step_done", "suggest_actions"}
     assert names(effect="external") == {"jira_comment", "pr_create", "pr_reply", "repo_fetch"}
     assert names(untrusted=True) == {"source_get", "source_search"}
     assert {t.name for t in catalog().values() if t.reads_source} == {"ticket_get", "doc_get", "jira_issue", "wiki_page", "code_read", "code_outline"}

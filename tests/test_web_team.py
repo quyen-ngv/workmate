@@ -467,7 +467,7 @@ def test_ac10_bad_edit_is_rejected_and_card_stays(office_client) -> None:
     office, c = office_client
     login(c)
     card_id, _ = _propose(office, c)
-    r = c.post(f"/api/interactions/{card_id}/answer", json={"approved": True, "items": [{"n": 1, "workflow": "research"}]}, headers=HEADERS)
+    r = c.post(f"/api/interactions/{card_id}/answer", json={"approved": True, "items": [{"n": 1, "workflow": "deploy"}]}, headers=HEADERS)
     assert r.status_code == 422 and "mục 1" in r.json()["error"]
     assert c.get(f"/api/interactions/{card_id}").json()["status"] == "pending"
 

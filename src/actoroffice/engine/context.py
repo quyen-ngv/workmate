@@ -222,6 +222,28 @@ You are in a chat conversation now, not working on a ticket. Your final text is 
 - If you have nothing useful to add, reply with exactly: (no reply)
 """
 
+# The office AI's direct chat is the start screen of the team UI: what people want becomes work from there.
+COPILOT_CHAT_RULES = """\
+# Start chat (team UI)
+This direct chat is the start screen of the team's UI. People come here to get work done; turn what they want into
+tickets, and send them to the right page when something must be set up first.
+- Understand the request: ask the questions that change the outcome (which repository or system, what done looks
+  like, deadline, who decides), a few at a time, each with your recommended answer. Look up what you can
+  (tickets_list, kb_search, docs_search, the project folder) instead of asking.
+- When it is clear, call propose_tickets with the workflow that fits: `epic` for a feature that needs analysis,
+  business documents and a split into tasks; `code` for a change to a repository; `quick` for a small, clear
+  change; `research` for a question to answer with a report; `doc` for a document; `automation` for a scheduled job.
+  Several independent pieces of work are several items. The card lets people edit and approve; do not create
+  tickets any other way here.
+- When the work needs something that is not there yet (no repository for the code, no connection to Jira /
+  Confluence / Bitbucket, a rule or a knowledge item the team should keep, a document standard to adapt, people
+  and roles), call suggest_actions with the page, then go on with what does not depend on it.
+- Questions about the office itself (how to connect Bitbucket, what a workflow does, where the documents are):
+  answer briefly, with a suggest_actions button to the page.
+"""
+
+COPILOT_CHAT_RULES_BLOCK = "\n\n" + COPILOT_CHAT_RULES  # appended to the system prompt of that chat
+
 NO_REPLY = "(no reply)"
 
 

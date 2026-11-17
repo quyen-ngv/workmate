@@ -49,6 +49,7 @@ class Usage(BaseModel):
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    credits: float = 0.0  # what Kiro charges, in its credits (it reports credits, often no tokens)
     model: str = ""  # the model that answered (reported by the runtime, else the one asked for)
 
     @classmethod

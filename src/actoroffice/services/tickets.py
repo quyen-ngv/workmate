@@ -34,6 +34,7 @@ class TicketService:
         self.wakes = wakes
         self.bus = bus
         self.key_prefix = key_prefix
+        self.default_team: Any = None  # async () -> id of THE team or None (set by the office: TeamService)
 
     # ---- tickets ----------------------------------------------------------------------------
 
@@ -54,19 +55,21 @@ class TicketService:
         due_at: str | None = None,
     ) -> Ticket:
         now = utcnow()
+        team_id = await self.default_team() if self.default_team is not None else None  # one team: every ticket is its
         async with self.db.tx() as tx:
             if parent_id is not None:
-                parent = await tx.fetchone("SELECT origin_conversation_id, project_id FROM tickets WHERE id = ?", (parent_id,))
+                parent = await tx.fetchone("SELECT origin_conversation_id, project_id, team_id FROM tickets WHERE id = ?", (parent_id,))
                 if parent:
                     origin_conversation_id = origin_conversation_id or parent["origin_conversation_id"]
                     project_id = project_id or parent["project_id"]
+                    team_id = parent["team_id"] or team_id
             if project_id is None and origin_conversation_id:
                 conv = await tx.fetchone("SELECT project_id FROM conversations WHERE id = ?", (origin_conversation_id,))
                 project_id = conv["project_id"] if conv else None
             cur = await tx.execute(
                 "INSERT INTO tickets(key, project_id, type, title, description, status, priority, "
-                "assignee_actor_id, parent_id, created_by, origin_conversation_id, due_at, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "assignee_actor_id, parent_id, created_by, origin_conversation_id, due_at, created_at, updated_at, team_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id("tmp"),
                     project_id,
@@ -82,6 +85,7 @@ class TicketService:
                     due_at,
                     now,
                     now,
+                    team_id,
                 ),
             )
             ticket_id = int(cur.lastrowid or 0)

@@ -46,7 +46,13 @@ PROPOSE_TICKETS = ToolDef(
                         "title": {"type": "string"},
                         "why": {"type": "string", "description": "Why it is needed, with the evidence (file:line, message, page)"},
                         "description": {"type": "string", "description": "What is wanted, with draft acceptance criteria"},
-                        "workflow": {"type": "string", "enum": ["code", "quick"], "description": "Suggested workflow (default code)"},
+                        "workflow": {
+                            "type": "string",
+                            "enum": ["code", "quick", "epic", "research", "doc", "automation"],
+                            "description": "code: a change to a repository (understand → plan → build → PR); quick: a small, clear change; "
+                            "epic: a feature that needs analysis, business documents and tasks first; research: a question to answer with a "
+                            "report; doc: a document to write; automation: a scheduled or repeated job. Default code.",
+                        },
                         "project": {"type": "string", "description": "Project name or id (default: the project of this chat/ticket)"},
                         "priority": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
                         "depends_on": {

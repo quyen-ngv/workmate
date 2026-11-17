@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 S = TicketStatus
 
 MAX_ITEMS = 20
-WORKFLOWS = ("code", "quick")
+WORKFLOWS = ("code", "quick", "epic", "research", "doc", "automation")  # what a proposed ticket may follow
 APPROVER_ROLES = ["owner", "lead"]
 BACKLOG_LIMIT = 50
 _KEY = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
@@ -71,7 +71,7 @@ class ProposalService:
                     raise ProposalError(f"mục {n}: thiếu trường {field}")
             workflow = _text(raw.get("workflow")) or "code"
             if workflow not in WORKFLOWS:
-                raise ProposalError(f"mục {n}: trường workflow phải là code hoặc quick, nhận '{workflow}'")
+                raise ProposalError(f"mục {n}: trường workflow phải là một trong {', '.join(WORKFLOWS)}, nhận '{workflow}'")
             try:
                 priority = Priority(_text(raw.get("priority")) or "medium").value
             except ValueError as exc:
@@ -163,18 +163,21 @@ class ProposalService:
     # ---- answer -------------------------------------------------------------------------------------
 
     async def can_approve(self, by: str, source: Ticket | None) -> bool:
+        """Who may turn proposals into tickets: the roles of the gate `proposal` (set on the Người page)."""
         if by == LOCAL_OWNER_ID:
             return True
+        roles = (await self.office.teams.gate_policy(source, "proposal")).roles or APPROVER_ROLES
         if source is not None:
-            return await self.office.teams.can_act(by, source, APPROVER_ROLES)
-        return await self.office.teams.has_role_anywhere(by, APPROVER_ROLES)
+            return await self.office.teams.can_act(by, source, roles)
+        return await self.office.teams.has_role_anywhere(by, roles)
 
     async def answer(self, item: Interaction, response: dict[str, Any], *, by: str) -> Interaction:
         office = self.office
         p = item.payload
         source = await office.tickets.get(item.ticket_id) if item.ticket_id else None
         if not await self.can_approve(by, source):
-            raise PolicyDenied("Chỉ owner hoặc lead được duyệt đề xuất ticket")
+            roles = (await office.teams.gate_policy(source, "proposal")).roles or APPROVER_ROLES
+            raise PolicyDenied(f"Chỉ người giữ vai {', '.join(roles)} được duyệt đề xuất ticket (đổi ở trang Người › Ai duyệt bước nào)")
         chosen, dropped = await self._chosen(p.get("items") or [], response) if response.get("approved") else ([], [])
         if not chosen:
             resolved = await office.interactions.resolve(item.id, {"approved": False}, by=by)
@@ -274,6 +277,7 @@ class ProposalService:
         team_id = p.get("team_id")
         if not team_id and it.get("project_id"):
             team_id = (await office.projects.get(it["project_id"])).team_id
+        team_id = team_id or await office.teams.default_team_id(create=True)  # one team
         ticket = await office.tickets.create(
             it["title"],
             description=body,

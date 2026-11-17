@@ -41,6 +41,15 @@ class Settings(BaseModel):
     # the built-in pack. A unit's pack usually says `extends: default` and changes only what differs.
     doc_pack: str | None = None
     doc_sweep_s: float = 600  # how often approved documents are compared with the code they cite (0 = off)
+    # The documents repository (services/docrepo.py): every document, ticket card and knowledge item as a Markdown file
+    # in a git folder, kept in step both ways. None = off. A relative path is under data_dir.
+    docs_repo: str | None = None
+    docs_branch: str = "main"
+    docs_remote: str | None = None  # a git URL or `KEY/repo`; None = the folder's own `origin` remote, if any
+    docs_connection: str | None = None  # the code-host connection whose credential pushes and fetches `docs_remote`
+    docs_scan_s: float = 5  # how often the folder is looked over for files changed outside the office (0 = only before a commit)
+    docs_commit_s: float = 20  # quiet seconds after the last change before a commit (an approval commits at once)
+    docs_pull_s: float = 120  # how often the remote is fetched (0 = only when a code host announces a push)
     index_sweep_s: float = 300  # how often the code index is brought up to the main branches in the background (0 = off)
     code_api_connections: list[str] = []  # code-host connections that must not be cloned: read through the API instead
     ai_review: bool = True  # an independent reviewer session reads the diff before a build stage finishes
@@ -68,6 +77,13 @@ class Settings(BaseModel):
             return None
         direct = Path(self.doc_pack).expanduser()
         return direct if direct.is_absolute() or direct.exists() else self.data_dir / "packs" / self.doc_pack
+
+    @property
+    def docs_repo_path(self) -> Path | None:
+        if not self.docs_repo:
+            return None
+        path = Path(self.docs_repo).expanduser()
+        return path if path.is_absolute() else self.data_dir / path
 
     @property
     def config_path(self) -> Path:

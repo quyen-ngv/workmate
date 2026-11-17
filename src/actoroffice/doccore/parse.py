@@ -70,6 +70,7 @@ def parse(body: str, doctype: str, pack: StandardPack) -> ParsedDoc:
     section = ""
     open_sections: list[tuple[int, str]] = []  # the headings we are under: (level, name)
     boxed: dict[str, None] = {}  # ids seen in a table row or on a checkbox line, in order
+    loose: list[tuple[str, str]] = []  # (section, line) of the lines that belong to no item: where document links are written
     fenced = in_changelog = has_changelog = has_table = False
 
     def close() -> None:
@@ -131,6 +132,8 @@ def parse(body: str, doctype: str, pack: StandardPack) -> ParsedDoc:
         if current:
             current.lines.append(line)
             current.plain.append(line)
+        elif line.strip():
+            loose.append((section, line))
     close()
 
     items = [_item(o, pack, spec.items) for o in done]
@@ -163,7 +166,7 @@ def parse(body: str, doctype: str, pack: StandardPack) -> ParsedDoc:
                 f"các dòng {pack.syntax.trace[0]} / {pack.syntax.source[0]} ngay dưới nó) thì máy mới đọc được; bảng chỉ để tóm tắt các mục đã có."
             )
             problems.append(Problem(code="unparsed_id", item=it, message=message))
-    return ParsedDoc(doctype=doctype, version_line=version_line, sections=sections, items=items, problems=problems)
+    return ParsedDoc(doctype=doctype, version_line=version_line, sections=sections, items=items, problems=problems, relations=_loose_relations(loose, pack))
 
 
 def parse_sources(text: str, pack: StandardPack | None = None, kinds: list[str] | tuple[str, ...] = ()) -> list[SourceRef]:
@@ -236,6 +239,33 @@ def _named_lines(lines: list[str], named: dict[str, list[str]]) -> dict[str, lis
     return out
 
 
+def _refs(value: str) -> list[str]:
+    """The ids of one line, as `<ticket>/<item>`, `<item>` or `<ticket>`: which of the last two a bare id is, is the
+    reader's call (`trace.link_target`)."""
+    return [f"{ticket}/{item}" if ticket else item for ticket, item in REF_RE.findall(value)]
+
+
+def _loose_relations(loose: list[tuple[str, str]], pack: StandardPack) -> dict[str, list[str]]:
+    """Links of the document as a whole: a relation line outside any item (`Phụ thuộc: AO-14`), and every id on the
+    lines of a section named after a relation (`## Phụ thuộc`)."""
+    out: dict[str, list[str]] = {}
+    for name, words in pack.syntax.relations.items():
+        words = [w.strip() for w in words if w.strip()]
+        if not words:
+            continue
+        pattern = _keyword_re(words)
+        found: list[str] = []
+        for section, line in loose:
+            m = pattern.match(line)
+            if m:
+                found += _refs(m.group(1))
+            elif any(section.casefold().startswith(w.casefold()) for w in words) and not line.lstrip().startswith("|"):
+                found += _refs(line)
+        if found:
+            out[name] = list(dict.fromkeys(found))
+    return out
+
+
 def _keyword_re(words: list[str]) -> re.Pattern[str]:
     names = "|".join(re.escape(w.strip()) for w in words if w.strip())
     return re.compile(rf"^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?(?:{names})[ \t]*(?::(?:\*\*|__)?|(?:\*\*|__):)[ \t]*(.*)$", re.IGNORECASE)
@@ -253,8 +283,9 @@ def _item(o: _Open, pack: StandardPack, kinds: list[str]) -> Item:
         return [m.group(1).strip() for line in o.plain if (m := pattern.match(line))]
 
     def ids(words: list[str]) -> list[str]:
-        found = [f"{ticket}/{item}" if ticket else item for value in values(words) for ticket, item in REF_RE.findall(value)]
-        return list(dict.fromkeys(found))
+        return list(dict.fromkeys(ref for value in values(words) for ref in _refs(value)))
+
+    relations = {name: found for name, words in syntax.relations.items() if [w for w in words if w.strip()] and (found := ids(words))}
 
     return Item(
         id=o.id,
@@ -270,6 +301,7 @@ def _item(o: _Open, pack: StandardPack, kinds: list[str]) -> Item:
         answer=" ".join(v for v in values(syntax.answer) if v),
         tags=list(dict.fromkeys(tags)),
         lines=_named_lines(o.plain, syntax.lines),
+        relations=relations,
     )
 
 

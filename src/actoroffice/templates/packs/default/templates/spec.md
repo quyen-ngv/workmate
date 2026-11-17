@@ -35,7 +35,11 @@ Truy vết: REQ-1
 - Điều người đọc dễ tưởng là có nhưng task này không làm, kèm lý do; hoặc "không có".
 
 ## 7. Phụ thuộc
-- Task, hệ thống hoặc dữ liệu phải có trước.
+Mỗi dòng một thứ phải có trước, kèm lý do. Ticket hoặc task khác thì ghi mã của nó (mã ticket, ID task của breakdown,
+hoặc `<mã ticket>/<ID mục>` khi phụ thuộc đúng một mục): máy đọc các mã trong mục này thành liên kết "phụ thuộc".
+Hệ thống hoặc dữ liệu bên ngoài thì ghi bằng lời. Không có thì ghi "không có".
+
+- <mã ticket hoặc ID> — <cần gì ở đó, vì sao>
 
 ## 8. Câu hỏi mở
 Còn câu hỏi chưa có dòng "Trả lời" thì chưa duyệt được; câu đã trả lời thì giữ lại. Không có câu hỏi thì ghi "không có".

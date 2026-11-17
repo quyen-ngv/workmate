@@ -98,9 +98,13 @@ class WebhookService:
         return result
 
     async def _on_push(self, connection_id: str, event: WebhookEvent) -> str:
-        """Index again every repository of the office that is this pushed repository, when its main branch moved."""
+        """Index again every repository of the office that is this pushed repository, when its main branch moved. A push
+        to the remote of the documents repository brings it in at once."""
         office = self.office
         touched = []
+        if office.docrepo.is_remote(connection_id, event.repo) and (not event.ref or event.ref == office.settings.docs_branch):
+            done = await office.docrepo.sync()
+            touched.append("docs repo" + (f" → {done['error']}" if done.get("error") else ""))
         for repo in await office.codeintel.all_repos():
             project = await office.projects.get(repo.project_id) if repo.project_id else None
             mine = (repo.remote is not None and repo.remote.connection == connection_id and repo.remote.slug.lower() == event.repo.lower()) or (

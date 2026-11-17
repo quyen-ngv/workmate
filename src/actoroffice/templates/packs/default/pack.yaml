@@ -16,6 +16,10 @@ syntax:                           # từ khoá parser nhận; đơn vị viết 
     option: ["Phương án"]         # "Phương án A: …"
     choice: ["Chọn"]              # "Chọn: A — vì …"
     chosen_by: ["Chọn bởi"]       # "Chọn bởi: Minh"
+  relations:                      # liên kết có kiểu tới mục khác / ticket khác: một dòng dưới mục, ngoài mọi mục, hoặc cả mục "## <từ>"
+    depends_on: ["Phụ thuộc"]     # "Phụ thuộc: T-1" · "Phụ thuộc: AO-14" · "Phụ thuộc: AO-14/C-2" (phải có cái kia trước)
+    relates: ["Liên quan"]        # đụng cùng một chỗ, nên đọc của nhau; không chặn nhau
+    supersedes: ["Thay thế"]      # cái này thay cho cái kia
   version_line: 'Phiên bản: \d+'
   changelog: "Change log"
 
@@ -72,6 +76,8 @@ rules:                             # mỗi luật = một kiểu nguyên thuỷ 
   R-D-OPTIONS: {type: has_line,  kinds: [D], line: option, min: 2,            severity: error}
   R-D-CHOICE:  {type: has_line,  kinds: [D], line: choice,                    severity: error}
   R-D-CHOSEN-BY: {type: has_line, kinds: [D], line: chosen_by,                severity: error}
+  # Thứ tự làm không thể là một vòng: T-1 cần T-2 mà T-2 lại cần T-1
+  R-DEP-ACYCLIC: {type: acyclic, relation: depends_on,                        severity: error}
 
 crosschecks:                       # lượt đối chiếu AI: cặp nào, ở gate nào
   X-ANALYSIS-CODE: {left: analysis, right: evidence, at: [analysis]}
@@ -130,6 +136,12 @@ instructions:                      # viết một lần; stage ghép các khối
     Machine-read lines, written directly under an item, one per line, outside code blocks: `Truy vết: <ids>` (ids of
     other documents are written `<TICKET>/<id>`, e.g. `AO-12/REQ-2`), `Nguồn: <repo:path:start-end | ticket key | URL>`,
     `Thay đổi: F-n`, `Trả lời: …` under an answered question, `Trích: "<exact words>"` or `Trích: `<exact code>``.
+    Links to other work are machine-read too, written the same way (under an item, or on a line of their own for
+    the document as a whole): `Phụ thuộc: <ids>` (this needs that first), `Liên quan: <ids>` (touches the same thing:
+    read each other), `Thay thế: <ids>` (this replaces that). An id there is a ticket (`AO-14`), an item of another
+    ticket (`AO-14/C-2`) or an item of this ticket's documents (`T-1`). The office checks that each one exists, hands
+    you the linked tickets in the Context block, and sends a document back to its author when an item it is linked
+    to changes after approval: so link to the exact item you rely on, and only to what you really rely on.
     Take every `Nguồn:` from a tool result (code_search, code_read, code_symbol give it ready to paste): the office
     opens each one and refuses a source that does not exist. Under every F, and every C that changes existing code,
     add `Trích:` with the exact line(s) you rely on, copied from the tool result, never retyped from memory.
@@ -163,7 +175,11 @@ instructions:                      # viết một lần; stage ghép các khối
     with the list of tasks, the alternatives and your recommendation; note the chosen split and who chose it under
     "Mục tiêu".
     Write the document `breakdown`: one `T-n` per task (a title a developer understands, what it covers, `Truy vết:`
-    to the REQ it serves) and the dependencies between tasks in "Thứ tự và phụ thuộc". Then, for every `T-n`, write
+    to the REQ it serves). A task that needs another one first gets `Phụ thuộc: T-m` directly under it; tasks that
+    touch the same screen, table or module without blocking each other get `Liên quan: T-m`. A task that needs a
+    ticket outside this epic names it by key (`Phụ thuộc: AO-14`). "Thứ tự và phụ thuộc" then sums the order up in
+    its table with the reason for each dependency; the lines under the tasks are what the office reads, and they
+    become links between the tickets when the breakdown is approved. Then, for every `T-n`, write
     its business spec as the document `spec.T-n` from the `spec` template: user stories `US-n`, acceptance criteria
     `AC-n.m` (Given / When / Then, one observable outcome each; cover the error, permission, empty and limit cases,
     not only the happy path), business rules `BR-n`. Use the terms of the analysis. Each AC or BR traces to the
@@ -182,7 +198,8 @@ instructions:                      # viết một lần; stage ghép các khối
        - the task's `spec` (doc_get);
        - the epic's `analysis` and `breakdown` on the parent ticket (doc_get with the parent's key), including
          "Thứ tự và phụ thuộc";
-       - for every task this one depends on, or that touches the same module: that sibling's `design` if it exists
+       - for every ticket the Context block lists under "Linked tickets" (what this task depends on, what depends
+         on it, what touches the same thing), and any sibling that touches the same module: its `design` if it exists
          (ticket_get(<parent key>) lists the sub-tickets; doc_get(ticket=<sibling key>, key=design)). What a sibling
          designed is a constraint: reuse its names and interfaces, do not design the same thing twice;
        - kb_search for decisions, code notes and contracts about the area;

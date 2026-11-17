@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from actoroffice.doccore import Approved, Baseline, Evidence, Finding, MatchState, ParsedDoc, StandardPack, impact, match_state, parse, run_rules
+from actoroffice.doccore import LINK_VALID, Approved, Baseline, Evidence, Finding, MatchState, ParsedDoc, StandardPack, impact, link_target, match_state, parse, run_rules
 from actoroffice.doccore.model import MATCH_STATE_VI, SourceRef, finding_id, make_finding
 from actoroffice.domain.errors import NotFound, OfficeError, PolicyDenied
 from actoroffice.domain.ids import utcnow
@@ -37,6 +37,7 @@ log = logging.getLogger(__name__)
 EXCERPT_LIMIT = 4000
 SPEC_PER_TASK = "R-SPEC-PER-TASK"
 UPSTREAM_EDITED = "R-UPSTREAM-EDITED"
+DEP_READY = "R-DEP-READY"  # a warning: what this ticket depends on has no approved document of the kind being written
 MIN_ID_PREFIX = 8  # the length people see in a findings list
 
 
@@ -54,6 +55,9 @@ class DocSet:
     # core key → current revision of an own document that is read here at its approved revision, because somebody
     # rewrote it outside the stage that writes it
     edited: dict[str, int] = field(default_factory=dict)
+    # core keys of the documents of tickets this one is only linked to (what it depends on): there to check
+    # `<ticket>/<id>` references and to notice their changes, never what a bare id means
+    far: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -226,11 +230,12 @@ class DocService:
 
     # ---- what a check looks at -------------------------------------------------------------------------------
 
-    async def docset(self, ticket: Ticket) -> DocSet:
+    async def docset(self, ticket: Ticket, *, linked: bool = False) -> DocSet:
         """The documents the ticket's current stage writes at their current revision; its other documents and its
         parent's at the approved one (the current one when nothing is approved yet): what the stage's documents are
         written from. An approved document rewritten outside the stage that writes it is still read as approved, and
-        noted in `edited`."""
+        noted in `edited`. `linked`: also the documents of the tickets it depends on or names an item of
+        (`LinkService.upstream`), noted in `far`: what the rules need to check `AO-14/C-2` and to see it change."""
         office = self.office
         docs: dict[str, ParsedDoc] = {}
         own: dict[str, Document] = {}
@@ -261,7 +266,21 @@ class DocService:
                 body = await self._body(parent.id, doc.key, doc.approved_revision) if doc.approved_revision else doc.body
                 docs[key] = parse(body, doctype, pack)
                 stored[key] = (parent.id, doc.key)
-        return DocSet(docs, own, stored, edited)
+        far: set[str] = set()
+        if linked:
+            for other in await office.links.upstream(ticket):
+                if other.id == ticket.parent_id:
+                    continue
+                for doc in await office.tickets.list_documents(other.id):
+                    doctype = self.doctype_of(doc.key, pack)
+                    key = self.core_key(other, doc.key)
+                    if doctype is None or "." in doc.key or key in docs:
+                        continue
+                    body = await self._body(other.id, doc.key, doc.approved_revision) if doc.approved_revision else doc.body
+                    docs[key] = parse(body, doctype, pack)
+                    stored[key] = (other.id, doc.key)
+                    far.add(key)
+        return DocSet(docs, own, stored, edited, far)
 
     async def stage_outputs(self, ticket: Ticket) -> set[str]:
         """The stored keys the ticket's current stage writes (empty when it is at no stage)."""
@@ -328,6 +347,12 @@ class DocService:
                 if doc.key in wanted and not any(k.endswith("/" + doc.key) for k in found):
                     # the nearest one: a task's own spec before the epic's
                     found[self.core_key(owner, doc.key)] = doc.approved_revision or doc.revision
+        for other in await office.links.upstream(ticket):  # what it depends on: a change there must reach this document
+            if other.id == ticket.parent_id:
+                continue
+            for doc in await office.tickets.list_documents(other.id):
+                if self.doctype_of(doc.key, pack) is not None and "." not in doc.key:
+                    found.setdefault(self.core_key(other, doc.key), doc.approved_revision or doc.revision)
         baseline = Baseline(docs=found)
         await office.db.execute("UPDATE documents SET baseline_json = ? WHERE ticket_id = ? AND key = ?", (baseline.model_dump_json(), ticket.id, stored_key))
         return baseline
@@ -504,15 +529,16 @@ class DocService:
 
     async def _check(self, ticket: Ticket, stage: StageDef | None, keys: set[str] | None = None) -> tuple[list[Finding], dict[str, str | None]]:
         """The findings, and for each what an acceptance of it is about (`_about`)."""
-        ds = await self.docset(ticket)
+        ds = await self.docset(ticket, linked=True)
         only = keys if keys is not None else (self.output_keys(ticket, stage, ds) if stage is not None else set(ds.own))
         baselines = await self._baselines(ticket, ds)
         pack = self.pack_of(ticket)
         evidence = await self.evidence(ticket, ds)
-        findings = run_rules(pack, ds.docs, evidence, baselines, await self._approved(ticket, ds, baselines), only_docs=only)
+        findings = run_rules(pack, ds.docs, evidence, baselines, await self._approved(ticket, ds, baselines), only_docs=only, far=ds.far)
         findings = [f for f in findings if not self._parents_cover(pack, ds, f)]
         findings += self._specs_per_task(ticket, ds, only)
         findings += self._upstream_edited(ds)
+        findings += await self._links_check(ticket, ds, only)
         about = {f.id: self._about(pack, ds, evidence, f) for f in findings}
         accepted = {
             r["finding_id"]: r for r in await self.office.db.fetchall("SELECT * FROM doc_findings WHERE ticket_id = ?", (ticket.id,))
@@ -560,6 +586,54 @@ class DocService:
             parts += [e.current_hash or "" for e in evidence if f.id == finding_id(f.rule, e.doc, e.item, e.source)]
         return content_hash("|".join(parts)) if parts else None
 
+    async def _links_check(self, ticket: Ticket, ds: DocSet, only: set[str]) -> list[Finding]:
+        """What the core cannot know about typed links: a ticket a link names must exist (error), and a ticket this
+        one depends on should already have an approved document of the kind being written (a warning: the dependent
+        document is looked at again when that one is approved)."""
+        office = self.office
+        pack = self.pack_of(ticket)
+        out: list[Finding] = []
+        known: dict[str, bool] = {}
+        for key in sorted(only & set(ds.own)):
+            parsed = ds.docs[key]
+            holders = [(item.id, item.relations) for item in parsed.items] + [("", parsed.relations)]
+            holders += [(item.id, {"trace": item.traces, "changes": item.changes}) for item in parsed.items]
+            for holder, relations in holders:
+                for relation, refs in relations.items():
+                    for ref in refs:
+                        name = link_target(pack, ref)[0] if relation not in ("trace", "changes") else ref.rpartition("/")[0]
+                        if not name or "." in name:
+                            continue
+                        if name not in known:
+                            try:
+                                await office.tickets.get(name)
+                                known[name] = True
+                            except NotFound:
+                                known[name] = False
+                        if not known[name]:
+                            word = (pack.syntax.relations.get(relation) or getattr(pack.syntax, relation, None) or [relation])[0]
+                            where = f"của {holder}" if holder else "của tài liệu"
+                            message = f'{key}: dòng "{word}" {where} nhắc {ref} nhưng văn phòng không có ticket {name}. Sửa lại mã ticket, hoặc bỏ nó khỏi dòng {word}.'
+                            out.append(make_finding(LINK_VALID, "error", key, holder or None, message, f"{relation}:{ref}"))
+        for link in await office.links.of(ticket):
+            other = link.other
+            if not link.outgoing or link.relation != "depends_on" or other.status in (TicketStatus.DONE, TicketStatus.CANCELLED):
+                continue
+            tpl = await office.teams.template(other) if other.stage_template else None
+            writes = {o for s in (tpl.stages if tpl else []) for out_ in s.outputs for o in out_.split("|")}
+            theirs = {d.key: d for d in await office.tickets.list_documents(other.id)}
+            for key in sorted(only & set(ds.own)):
+                name = ds.own[key].key
+                if "." in name or name not in writes or (name in theirs and theirs[name].approved_revision):
+                    continue
+                state = f"mới ở bản {theirs[name].revision}, chưa duyệt" if name in theirs else "chưa viết"
+                message = (
+                    f"{key}: ticket này phụ thuộc {other.key} ({other.title[:60]}) nhưng `{name}` của {other.key} {state}. Điều {other.key} chốt có thể buộc "
+                    f"tài liệu này phải sửa: khi `{name}` của {other.key} được duyệt, tài liệu này sẽ được kiểm lại."
+                )
+                out.append(make_finding(DEP_READY, "warn", key, None, message, other.key))
+        return out
+
     def _specs_per_task(self, ticket: Ticket, ds: DocSet, only: set[str]) -> list[Finding]:
         """Every task of a breakdown has its spec (`spec.T-n`) before the business is approved."""
         key = self.core_key(ticket, "breakdown")
@@ -575,7 +649,7 @@ class DocService:
         return out
 
     async def states(self, ticket: Ticket, findings: list[Finding] | None = None) -> dict[str, MatchState]:
-        ds = await self.docset(ticket)
+        ds = await self.docset(ticket, linked=True)
         findings = findings if findings is not None else await self.check(ticket)
         baselines = await self._baselines(ticket, ds)
         approved = await self._approved(ticket, ds, baselines)
@@ -832,6 +906,7 @@ class DocService:
         if created:
             keys = ", ".join(c.key for c in created)
             await office.tickets.add_comment(ticket.id, f"🧩 Tạo {len(created)} task từ breakdown: {keys}", author_kind="system", author_id=None)
+        await office.links.sync_family(ticket)  # what the breakdown says between its tasks now holds between their tickets
         return created
 
     async def spawn_plan(self, ticket: Ticket, response: dict[str, Any], *, revision: int | None = None) -> list[SpawnStep]:
@@ -964,11 +1039,11 @@ class DocService:
         approved_docs = [d for d in await office.tickets.list_documents(ticket.id) if self.doctype_of(d.key, pack) and d.approved_revision == d.revision]
         if not approved_docs:
             return []  # nothing approved, or the author is already working on a newer revision
-        ds = await self.docset(ticket)
+        ds = await self.docset(ticket, linked=True)
         baselines = await self._baselines(ticket, ds)
         approved = await self._approved(ticket, ds, baselines)
         evidence = await self.evidence(ticket, ds)
-        findings = run_rules(pack, ds.docs, evidence, baselines, approved, only_docs=set(ds.own))
+        findings = run_rules(pack, ds.docs, evidence, baselines, approved, only_docs=set(ds.own), far=ds.far)
         tpl = await office.teams.template(ticket)
         done: list[dict[str, Any]] = []
         for doc in approved_docs:
@@ -1017,11 +1092,13 @@ class DocService:
         return done
 
     async def sweep(self, *, around: Ticket | None = None) -> list[dict[str, Any]]:
-        """React on every ticket of a pack flow that has an approved document (or only on `around`, its parent and its
-        children: right after an approval). The timer runs the full sweep to notice code that changed."""
+        """React on every ticket of a pack flow that has an approved document (or only on `around`, its parent, its
+        children and the tickets that depend on it: right after an approval). The timer runs the full sweep to notice
+        code that changed."""
         office = self.office
         if around is not None:
             ids = {around.id} | {int(r["id"]) for r in await office.db.fetchall("SELECT id FROM tickets WHERE parent_id = ?", (around.id,))}
+            ids |= set(await office.links.dependents(around.id))
             if around.parent_id is not None:
                 ids.add(around.parent_id)
         else:
@@ -1075,6 +1152,7 @@ class DocService:
 
     async def on_saved(self, ticket: Ticket, stored_key: str) -> None:
         if self.doctype_of(stored_key, self.pack_of(ticket)) is not None:
+            await self.office.links.sync_family(ticket)  # first: what the new text links to is part of what it is written from
             await self.capture_baseline(ticket, stored_key)
 
     async def on_approved(self, ticket: Ticket, item: Interaction) -> None:

@@ -10,6 +10,8 @@ Mỗi thay đổi là một C, viết đủ để người khác làm được m
 - `Nguồn:` file (kèm dòng) nó đụng tới. Thành phần chưa có thì gắn thẻ `[mới]` và trích chỗ nó được gắn vào (nơi gọi, nơi đăng ký, cấu hình).
 - `Trích:` nguyên văn dòng code đang có mà thay đổi này dựa vào, chép từ kết quả tool (C sửa code đã có thì bắt buộc).
 - `Thay đổi: F-n` nếu cố ý làm khác hiện trạng đã ghi trong phân tích.
+- `Phụ thuộc: <mã ticket>/<ID mục>` nếu thay đổi này dùng thứ một task khác thiết kế (API, bảng, tên hàm của nó): khi
+  mục đó đổi sau khi duyệt, design này được gọi lại. `Liên quan: <mã ticket>` nếu chỉ đụng cùng một chỗ.
 
 ### C-1: <thay đổi ở thành phần đã có>
 Hiện tại làm gì, sẽ làm gì; lỗi, chạy đồng thời, gọi lặp lại thì xử lý ra sao.

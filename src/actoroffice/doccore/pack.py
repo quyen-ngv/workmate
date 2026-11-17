@@ -37,6 +37,7 @@ REQUIRED = {
     "declared_change": ("each", "against"),
     "min_items": (),
     "has_line": ("kinds", "line"),
+    "acyclic": ("relation",),
 }
 
 
@@ -207,6 +208,10 @@ def _check(pack: StandardPack) -> list[str]:
         if not [w for w in words if w.strip()]:
             problems.append(f"syntax.lines.{name}: cần ít nhất một từ khoá")
 
+    for name, words in pack.syntax.relations.items():
+        if not [w for w in words if w.strip()]:
+            problems.append(f"syntax.relations.{name}: cần ít nhất một từ khoá")
+
     for name, kind in kinds.items():
         if not KIND_RE.fullmatch(name):
             problems.append(f"item_kinds.{name}: tên loại mục phải là chữ in hoa và số, bắt đầu bằng chữ (ví dụ AC, BR)")
@@ -239,6 +244,8 @@ def _check(pack: StandardPack) -> list[str]:
             problems.append(f"{where}: luật kiểu 'min_items' cần 'each' (ví dụ spec.AC) hoặc cả 'docs' và 'kinds'")
         if rule.line and rule.line not in pack.syntax.lines:
             problems.append(f"{where}.line: loại dòng '{rule.line}' không có trong syntax.lines ({', '.join(pack.syntax.lines) or 'trống'})")
+        if rule.relation and rule.relation not in pack.syntax.relations:
+            problems.append(f"{where}.relation: quan hệ '{rule.relation}' không có trong syntax.relations ({', '.join(pack.syntax.relations) or 'trống'})")
         for param in ("each", "by", "to", "also", "against"):
             for value in getattr(rule, param):
                 selector(f"{where}.{param}", value)

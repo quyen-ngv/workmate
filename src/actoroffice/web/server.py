@@ -433,6 +433,7 @@ def create_app(office: Office, token: str) -> FastAPI:
             "documents": [d.model_dump() for d in await office.tickets.list_documents(t.id)],
             "children": [c.model_dump() for c in children],
             "blockers": await office.tickets.open_blockers(t.id),
+            "links": await office.links.view(t),
             "work_products": await office.tickets.work_products(t.id),
             "runs": [r.model_dump() for r in await office.runs.for_ticket(t.id)],
             "pending": [i.model_dump() for i in await office.interactions.pending(ticket_id=t.id)],

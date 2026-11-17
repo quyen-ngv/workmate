@@ -214,10 +214,11 @@ def names(**wanted: Any) -> set[str]:
 def test_metadata_holds_what_the_name_sets_held() -> None:
     assert names(activity="read") == {
         "list_dir", "doc_get", "ticket_get", "skill_read", "stage_info", "jira_issue", "wiki_page", "code_read", "code_outline", "code_symbol", "source_get",
+        "docs_read", "docs_tree",
     }  # fmt: skip
     assert names(activity="search") == {
         "history_search", "memory_search", "kb_search", "rule_search", "tickets_list", "code_search", "code_refs", "code_impact", "code_pack", "service_map",
-        "repo_list", "source_search",
+        "repo_list", "source_search", "docs_search", "docs_grep",
     }  # fmt: skip
     assert names(activity="source") == {"db_query", "db_schema", "logs_search", "logs_errors", "logs_cluster", "logs_trace", "kafka_peek", "mq_peek", "redis_scan"}
     assert names(activity="quiet") == {"plan_steps", "step_done"}

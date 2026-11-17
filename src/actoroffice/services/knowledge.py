@@ -152,6 +152,25 @@ class KnowledgeService:
         rows = await self.office.db.fetchall("SELECT * FROM kb_items" + (f" WHERE {' AND '.join(where)}" if where else "") + order, params)
         return [_item(r) for r in rows]
 
+    async def edit(self, item_id: int, *, title: str, content: str, by: str) -> KbItem:
+        """A person rewrote an item (in the documents repository): what they wrote is what the team knows, so it is
+        confirmed by them. Kept apart from `note`, which matches items by title and leaves them draft."""
+        item = await self.get(item_id)
+        title = self.office.redact(title.strip())[:200] or item.title
+        content = self.office.redact(content.strip())[:MAX_CONTENT]
+        if not content:
+            raise KbError("content không được trống")
+        async with self.office.db.tx() as tx:
+            await tx.execute(
+                "UPDATE kb_items SET title = ?, content = ?, status = 'verified', verified_by = ?, updated_at = ? WHERE id = ?",
+                (title, content, by, utcnow(), item_id),
+            )
+            await tx.execute("DELETE FROM kb_fts WHERE rowid = ?", (item_id,))
+            await tx.execute("INSERT INTO kb_fts(rowid, title, content) VALUES (?, ?, ?)", (item_id, title, content))
+        item = await self.get(item_id)
+        self.office.bus.publish("kb.changed", item=item.model_dump())
+        return item
+
     async def set_status(self, item_id: int, status: str, *, by: str) -> KbItem:
         if status not in ("draft", "verified", "stale", "rejected"):
             raise KbError("status: draft | verified | stale | rejected")

@@ -68,6 +68,12 @@ uv run actoroffice serve                                  # web: /team (herdr-li
   commands, local git and the repo's test/build commands run; the network, other folders and unknown programs
   ask), **folder** (anything whose paths stay in the code folder runs, any program included) or **full**. "Always allow" on an approval card is remembered for that repo, by command prefix.
 - Runtime per team: Claude (default) or Kiro CLI (`ai_model: kiro` in config.yaml or the team settings).
+- Documents repository: `docs_repo: docs` in config.yaml keeps every epic, story, document and knowledge item as a
+  Markdown file in a git folder (`epics/<KEY>-<name>/stories/<KEY>-<name>/design.md`, `knowledge/…`), within seconds of
+  a change, committed when the office goes quiet. Edits made there (an editor, Kiro, a pushed commit) come back as new
+  revisions. `docs_remote` (+ `docs_connection` for the token) pushes it and pulls on the code host's push event. The
+  AI searches it with `docs_search` / `docs_grep` / `docs_read`; people from the Kiến thức page. Stories link to each
+  other with `Phụ thuộc:` / `Liên quan:` / `Thay thế:` lines in their documents (docs/specs/2026-11-16-doc-graph-and-repo.md).
 - Demo without the LLM: `uv run py scenarios/team_demo.py --home F:/_ao_demo`. Live run with Claude:
   `uv run py scenarios/live_e2e.py --home F:/_ao_live` (uses tokens).
 

@@ -60,6 +60,7 @@ class ToolDef:
       with one. Empty: always offered.
     - `untrusted`: what it returns is content from outside the office, so a call taints the run (acting outside
       afterwards asks a person first).
+    - `enabled`: given the office, whether the tool is offered at all (a feature that is switched off). None: always.
     """
 
     name: str
@@ -72,6 +73,7 @@ class ToolDef:
     reads_source: Callable[[dict[str, Any]], str | None] | None = None
     needs: frozenset[Capability] = frozenset()
     untrusted: bool = False
+    enabled: Callable[[Any], bool] | None = None
 
     def __post_init__(self) -> None:
         if not self.effect:
@@ -105,6 +107,7 @@ TOOL_LISTS = (
     ("actoroffice.tools.atlassian_tools", "ATLASSIAN_TOOLS"),
     ("actoroffice.tools.infra_tools", "INFRA_TOOLS"),
     ("actoroffice.tools.chat_tools", "CHAT_TOOLS"),
+    ("actoroffice.tools.docrepo_tools", "DOCS_TOOLS"),
 )
 
 

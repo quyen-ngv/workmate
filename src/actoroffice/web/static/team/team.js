@@ -681,6 +681,19 @@ function docPanel(d, t) {
     ${kids ? `<ul class="doc-kids">${kids}</ul>` : ""}</div>`;
 }
 
+// Links of a ticket to other tickets: from its documents ("Phụ thuộc: AO-14") or added here.
+function linkPanel(d, t) {
+  const links = d.detail.links || [];
+  if (!links.length && !d.stage?.docs) return "";
+  const rows = links.map((l) => `<span class="link-chip ${esc(l.status)}" title="${esc(l.detail ? "ghi ở " + l.detail : l.origin === "manual" ? "thêm tay" : "")}">
+      ${esc(l.label)}: <button class="link" data-open-ticket="${esc(l.ticket)}">${esc(l.ticket)}${l.item ? "/" + esc(l.item) : ""}</button> ${esc(l.title)}
+      <span class="rev">${esc(l.stage || l.status)}</span>${l.origin === "manual" && l.outgoing ? `<button class="x" data-link-rm="${esc(l.relation)}|${esc(l.ticket)}" title="Bỏ liên kết">×</button>` : ""}</span>`).join("");
+  return `<div class="doc-panel links"><b>Liên kết</b> ${rows || `<span class="rev">chưa có</span>`}
+    ${["done", "cancelled"].includes(t.status) ? "" : `<button class="btn small" data-link-add title="Ticket này phụ thuộc / liên quan / thay thế ticket nào">＋ Liên kết</button>`}</div>`;
+}
+
+const LINK_WORDS = { "phụ thuộc": "depends_on", "phu thuoc": "depends_on", "liên quan": "relates", "lien quan": "relates", "thay thế": "supersedes", "thay the": "supersedes" };
+
 function card(item, key) {
   const p = item.payload || {};
   const who = (p.approver_names || []).join(", ") || p.roles_label || "bạn";
@@ -814,6 +827,7 @@ function renderPane(key) {
     ${steps.length ? `<div class="steps">${steps.map((s, i) => `<div class="s ${s.done ? "done" : i === cur ? "cur" : ""}">${s.done ? "☑" : i === cur ? "▶" : "☐"} ${esc(s.text)}</div>`).join("")}</div>` : ""}
     ${t.stage === "pr" || closed ? reviewList(d.stage?.review) + reviewAcList(d.stage?.review_acs) + uiEvidenceList(d.stage?.ui_evidence, t.key) : ""}
     ${docPanel(d, t)}
+    ${linkPanel(d, t)}
     ${(state.docAlerts[key] || []).map((a, i) => `<div class="doc-alert" role="alert">⚠ Tài liệu <b>${esc(a.key)}</b> đã duyệt hiện <b>${esc(DOC_STATE_VI[a.state] || a.state)}</b>: ${esc(DOC_ACTION_VI[a.action] || DOC_ACTION_VI.notify_author)}
       <button class="x" data-alert-x="${i}" title="Đã biết">×</button></div>`).join("")}
     ${closed ? "" : runError(d.detail.runs)}
@@ -1241,9 +1255,24 @@ async function pageMap() {
   await loadMap();
 }
 
+async function repoSearch(q) {
+  const box = $("[data-repo-hits]");
+  if (!box) return;
+  if (!q.trim()) { box.innerHTML = ""; return; }
+  const hits = await api(`/api/docs-repo/search?q=${encodeURIComponent(q)}`);
+  box.innerHTML = hits.map((h) => `<li><button class="link" data-repo-file="${esc(h.path)}" data-repo-heading="${esc((h.heading || "").split(" › ").pop())}">${esc(h.path)}:${h.line}</button>
+    <span class="rev">${esc(h.heading)}</span><div>${esc(h.snippet).replace(/«/g, "<mark>").replace(/»/g, "</mark>")}</div></li>`).join("") || `<li class="empty">Không có gì khớp.</li>`;
+}
+
 async function pageKb() {
-  const items = await api("/api/kb");
-  sheet("Kiến thức của team", `<table class="list"><tr><th>#</th><th>Loại</th><th>Tiêu đề · nội dung</th><th>Trạng thái</th><th></th></tr>
+  const [items, repo] = await Promise.all([api("/api/kb"), api("/api/docs-repo").catch(() => ({ enabled: false }))]);
+  const files = Object.entries(repo.files || {}).map(([k, n]) => `${n} ${k}`).join(", ");
+  const repoBox = repo.enabled ? `<div class="form repo"><b>Kho tài liệu</b> <span class="rev">${esc(repo.path)} · ${esc(repo.branch)}${repo.remote ? ` → ${esc(repo.remote)}` : ""} · ${esc(files || "trống")}
+      ${repo.head ? ` · ${esc(repo.head)}` : ""}${repo.uncommitted ? " · có thay đổi chưa commit" : ""}</span>${repo.error ? `<span class="chip bad">${esc(repo.error)}</span>` : ""}
+      <button class="btn small" data-repo-sync>⟳ Đồng bộ</button>
+      <label class="grow">Tìm trong mọi tài liệu<input data-repo-q placeholder="ví dụ: hạn mức hoàn tiền, AO-12/REQ-2"></label></div><ul class="repo-hits" data-repo-hits></ul>`
+    : `<div class="rev">Kho tài liệu git chưa bật: đặt <code>docs_repo: docs</code> trong config.yaml để mọi tài liệu thành file Markdown trong một repo git (grep, sửa, review được).</div>`;
+  sheet("Kiến thức của team", repoBox + `<table class="list"><tr><th>#</th><th>Loại</th><th>Tiêu đề · nội dung</th><th>Trạng thái</th><th></th></tr>
     ${items.map((i) => `<tr><td>${i.id}</td><td>${esc(i.kind)}</td><td><b>${esc(i.title)}</b><div>${esc(i.content)}</div>${i.sources.length ? `<div class="chip">${esc(i.sources.join("; "))}</div>` : ""}</td><td>${esc(i.status)}</td>
       <td>${i.status !== "verified" ? `<button class="btn small good" data-kb="${i.id}" data-kb-status="verified">Đúng</button>` : ""}${i.status !== "rejected" ? `<button class="btn small bad" data-kb="${i.id}" data-kb-status="rejected">Sai</button>` : ""}</td></tr>`).join("")}</table>` || `<div class="empty">Chưa có kiến thức.</div>`);
 }
@@ -1628,6 +1657,22 @@ document.addEventListener("click", (e) => {
   const mapEdge = t.closest("[data-map-edge]");
   if (mapEdge) { mapState.picked = Number(mapEdge.dataset.mapEdge); return renderMap(); }
   if (ds.mapCopy !== undefined) return act(async () => { await navigator.clipboard.writeText(mapState.data?.mermaid || ""); toast("Đã chép Mermaid"); });
+  if (ds.linkAdd !== undefined && key) {
+    const text = prompt("Ticket này … ticket nào? Ví dụ: AO-14 phụ thuộc · AO-20 liên quan · AO-9 thay thế");
+    const m = (text || "").trim().match(/^([A-Za-z][A-Za-z0-9]*-\d+)\s*(.*)$/);
+    if (!m) return;
+    const relation = LINK_WORDS[m[2].trim().toLowerCase()] || "relates";
+    return act(async () => { await api(`/api/tickets/${key}/links`, { method: "POST", body: { other: m[1].toUpperCase(), relation } }); await refresh(key); });
+  }
+  if (ds.linkRm && key) {
+    const [relation, other] = ds.linkRm.split("|");
+    return act(async () => { await api(`/api/tickets/${key}/links`, { method: "POST", body: { other, relation, remove: true } }); await refresh(key); });
+  }
+  if (ds.repoSync !== undefined) return act(async () => { const r = await api("/api/docs-repo/sync", { method: "POST" }); toast(r.error ? `Đồng bộ lỗi: ${r.error}` : `Đã đồng bộ (${r.commits.length} commit)`, !!r.error); await pageKb(); });
+  if (ds.repoFile) return act(async () => {
+    const f = await api(`/api/docs-repo/file?path=${encodeURIComponent(ds.repoFile)}&heading=${encodeURIComponent(ds.repoHeading || "")}`);
+    sheet(f.path, `<div class="rev">dòng ${f.first}–${f.last} / ${f.total} <button class="btn small" data-page="kb">← Kiến thức</button></div><div class="doc">${md(f.text)}</div>`);
+  });
   if (ds.grow !== undefined && key) {
     const text = prompt("Bổ sung gì vào epic? (yêu cầu mới, link tài liệu…)");
     if (!text || !text.trim()) return;
@@ -1882,6 +1927,7 @@ document.addEventListener("change", (e) => {
   if (el.dataset?.map === "team") { mapState.service = mapState.module = ""; }
   if (el.dataset?.map === "team" || el.dataset?.map === "tables") { mapState[el.dataset.map] = el.value; return act(loadMap); }
   if (el.dataset?.map === "head") { mapState.head = el.value.trim(); return act(loadMap); }
+  if (el.dataset?.repoQ !== undefined) return act(() => repoSearch(el.value));
   if (el.dataset?.map === "remote" && el.value.trim()) return act(async () => {
     toast("Đang lập chỉ mục repo, có thể mất vài phút…");
     const s = await api("/api/index/remote", { method: "POST", body: { slug: el.value.trim(), team: mapState.team } });

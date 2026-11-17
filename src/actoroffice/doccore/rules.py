@@ -31,6 +31,7 @@ from .pack import StandardPack, split_selector
 from .trace import TraceGraph, doc_ticket, holders_elsewhere, home_ticket, split_ref
 
 TRACE_VALID = "R-TRACE-VALID"
+LINK_VALID = "R-LINK-VALID"  # always on, like R-TRACE-VALID: an item a typed link names must exist
 
 
 @dataclass
@@ -41,13 +42,16 @@ class Context:
     baseline: dict[str, Baseline] = field(default_factory=dict)
     approved: dict[str, Approved] = field(default_factory=dict)
     only: set[str] | None = None
+    far: frozenset[str] = frozenset()  # documents of tickets merely linked to: reached by `<ticket>/<id>` only
     graph: TraceGraph = field(init=False)
 
     def __post_init__(self) -> None:
-        self.graph = TraceGraph(self.docs, self.pack)
+        self.graph = TraceGraph(self.docs, self.pack, self.far)
 
     def keys_of(self, doctypes: set[str]) -> list[str]:
-        return [key for key, doc in self.docs.items() if doc.doctype in doctypes or "*" in doctypes]
+        """The documents a rule looks at: never those of a ticket that is only linked to (`far`), which are there to
+        resolve `<ticket>/<id>` and to notice their changes, not to be covered or checked from here."""
+        return [key for key, doc in self.docs.items() if key not in self.far and (doc.doctype in doctypes or "*" in doctypes)]
 
     def select(self, selectors: list[str]) -> list[tuple[str, Item]]:
         """Items picked by `doctype.KIND` selectors, each once, in document order."""
@@ -65,7 +69,7 @@ class Context:
         ticket, target = split_ref(ref)
         if ticket is None and self.docs[doc_key].item(target):
             return [(doc_key, target)]
-        ticket = home_ticket(self.docs, self.pack, doc_key, target) if ticket is None else ticket
+        ticket = home_ticket(self.docs, self.pack, doc_key, target, self.far) if ticket is None else ticket
         return [(key, target) for key, doc in self.docs.items() if doc_ticket(key) == ticket and doc.item(target)]
 
 
@@ -79,9 +83,10 @@ def run_rules(
     baseline: dict[str, Baseline] | None = None,
     approved: dict[str, Approved] | None = None,
     only_docs: set[str] | list[str] | None = None,
+    far: set[str] | frozenset[str] | None = None,
 ) -> list[Finding]:
-    ctx = Context(pack, docs, evidence, baseline or {}, approved or {}, set(only_docs) if only_docs is not None else None)
-    findings = _trace_valid(ctx)
+    ctx = Context(pack, docs, evidence, baseline or {}, approved or {}, set(only_docs) if only_docs is not None else None, frozenset(far or ()))
+    findings = _trace_valid(ctx) + _link_valid(ctx)
     for rule_id, rule in pack.rules.items():
         findings += PRIMITIVES[rule.type](rule_id, rule, ctx)
     unique = {f.id: f for f in findings if ctx.only is None or f.doc in ctx.only}
@@ -328,6 +333,45 @@ def _has_line(rule_id: str, rule: RuleDef, ctx: Context) -> list[Finding]:
     return findings
 
 
+def _acyclic(rule_id: str, rule: RuleDef, ctx: Context) -> list[Finding]:
+    """No item reaches itself through links of one relation (`T-1` depends on `T-2` depends on `T-1`): such an order
+    cannot be carried out. Looked at across every document given; reported on the items of `docs` that are on a loop."""
+    edges: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    written: dict[tuple[str, str], str] = {}  # node → the document its outgoing links are written in
+    for link in ctx.graph.typed(rule.relation):
+        if not link.item or not link.target:
+            continue
+        node = (doc_ticket(link.doc), link.item)
+        edges.setdefault(node, []).append((link.ticket, link.target))
+        written.setdefault(node, link.doc)
+    wanted = set(ctx.keys_of(set(rule.docs or ["*"])))
+    word = (ctx.pack.syntax.relations.get(rule.relation or "") or [rule.relation or ""])[0]
+    findings = []
+    for start in sorted(edges):
+        if written[start] not in wanted:
+            continue
+        path = _loop(edges, start)
+        if path:
+            names = " → ".join(f"{t}/{i}" if t and t != start[0] else i for t, i in path)
+            message = f'{written[start]}: {start[1]} quay về chính nó qua các dòng "{word}" ({names}). Bỏ một trong các dòng đó: thứ tự làm không thể là một vòng.'
+            findings.append(make_finding(rule_id, rule.severity, written[start], start[1], message, names))
+    return findings
+
+
+def _loop(edges: dict[tuple[str, str], list[tuple[str, str]]], start: tuple[str, str]) -> list[tuple[str, str]]:
+    """The shortest path from `start` back to itself, [] when there is none."""
+    queue, seen = [[start]], {start}
+    while queue:
+        path = queue.pop(0)
+        for nxt in edges.get(path[-1], []):
+            if nxt == start:
+                return [*path, start]
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append([*path, nxt])
+    return []
+
+
 PRIMITIVES: dict[str, Primitive] = {
     "template": _template,
     "cover": _cover,
@@ -339,7 +383,24 @@ PRIMITIVES: dict[str, Primitive] = {
     "declared_change": _declared_change,
     "min_items": _min_items,
     "has_line": _has_line,
+    "acyclic": _acyclic,
 }
+
+
+def _link_valid(ctx: Context) -> list[Finding]:
+    """An item named by a typed link (`Phụ thuộc: T-9`, `Liên quan: AO-14/C-2`) exists, when the documents that would
+    hold it were given. A link to a ticket as a whole is not the core's to judge: the office knows which tickets exist."""
+    findings = []
+    for link in ctx.graph.typed():
+        if not link.target:
+            continue
+        why = _missing(ctx, link.doc, link.ref)
+        if why:
+            word = (ctx.pack.syntax.relations.get(link.relation) or [link.relation])[0]
+            holder = f"của {link.item}" if link.item else "của tài liệu"
+            message = f'{link.doc}: dòng "{word}" {holder} nhắc {link.ref} nhưng {why}. Sửa lại ID cho đúng, hoặc bỏ nó khỏi dòng {word}.'
+            findings.append(make_finding(LINK_VALID, "error", link.doc, link.item or None, message, f"{link.relation}:{link.ref}"))
+    return findings
 
 
 def _trace_valid(ctx: Context) -> list[Finding]:
@@ -365,7 +426,7 @@ def _missing(ctx: Context, doc_key: str, ref: str) -> str | None:
     if ctx.targets(doc_key, ref):
         return None
     if ticket is None:
-        elsewhere = holders_elsewhere(ctx.docs, ctx.pack, doc_key, target)
+        elsewhere = holders_elsewhere(ctx.docs, ctx.pack, doc_key, target, ctx.far)
         if elsewhere is not None:  # the ticket's own documents cannot hold this kind: it is another ticket's item
             if not elsewhere:
                 return None

@@ -7,10 +7,11 @@ Pure: only the standard library, pydantic and yaml. Nothing here imports the res
 from .model import Approved, Baseline, DocReview, DocType, Evidence, Finding, Item, ItemKind, MatchState, ParsedDoc, Problem, RuleDef, SourceRef
 from .pack import PackError, StandardPack, build_pack, load_default, load_pack
 from .parse import parse, parse_sources
-from .rules import PRIMITIVES, TRACE_VALID, match_state, run_rules
-from .trace import TraceGraph, impact
+from .rules import LINK_VALID, PRIMITIVES, TRACE_VALID, match_state, run_rules
+from .trace import Link, TraceGraph, impact, link_target
 
 __all__ = [
+    "LINK_VALID",
     "PRIMITIVES",
     "TRACE_VALID",
     "Approved",
@@ -21,6 +22,7 @@ __all__ = [
     "Finding",
     "Item",
     "ItemKind",
+    "Link",
     "MatchState",
     "PackError",
     "ParsedDoc",
@@ -31,6 +33,7 @@ __all__ = [
     "TraceGraph",
     "build_pack",
     "impact",
+    "link_target",
     "load_default",
     "load_pack",
     "match_state",

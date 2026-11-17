@@ -47,6 +47,7 @@ async def ticket_get(args: dict[str, Any], ctx: ToolCtx) -> str:
             "assignee": assignee,
             "description": ticket.description,
             "open_blockers": blockers,
+            "links": await office.links.view(ticket),
             "documents": [{"key": d.key, "revision": d.revision, "updated_by": d.updated_by} for d in docs],
             "sub_tickets": [{"key": c.key, "title": c.title, "status": c.status.value, "due": c.due_at} for c in children],
             "recent_comments": [

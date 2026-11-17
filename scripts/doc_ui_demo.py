@@ -293,12 +293,15 @@ async def seed(office: Office, root: Path) -> None:
     await office.db.execute("UPDATE tickets SET status = 'in_review' WHERE id = ?", (second.id,))
     for child in (first, second):
         await office.tickets.add_blocker(done.id, child.id)
+    await office.links.add(second, first, "depends_on", by="Lan")  # a link between two stories of the epic
     await office.codeintel.ensure(await office.codeintel.repos(team_id=team.id))
+    await office.knowledge.note(kind="decision", title="Hạn mức là hằng số trong code", content="Chưa ai cần đổi lúc chạy.", by="Copilot", team_id=team.id)
+    await office.docrepo.sync(full=True)  # every document as a file in <data_dir>/docs, committed
 
 
 async def main(port: int) -> None:
     root = Path(tempfile.mkdtemp(prefix="ao_doc_ui_"))
-    office = Office(Settings(data_dir=root / "office", ai_review=False, doc_sweep_s=0))
+    office = Office(Settings(data_dir=root / "office", ai_review=False, doc_sweep_s=0, docs_repo="docs"))
     await office.open()
     await office.start_notifier()
     try:

@@ -404,3 +404,12 @@ svg.map marker path { fill: var(--muted); }
 .map-node.removed rect, .map-node.removed ellipse { stroke: var(--bad, #cf222e); stroke-width: 2.5; stroke-dasharray: 4 3; }
 .map-edge.added line:not(.hit) { stroke: var(--good, #1a7f37); stroke-width: 2; }
 .map-edge.removed line:not(.hit) { stroke: var(--bad, #cf222e); stroke-width: 2; }
+
+.doc-panel.links { display: flex; flex-wrap: wrap; gap: var(--gap-2); align-items: center; }
+.link-chip { border: 1px solid var(--line); border-radius: 999px; padding: 0 var(--gap-2); white-space: nowrap; }
+.link-chip.done, .link-chip.cancelled { opacity: .6; }
+.form.repo { flex-wrap: wrap; align-items: center; }
+.form.repo .grow { flex: 1 1 100%; }
+.repo-hits { list-style: none; padding: 0; margin: 0 0 var(--gap-4); }
+.repo-hits li { padding: var(--gap-2) 0; border-bottom: 1px solid var(--line); font-size: var(--fs-sm); }
+.repo-hits mark { background: var(--warn-bg, #fff3bf); }

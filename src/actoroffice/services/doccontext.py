@@ -6,7 +6,8 @@ does not have to find it (or miss it, or make it up):
 - `grounding`: whether what an item says can be found in what it cites: the names it writes in backticks, the numbers
   it states, the lines it quotes. No model is asked (check `grounded`).
 - `context_block`: the "Context" part of a stage prompt: the approved spec in full when the stage writes a design,
-  where the ticket sits (parent, sibling tasks), the outline of the parent's documents, what is already settled
+  where the ticket sits (parent, sibling tasks), the tickets it is linked to (what it depends on, with the outline of
+  their documents; what depends on it; what touches the same thing), the outline of the parent's documents, what is already settled
   (answered questions, decisions), other open tickets whose documents cite the same files, and the knowledge that
   bears on it with how far each line can be trusted. What does not fit is named, with how to get it.
 - `redo_block`: what a run that starts after a rejection is told besides the reviewer's note.
@@ -40,6 +41,8 @@ SPEC_CAP = 6_000  # characters of an own document given inline
 CONTEXT_CAP = 10_000  # characters of the block besides the inline document (about 2.5k tokens)
 SIBLINGS = 12
 OVERLAPS = 8
+LINKED = 12  # linked tickets named in the block
+LINKED_OUTLINES = 3  # tickets it depends on whose documents are outlined
 KB_LINES = 8
 DEPENDENCY_LINES = 6
 OUTLINE_ITEMS = 40  # items of one parent document named in its outline
@@ -478,6 +481,39 @@ class DocContext:
                 lines.append(f"- [{TRUST[item.status]}] {item.kind} #{item.id} · {item.title}: {squash(item.content)[:400]}")
         return lines
 
+    async def _linked(self, ticket: Ticket, pack: Any) -> list[list[str]]:
+        """The tickets this one is linked to, and the outline of the documents of those it depends on: enough to cite
+        the exact item it relies on (`AO-14/C-2`) and to know what to open."""
+        office = self.office
+        links = await office.links.of(ticket)
+        if not links:
+            return []
+        words = pack.syntax.relations
+        depends = (words.get("depends_on") or ["depends_on"])[0]
+        head = (
+            "## Linked tickets (from the documents, or added by people). What a ticket you depend on settled is a constraint: reuse its names and "
+            f"interfaces, and cite the exact item you rely on (`{depends}: <KEY>/<item id>` under your item), so a change of that item comes back to you"
+        )
+        lines = [head]
+        outlines: list[list[str]] = []
+        for link in links[:LINKED]:
+            other = link.other
+            docs = [d for d in await office.tickets.list_documents(other.id) if office.docs.doctype_of(d.key, pack) and "." not in d.key]
+            people = [m.user.name for m in await office.teams.participants(other.id) if "dev" in m.roles]
+            lines.append(
+                f"- {link.label(words)}: {other.key} · {other.title} · {other.status.value}, stage {other.stage or '-'}"
+                f"{' · ' + ', '.join(people) if people else ''} · documents: {', '.join(self._revisions(d) for d in docs) or 'none yet'}"
+                f"{' · item ' + link.to_item if link.to_item else ''}{' (written in ' + link.detail + ')' if link.detail and link.outgoing else ''}"
+            )
+            if link.outgoing and link.relation == "depends_on" and len(outlines) < LINKED_OUTLINES * 2:
+                for d in [d for d in docs if d.key in ("design", "spec")]:
+                    how = f'doc_get(ticket="{other.key}", key="{d.key}")'
+                    parsed = parse(await self._approved_or_current(d), office.docs.doctype_of(d.key, pack) or "", pack)
+                    outlines.append([f"## Outline of {other.key} {self._revisions(d)} (a ticket you depend on): headings and items only; the text is in {how}"] + self._outline(parsed, how))
+        if len(links) > LINKED:
+            lines.append(f"- … (còn {len(links) - LINKED} liên kết: ticket_get {ticket.key} liệt kê đủ)")
+        return [lines, *outlines]
+
     async def context_block(self, ticket: Ticket, stage: StageDef, *, kb: list[Any] | None = None) -> str:
         """The "Context" part of the stage prompt of a ticket in a pack flow; "" for any other ticket. `kb`: the
         knowledge items the text search found for the ticket (shown after the ones anchored to its files)."""
@@ -540,6 +576,8 @@ class DocContext:
         if settled:
             more = "the documents above hold the rest"
             sections.append(["## Điều đã chốt (settled by people: do not ask it again, do not go against it; to change one, ask with ask_human)"] + capped(settled, SETTLED, more))
+
+        sections += await self._linked(ticket, pack)
 
         own = await self._cited([ticket.id])
         if own:

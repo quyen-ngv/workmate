@@ -24,6 +24,7 @@ from actoroffice.services.runs import ticket_session_key
 from actoroffice.tools.atlassian_tools import ATLASSIAN_TOOLS
 from actoroffice.tools.chat_tools import CHAT_TOOLS
 from actoroffice.tools.code_tools import CODE_TOOLS
+from actoroffice.tools.docrepo_tools import DOCS_TOOLS
 from actoroffice.tools.infra_tools import INFRA_TOOLS
 from actoroffice.tools.knowledge_tools import KNOWLEDGE_TOOLS
 from actoroffice.tools.office_tools import OFFICE_TOOLS
@@ -40,7 +41,7 @@ from .gate import OfficeGate
 from .watchdog import Watchdog
 from .workspace import ticket_env, ticket_tmp
 
-TICKET_TOOLS = OFFICE_TOOLS + KNOWLEDGE_TOOLS + WORK_TOOLS + CODE_TOOLS + SOURCE_TOOLS + [PROPOSE_TICKETS]  # every ticket run (stage tools added on top)
+TICKET_TOOLS = OFFICE_TOOLS + KNOWLEDGE_TOOLS + DOCS_TOOLS + WORK_TOOLS + CODE_TOOLS + SOURCE_TOOLS + [PROPOSE_TICKETS]  # every ticket run (stage tools added on top)
 
 if TYPE_CHECKING:
     from actoroffice.app import Office
@@ -275,6 +276,8 @@ class Executor:
         known: dict[Capability, bool] = {}
         offered = []
         for tool in tools:
+            if tool.enabled is not None and not tool.enabled(office):
+                continue
             for capability in tool.needs:
                 if capability not in known:
                     known[capability] = await office.connections.has(capability, scope)
@@ -431,7 +434,7 @@ class Executor:
                 resume_session_id=resume,
                 internal_tools=[
                     BoundTool(t, ToolCtx(office, actor, position, run_id, conversation_id=conv.id, workspace=cwd))
-                    for t in await self._offered(CHAT_TOOLS + KNOWLEDGE_TOOLS + CHAT_WORK_TOOLS, None)
+                    for t in await self._offered(CHAT_TOOLS + KNOWLEDGE_TOOLS + DOCS_TOOLS + CHAT_WORK_TOOLS, None)
                 ],
                 max_turns=12,
                 hook_timeout_s=office.settings.approval_wait_s + 60,

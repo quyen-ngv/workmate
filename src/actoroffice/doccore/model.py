@@ -13,7 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Severity = Literal["error", "warn"]
-RULE_TYPES = ("template", "cover", "traces_to", "evidence", "fresh", "baseline", "answered", "declared_change", "min_items", "has_line")
+RULE_TYPES = ("template", "cover", "traces_to", "evidence", "fresh", "baseline", "answered", "declared_change", "min_items", "has_line", "acyclic")
 # What a pack may ask for when something changes after approval (spec 6.3). The core only classifies the event.
 REACTIONS = ("ignore", "notify_author", "revise", "reopen_gate", "block")
 
@@ -59,6 +59,9 @@ class Syntax(_Strict):
     # Other lines a rule may ask for under an item (`has_line`): name used by rules → the words a line starts with.
     # A short label may sit between the word and the colon (`Phương án A: …`).
     lines: dict[str, list[str]] = Field(default_factory=dict)
+    # Typed links to other items and other tickets: relation name → the words such a line starts with
+    # (`Phụ thuộc: T-1, AO-14/C-2`). A section whose heading is one of the words is read the same way, line by line.
+    relations: dict[str, list[str]] = Field(default_factory=lambda: {"depends_on": ["Phụ thuộc"], "relates": ["Liên quan"], "supersedes": ["Thay thế"]})
     version_line: str = r"Phiên bản: \d+"
     changelog: str = "Change log"  # heading of the change table
 
@@ -78,6 +81,7 @@ class RuleDef(_Strict):
     providers: list[str] = Field(default_factory=list)
     min: int = Field(default=1, ge=1)  # `min_items`, `has_line`: how many are needed
     line: str | None = None  # `has_line`: a name of `syntax.lines`
+    relation: str | None = None  # `acyclic`: a name of `syntax.relations`
     unless_section: str | None = None
     unless_tag: str | None = None
 
@@ -186,6 +190,8 @@ class Item(BaseModel):
     answer: str = ""
     tags: list[str] = Field(default_factory=list)  # tag names from the pack's syntax ("technical"), not the written word
     lines: dict[str, list[str]] = Field(default_factory=dict)  # name of `syntax.lines` → the values of such lines
+    # name of `syntax.relations` → what the item is linked to, as written: an item (`T-1`, `AO-14/C-2`) or a ticket (`AO-14`)
+    relations: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class Problem(BaseModel):
@@ -204,6 +210,7 @@ class ParsedDoc(BaseModel):
     sections: list[str]
     items: list[Item]
     problems: list[Problem] = Field(default_factory=list)
+    relations: dict[str, list[str]] = Field(default_factory=dict)  # links of the document as a whole (written outside any item)
 
     def item(self, item_id: str) -> Item | None:
         return next((i for i in self.items if i.id == item_id), None)

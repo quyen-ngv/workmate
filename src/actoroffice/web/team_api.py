@@ -23,6 +23,12 @@ from actoroffice.services.docflow import pack_templates
 from actoroffice.services.stages import stage_title
 
 
+class LinkBody(BaseModel):
+    other: str
+    relation: str = "relates"
+    remove: bool = False
+
+
 class PersonBody(BaseModel):
     name: str
     roles: list[str] = Field(default_factory=list)
@@ -620,6 +626,38 @@ def register_rules(app: FastAPI, office: Office) -> None:
     async def import_conventions(project_id: str) -> list[dict[str, Any]]:
         project = await office.projects.get(project_id)
         return [r.model_dump() for r in await rules.import_conventions(project, by=LOCAL_OWNER_ID)]
+
+    # ---- links between tickets, the documents repository ---------------------------------------------------
+
+    @app.get("/api/tickets/{key}/links")
+    async def ticket_links(key: str) -> list[dict[str, Any]]:
+        return await office.links.view(await office.tickets.get(key))
+
+    @app.post("/api/tickets/{key}/links")
+    async def ticket_link(key: str, body: LinkBody, request: Request) -> list[dict[str, Any]]:
+        ticket, other = await office.tickets.get(key), await office.tickets.get(body.other.strip())
+        if body.remove:
+            await office.links.remove(ticket, other, body.relation)
+        else:
+            await office.links.add(ticket, other, body.relation, by=await acting_user(request, office) or LOCAL_OWNER_ID)
+        office.docrepo.touch(ticket.id)
+        return await office.links.view(ticket)
+
+    @app.get("/api/docs-repo")
+    async def docs_repo() -> dict[str, Any]:
+        return await office.docrepo.status()
+
+    @app.post("/api/docs-repo/sync")
+    async def docs_repo_sync() -> dict[str, Any]:
+        return {**await office.docrepo.sync(full=True), "status": await office.docrepo.status()}
+
+    @app.get("/api/docs-repo/search")
+    async def docs_repo_search(q: str, under: str = "", limit: int = 20) -> list[dict[str, Any]]:
+        return await office.docrepo.search(q, under=under, limit=limit)
+
+    @app.get("/api/docs-repo/file")
+    async def docs_repo_file(path: str, heading: str = "") -> dict[str, Any]:
+        return await office.docrepo.read(path, heading=heading)
 
     @app.get("/api/kb")
     async def kb(team_id: str | None = None, status: str | None = None, kind: str | None = None, q: str | None = None) -> list[dict[str, Any]]:

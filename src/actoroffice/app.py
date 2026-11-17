@@ -44,11 +44,13 @@ from actoroffice.services.codeintel import CodeIntelService
 from actoroffice.services.connections import ConnectionService
 from actoroffice.services.crosscheck import CrossCheckService
 from actoroffice.services.doccontext import DocContext
+from actoroffice.services.docrepo import DocRepoService
 from actoroffice.services.docs import DocService
 from actoroffice.services.infra import InfraService
 from actoroffice.services.interactions import InteractionService
 from actoroffice.services.jira import JiraMirror
 from actoroffice.services.knowledge import KnowledgeService
+from actoroffice.services.links import LinkService
 from actoroffice.services.logs import LogService
 from actoroffice.services.mcp_servers import McpServerService
 from actoroffice.services.mcp_tokens import McpTokenService
@@ -128,6 +130,8 @@ class Office:
         docflow.configure(settings.doc_pack_path)  # a pack that is not valid stops the office here, with every problem listed
         self.sourcehub = SourceHub(self)  # documents of outside systems, through whatever is connected
         self.docs = DocService(self)  # Doc Core: documents checked against the standard pack, sources pinned
+        self.links = LinkService(self)  # typed links between tickets, read from the documents or added by people
+        self.docrepo = DocRepoService(self)  # every document as a Markdown file in a git folder, kept in step both ways
         self.teams.pack_of = self.docs.pack_of  # a ticket's flows and gates come from the pack its layers give
         self.crosscheck = CrossCheckService(self)  # the AI comparison of documents that must agree
         self.doccontext = DocContext(self)  # what the office knows around a ticket's documents: context, impact, memory
@@ -173,6 +177,8 @@ class Office:
                 self._tasks.append(asyncio.create_task(self.docs.run_forever(self.settings.doc_sweep_s), name="doc-sweep"))
             if self.settings.index_sweep_s > 0:
                 self._tasks.append(asyncio.create_task(self.codeintel.run_forever(self.settings.index_sweep_s), name="index-sweep"))
+            if self.docrepo.enabled:
+                self._tasks.append(asyncio.create_task(self.docrepo.run_forever(), name="docs-repo"))
 
     async def start_notifier(self) -> None:
         ready = asyncio.Event()

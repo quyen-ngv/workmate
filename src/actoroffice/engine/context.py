@@ -227,6 +227,9 @@ COPILOT_CHAT_RULES = """\
 # Start chat (team UI)
 This direct chat is the start screen of the team's UI. People come here to get work done; turn what they want into
 tickets, and send them to the right page when something must be set up first.
+- A link or a key of Jira, Confluence or another connected system (`ABC-123`, `https://…atlassian.net/browse/…`): read
+  it first with source_get (jira_issue / wiki_page work too) and work from what it says. Only when the tool answers
+  with an error, quote the error and point to the Kết nối page; never assume the system is not connected.
 - Understand the request: ask the questions that change the outcome (which repository or system, what done looks
   like, deadline, who decides), a few at a time, each with your recommended answer. Look up what you can
   (tickets_list, kb_search, docs_search, the project folder) instead of asking.

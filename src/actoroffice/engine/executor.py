@@ -41,6 +41,8 @@ from .gate import OfficeGate
 from .watchdog import Watchdog
 from .workspace import ticket_env, ticket_tmp
 
+# What a chat reads besides talking: documents of the connected systems (Jira, Confluence…), never a write to them.
+CHAT_READ_TOOLS = [*SOURCE_TOOLS, *(t for t in ATLASSIAN_TOOLS if t.read_only and t.effect == "read")]
 TICKET_TOOLS = OFFICE_TOOLS + KNOWLEDGE_TOOLS + DOCS_TOOLS + WORK_TOOLS + CODE_TOOLS + SOURCE_TOOLS + [PROPOSE_TICKETS]  # every ticket run (stage tools added on top)
 
 if TYPE_CHECKING:
@@ -410,6 +412,9 @@ class Executor:
                 f"- {t.key} [{t.status.value}] {t.title} → {names[t.assignee_actor_id].name if t.assignee_actor_id in names else '-'}"
                 for t in await office.tickets.list(limit=8, project_id=conv.project_id)
             ]
+            # the team's MCP servers serve its chat too (the office works as one team)
+            team_id = await office.teams.default_team_id()
+            chat_mcp = office.mcp_servers.resolved(await office.teams.get_team(team_id)) if team_id else None
             spec = TurnSpec(
                 run_id=run_id,
                 prompt=context.chat_prompt(
@@ -438,13 +443,16 @@ class Executor:
                 resume_session_id=resume,
                 internal_tools=[
                     BoundTool(t, ToolCtx(office, actor, position, run_id, conversation_id=conv.id, workspace=cwd))
-                    for t in await self._offered(CHAT_TOOLS + KNOWLEDGE_TOOLS + DOCS_TOOLS + CHAT_WORK_TOOLS, None)
+                    for t in await self._offered(CHAT_TOOLS + KNOWLEDGE_TOOLS + DOCS_TOOLS + CHAT_WORK_TOOLS + CHAT_READ_TOOLS, None)
                 ],
+                mcp_servers=chat_mcp.servers if chat_mcp is not None else {},
                 max_turns=12,
                 hook_timeout_s=office.settings.approval_wait_s + 60,
                 env=self._env(),
             )
             gate = chat_gate = OfficeGate(office, actor, position, run_id, cwd)
+            if chat_mcp is not None:
+                gate.mcp_allowed = chat_mcp.allowed
             replies: list[str] = []
 
             async def collect(kind: str, payload: dict[str, Any]) -> None:

@@ -82,16 +82,21 @@ class _Tickets:
 
 class _Sources:
     """The source hub without the "read" mark: a person reading a document in their IDE is not the AI having read a
-    source of the ticket."""
+    source of the ticket. A person in no team reaches the office-wide connections only (never the team's, which a chat
+    of the office reaches)."""
 
     def __init__(self, office: Office) -> None:
         self._hub = office.sourcehub
 
+    @staticmethod
+    def _within(ticket: Ticket | None) -> Ticket:
+        return ticket if ticket is not None else Ticket(id=0, key="", title="")
+
     async def get(self, ticket: Ticket | None, ref: str) -> Any:
-        return await self._hub.get(ticket, ref)
+        return await self._hub.get(self._within(ticket), ref)
 
     async def search(self, ticket: Ticket | None, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        return await self._hub.search(ticket, query, limit=limit)
+        return await self._hub.search(self._within(ticket), query, limit=limit)
 
     async def mark_read(self, *_args: Any, **_kwargs: Any) -> list[str]:
         return []

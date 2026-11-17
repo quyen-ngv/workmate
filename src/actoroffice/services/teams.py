@@ -196,7 +196,7 @@ class TeamService:
             "INSERT INTO teams(id, name, jira_project_key, confluence_space, settings_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (team.id, team.name, team.jira_project_key, team.confluence_space, team.settings.model_dump_json(), team.created_at),
         )
-        self._default = None  # the oldest team is THE team: look again
+        self._default = self._default or team.id  # the first team made is THE team (an older one was found at start)
         self.bus.publish("people.changed")
         return team
 

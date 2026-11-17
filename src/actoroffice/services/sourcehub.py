@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,7 @@ from actoroffice.ports.docs import DocContent, DocRef
 if TYPE_CHECKING:
     from actoroffice.app import Office
 
+ISSUE_KEY = re.compile(r"[A-Z][A-Z0-9]+-\d+")  # what a tracker issue key looks like
 NOT_CONNECTED = "Chưa có kết nối nào đọc được tài liệu này. Thêm Jira / Confluence (hoặc hệ thống khác) trong Cài đặt › Kết nối."
 
 
@@ -41,8 +43,11 @@ class SourceHub:
         self.office = office
 
     def scope(self, ticket: Ticket | None) -> Scope:
-        # no ticket: the office-wide connections only (the IDE server answers a person outside the team this way)
-        return Scope(team_id=ticket.team_id, project_id=ticket.project_id, ticket_key=ticket.key) if ticket is not None else Scope()
+        """What a call reaches. No ticket (a chat): what is connected for THE team, since the office works as one team.
+        A stand-in ticket without a team (the IDE server for a person in no team) reaches the office-wide ones only."""
+        if ticket is None:
+            return Scope(team_id=self.office.teams._default)
+        return Scope(team_id=ticket.team_id, project_id=ticket.project_id, ticket_key=ticket.key)
 
     async def _sources(self, scope: Scope) -> list[tuple[ConnectionSpec, Any]]:
         out = []
@@ -88,6 +93,24 @@ class SourceHub:
             return Fetched(spec.id, spec.use, doc_ref, content)
         if last is not None:
             raise last
+        if ISSUE_KEY.fullmatch(text):
+            # asked for by itself, a bare `ABC-12` is an issue even when the tracker lists no projects to recognise it by
+            for spec, adapter in sources:
+                if Capability.TRACKER not in getattr(adapter, "capabilities", ()):
+                    continue
+                doc_ref = DocRef(connection=spec.id, ref=text, kind=spec.use)
+                if not adapter.in_scope(doc_ref, scope):
+                    continue
+                try:
+                    content = await adapter.fetch(doc_ref, scope)
+                except ConnectorError as exc:
+                    last = exc
+                    continue
+                await self._remember(spec.id, doc_ref, content)
+                await self.office.audit.record("source:get", "read", ticket_id=ticket.id if ticket else None, target=f"{spec.id}:{doc_ref.ref}", detail={"version": content.version})
+                return Fetched(spec.id, spec.use, doc_ref, content)
+            if last is not None:
+                raise last
         names = ", ".join(spec.id for spec, _ in sources)
         raise ConnectorError("not_found", f"Không kết nối nào ({names}) nhận ra '{text}' là tài liệu của nó.")
 
